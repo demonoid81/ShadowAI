@@ -46,14 +46,39 @@ func main() {
 	policySvc := policy.NewService(policyRepo)
 	budgetSvc := budget.NewService(budgetRepo, redisClient)
 
-	// Provider Registry
+	// Provider Registry — skip providers without API keys
 	registry := proxy.NewRegistry()
-	registry.Register(proxy.NewOpenAIProvider(cfg.OpenAIAPIKey))
-	registry.Register(proxy.NewAnthropicProvider(cfg.AnthropicAPIKey))
-	registry.Register(proxy.NewGeminiProvider(cfg.GeminiAPIKey))
-	registry.Register(proxy.NewMistralProvider(cfg.MistralAPIKey))
-	registry.Register(proxy.NewGroqProvider(cfg.GroqAPIKey))
-	registry.Register(proxy.NewOpenRouterProvider(cfg.OpenRouterAPIKey))
+	if cfg.OpenAIAPIKey != "" {
+		registry.Register(proxy.NewOpenAIProvider(cfg.OpenAIAPIKey))
+	} else {
+		log.Printf("provider openai: skipped (no API key)")
+	}
+	if cfg.AnthropicAPIKey != "" {
+		registry.Register(proxy.NewAnthropicProvider(cfg.AnthropicAPIKey))
+	} else {
+		log.Printf("provider anthropic: skipped (no API key)")
+	}
+	if cfg.GeminiAPIKey != "" {
+		registry.Register(proxy.NewGeminiProvider(cfg.GeminiAPIKey))
+	} else {
+		log.Printf("provider gemini: skipped (no API key)")
+	}
+	if cfg.MistralAPIKey != "" {
+		registry.Register(proxy.NewMistralProvider(cfg.MistralAPIKey))
+	} else {
+		log.Printf("provider mistral: skipped (no API key)")
+	}
+	if cfg.GroqAPIKey != "" {
+		registry.Register(proxy.NewGroqProvider(cfg.GroqAPIKey))
+	} else {
+		log.Printf("provider groq: skipped (no API key)")
+	}
+	if cfg.OpenRouterAPIKey != "" {
+		registry.Register(proxy.NewOpenRouterProvider(cfg.OpenRouterAPIKey))
+	} else {
+		log.Printf("provider openrouter: skipped (no API key)")
+	}
+	// Ollama — always registered (no auth required)
 	registry.Register(proxy.NewOllamaProvider(cfg.OllamaURL))
 
 	// Handlers
@@ -109,6 +134,7 @@ func main() {
 	proxyRouter := r.PathPrefix("/proxy").Subrouter()
 	proxyRouter.Use(authSvc.AuthMiddleware)
 	proxyRouter.Use(mw.RateLimit(redisClient, 60, time.Minute))
+	proxyRouter.HandleFunc("/providers", proxyHandler.ListProviders).Methods("GET")
 	proxyRouter.PathPrefix("/{provider}/").HandlerFunc(proxyHandler.ProxyChat).Methods("POST")
 
 	// Apply global middleware

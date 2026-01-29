@@ -378,6 +378,76 @@ func TestOpenAICompatParseResponse(t *testing.T) {
 	}
 }
 
+// --- Model Validation ---
+
+func TestIsModelSupported_Known(t *testing.T) {
+	p := NewOpenAIProvider("k")
+	if !isModelSupported(p, p.DefaultModel()) {
+		t.Errorf("default model %q should be supported", p.DefaultModel())
+	}
+}
+
+func TestIsModelSupported_Unknown(t *testing.T) {
+	p := NewOpenAIProvider("k")
+	if isModelSupported(p, "nonexistent-model-xyz") {
+		t.Error("nonexistent model should not be supported")
+	}
+}
+
+func TestIsModelSupported_AllProviders(t *testing.T) {
+	providers := []Provider{
+		NewOpenAIProvider("k"),
+		NewAnthropicProvider("k"),
+		NewGeminiProvider("k"),
+		NewMistralProvider("k"),
+		NewGroqProvider("k"),
+		NewOpenRouterProvider("k"),
+		NewOllamaProvider(""),
+	}
+	for _, p := range providers {
+		// Default model must be in SupportedModels
+		if !isModelSupported(p, p.DefaultModel()) {
+			t.Errorf("provider %s: default model %q not in SupportedModels", p.Name(), p.DefaultModel())
+		}
+		// Unknown model must not be supported
+		if isModelSupported(p, "definitely-not-a-real-model") {
+			t.Errorf("provider %s: unknown model should not be supported", p.Name())
+		}
+	}
+}
+
+// --- Registry ListProviders ---
+
+func TestRegistryListProviders(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(NewOpenAIProvider("k"))
+	reg.Register(NewAnthropicProvider("k"))
+	reg.Register(NewOllamaProvider(""))
+
+	providers := reg.ListProviders()
+	if len(providers) != 3 {
+		t.Fatalf("expected 3 providers, got %d", len(providers))
+	}
+
+	names := make(map[string]bool)
+	for _, p := range providers {
+		names[p.Name()] = true
+	}
+	for _, expected := range []string{"openai", "anthropic", "ollama"} {
+		if !names[expected] {
+			t.Errorf("expected provider %q in list", expected)
+		}
+	}
+}
+
+func TestRegistryListProvidersEmpty(t *testing.T) {
+	reg := NewRegistry()
+	providers := reg.ListProviders()
+	if len(providers) != 0 {
+		t.Fatalf("expected 0 providers, got %d", len(providers))
+	}
+}
+
 // Verify JSON marshal of test payloads
 func TestChatRequestJSON(t *testing.T) {
 	req := chatRequest{

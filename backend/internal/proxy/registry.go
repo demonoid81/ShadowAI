@@ -40,3 +40,14 @@ func (r *Registry) List() []string {
 	}
 	return names
 }
+
+// ListProviders returns all registered providers.
+func (r *Registry) ListProviders() []Provider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]Provider, 0, len(r.providers))
+	for _, p := range r.providers {
+		result = append(result, p)
+	}
+	return result
+}

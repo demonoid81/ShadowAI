@@ -18,6 +18,9 @@ import (
 	"github.com/shadowai/backend/internal/policy"
 )
 
+// maxBodySize is the maximum allowed request body size (10 MB).
+const maxBodySize = 10 << 20
+
 type chatRequest struct {
 	Model    string `json:"model"`
 	Stream   bool   `json:"stream"`
@@ -65,10 +68,14 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Buffer body
-	bodyBytes, err := io.ReadAll(r.Body)
+	// 2. Buffer body with size limit
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, int64(maxBodySize)+1))
 	if err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if len(bodyBytes) > maxBodySize {
+		http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -82,6 +89,18 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	model := chatReq.Model
 	if model == "" {
 		model = provider.DefaultModel()
+	}
+
+	// 3.5. Validate model
+	if !isModelSupported(provider, model) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            "unsupported model",
+			"model":            model,
+			"supported_models": provider.SupportedModels(),
+		})
+		return
 	}
 
 	// Extract all text for PII scanning
@@ -136,14 +155,10 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7. Build provider-specific request
-	proxyReq, err := provider.BuildRequest(r.Context(), bodyBytes, model)
-	if err != nil {
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
-	}
-
-	resp, err := h.httpClient.Do(proxyReq)
+	// 7. Build provider-specific request with retry
+	resp, err := doWithRetry(h.httpClient, func() (*http.Request, error) {
+		return provider.BuildRequest(r.Context(), bodyBytes, model)
+	}, 2)
 	if err != nil {
 		http.Error(w, `{"error":"upstream error"}`, http.StatusBadGateway)
 		return
@@ -209,4 +224,38 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
+}
+
+// ListProviders returns JSON with all registered providers and their models.
+func (h *Handler) ListProviders(w http.ResponseWriter, r *http.Request) {
+	type providerInfo struct {
+		Name         string   `json:"name"`
+		DefaultModel string   `json:"default_model"`
+		Models       []string `json:"supported_models"`
+	}
+
+	providers := h.registry.ListProviders()
+	result := make([]providerInfo, 0, len(providers))
+	for _, p := range providers {
+		result = append(result, providerInfo{
+			Name:         p.Name(),
+			DefaultModel: p.DefaultModel(),
+			Models:       p.SupportedModels(),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"providers": result,
+	})
+}
+
+// isModelSupported checks if the model is in the provider's supported models list.
+func isModelSupported(provider Provider, model string) bool {
+	for _, m := range provider.SupportedModels() {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
