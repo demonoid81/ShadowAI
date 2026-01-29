@@ -1,13 +1,14 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
@@ -16,31 +17,6 @@ import (
 	"github.com/shadowai/backend/internal/pii"
 	"github.com/shadowai/backend/internal/policy"
 )
-
-var modelPricing = map[string][2]float64{
-	"gpt-4o":        {5.0 / 1_000_000, 15.0 / 1_000_000},
-	"gpt-4o-mini":   {0.15 / 1_000_000, 0.60 / 1_000_000},
-	"gpt-3.5-turbo": {0.50 / 1_000_000, 1.50 / 1_000_000},
-}
-
-type Handler struct {
-	openAIKey  string
-	policySvc  *policy.Service
-	auditSvc   *audit.Service
-	budgetSvc  *budget.Service
-	httpClient *http.Client
-}
-
-func NewHandler(openAIKey string, policySvc *policy.Service, auditSvc *audit.Service, budgetSvc *budget.Service) *Handler {
-	transport := &OpenAITransport{APIKey: openAIKey}
-	return &Handler{
-		openAIKey:  openAIKey,
-		policySvc:  policySvc,
-		auditSvc:   auditSvc,
-		budgetSvc:  budgetSvc,
-		httpClient: &http.Client{Transport: transport, Timeout: 120 * time.Second},
-	}
-}
 
 type chatRequest struct {
 	Model    string `json:"model"`
@@ -51,14 +27,27 @@ type chatRequest struct {
 	} `json:"messages"`
 }
 
-type chatResponse struct {
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+// Handler is the multi-provider proxy handler.
+type Handler struct {
+	registry   *Registry
+	policySvc  *policy.Service
+	auditSvc   *audit.Service
+	budgetSvc  *budget.Service
+	httpClient *http.Client
 }
 
+// NewHandler creates a new multi-provider proxy handler.
+func NewHandler(registry *Registry, policySvc *policy.Service, auditSvc *audit.Service, budgetSvc *budget.Service) *Handler {
+	return &Handler{
+		registry:   registry,
+		policySvc:  policySvc,
+		auditSvc:   auditSvc,
+		budgetSvc:  budgetSvc,
+		httpClient: &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+// ProxyChat handles requests to /proxy/{provider}/{path:.*}
 func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	claims := auth.GetClaims(r.Context())
@@ -67,18 +56,32 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Buffer body
+	// 1. Resolve provider
+	vars := mux.Vars(r)
+	providerName := vars["provider"]
+	provider, ok := h.registry.Get(providerName)
+	if !ok {
+		http.Error(w, `{"error":"unknown provider"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 2. Buffer body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
 
-	// 2. Parse request
+	// 3. Parse request to extract model and messages
 	var chatReq chatRequest
 	if err := json.Unmarshal(bodyBytes, &chatReq); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
+	}
+
+	model := chatReq.Model
+	if model == "" {
+		model = provider.DefaultModel()
 	}
 
 	// Extract all text for PII scanning
@@ -87,23 +90,29 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		allText += m.Content + " "
 	}
 
-	// 3. PII Detection
+	// 4. PII Detection
 	findings := pii.Scan(allText)
 	piiTypes := pii.DetectedTypes(findings)
 	piiDetected := len(findings) > 0
 
-	// 4. Policy Evaluation
-	evalResult, err := h.policySvc.Engine.Evaluate(r.Context(), allText, chatReq.Model, findings)
+	// 5. Policy Evaluation
+	evalResult, err := h.policySvc.Engine.Evaluate(r.Context(), allText, model, findings)
 	if err != nil {
 		http.Error(w, `{"error":"policy error"}`, http.StatusInternalServerError)
 		return
 	}
 
+	endpoint := r.URL.Path
+	// Strip /proxy/{provider} prefix for audit
+	if idx := strings.Index(endpoint, "/"+providerName+"/"); idx >= 0 {
+		endpoint = endpoint[idx+len(providerName)+1:]
+	}
+
 	if evalResult.Action == policy.ActionBlocked {
 		h.auditSvc.Log(&domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
-			RequestBody: string(bodyBytes), Model: chatReq.Model, Provider: "openai",
-			Endpoint: "/v1/chat/completions", StatusCode: 403,
+			RequestBody: string(bodyBytes), Model: model, Provider: providerName,
+			Endpoint: endpoint, StatusCode: 403,
 			PIIDetected: piiDetected, PIITypes: piiTypes,
 			PolicyAction: "blocked", DurationMs: int(time.Since(start).Milliseconds()),
 		})
@@ -113,13 +122,13 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Budget Check
+	// 6. Budget Check
 	allowed, err := h.budgetSvc.CheckBudget(r.Context(), claims.UserID)
 	if err == nil && !allowed {
 		h.auditSvc.Log(&domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
-			RequestBody: string(bodyBytes), Model: chatReq.Model, Provider: "openai",
-			Endpoint: "/v1/chat/completions", StatusCode: 402,
+			RequestBody: string(bodyBytes), Model: model, Provider: providerName,
+			Endpoint: endpoint, StatusCode: 402,
 			PIIDetected: piiDetected, PIITypes: piiTypes,
 			PolicyAction: "blocked", DurationMs: int(time.Since(start).Milliseconds()),
 		})
@@ -127,13 +136,12 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Forward to OpenAI
-	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	// 7. Build provider-specific request
+	proxyReq, err := provider.BuildRequest(r.Context(), bodyBytes, model)
 	if err != nil {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}
-	proxyReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
@@ -144,52 +152,55 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 	policyAction := string(evalResult.Action)
 
+	// 8. Handle streaming
 	if chatReq.Stream {
-		// SSE streaming
 		for k, vv := range resp.Header {
 			for _, v := range vv {
 				w.Header().Add(k, v)
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		accumulated, _ := ForwardSSE(w, resp.Body)
+
+		var accumulated string
+		switch provider.StreamFormat() {
+		case StreamNDJSON:
+			accumulated, _ = ForwardNDJSON(w, resp.Body)
+		default:
+			accumulated, _ = ForwardSSE(w, resp.Body)
+		}
 
 		h.auditSvc.Log(&domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: string(bodyBytes), ResponseBody: accumulated,
-			Model: chatReq.Model, Provider: "openai", Endpoint: "/v1/chat/completions",
+			Model: model, Provider: providerName, Endpoint: endpoint,
 			StatusCode: resp.StatusCode, PIIDetected: piiDetected, PIITypes: piiTypes,
 			PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
 		})
 		return
 	}
 
-	// 7. Non-streaming: parse response
+	// 9. Non-streaming: parse response
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, `{"error":"read upstream"}`, http.StatusBadGateway)
 		return
 	}
 
-	var chatResp chatResponse
-	json.Unmarshal(respBody, &chatResp)
+	promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBody)
 
-	// Calculate cost
-	cost := calculateCost(chatReq.Model, chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
-
-	// 8. Update budget
+	// 10. Update budget
 	if cost > 0 {
-		h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, chatResp.Usage.TotalTokens)
+		h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 	}
 
-	// 9. Audit log
+	// 11. Audit log
 	h.auditSvc.Log(&domain.AuditLog{
 		ID: uuid.New().String(), UserID: claims.UserID,
 		RequestBody: string(bodyBytes), ResponseBody: string(respBody),
-		Model: chatReq.Model, Provider: "openai", Endpoint: "/v1/chat/completions",
+		Model: model, Provider: providerName, Endpoint: endpoint,
 		StatusCode: resp.StatusCode,
-		PromptTokens: chatResp.Usage.PromptTokens, CompletionTokens: chatResp.Usage.CompletionTokens,
-		TotalTokens: chatResp.Usage.TotalTokens, CostUSD: cost,
+		PromptTokens: promptTokens, CompletionTokens: completionTokens,
+		TotalTokens: totalTokens, CostUSD: cost,
 		PIIDetected: piiDetected, PIITypes: piiTypes,
 		PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
 	})
@@ -198,12 +209,4 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-}
-
-func calculateCost(model string, promptTokens, completionTokens int) float64 {
-	prices, ok := modelPricing[model]
-	if !ok {
-		prices = modelPricing["gpt-4o-mini"]
-	}
-	return float64(promptTokens)*prices[0] + float64(completionTokens)*prices[1]
 }

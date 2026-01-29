@@ -46,13 +46,23 @@ func main() {
 	policySvc := policy.NewService(policyRepo)
 	budgetSvc := budget.NewService(budgetRepo, redisClient)
 
+	// Provider Registry
+	registry := proxy.NewRegistry()
+	registry.Register(proxy.NewOpenAIProvider(cfg.OpenAIAPIKey))
+	registry.Register(proxy.NewAnthropicProvider(cfg.AnthropicAPIKey))
+	registry.Register(proxy.NewGeminiProvider(cfg.GeminiAPIKey))
+	registry.Register(proxy.NewMistralProvider(cfg.MistralAPIKey))
+	registry.Register(proxy.NewGroqProvider(cfg.GroqAPIKey))
+	registry.Register(proxy.NewOpenRouterProvider(cfg.OpenRouterAPIKey))
+	registry.Register(proxy.NewOllamaProvider(cfg.OllamaURL))
+
 	// Handlers
 	authHandler := auth.NewHandler(authSvc)
 	auditHandler := audit.NewHandler(auditSvc)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db)
-	proxyHandler := proxy.NewHandler(cfg.OpenAIAPIKey, policySvc, auditSvc, budgetSvc)
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc)
 
 	r := mux.NewRouter()
 
@@ -95,11 +105,11 @@ func main() {
 	api.HandleFunc("/dashboard/usage", dashHandler.GetUsage).Methods("GET")
 	api.HandleFunc("/dashboard/top-users", dashHandler.GetTopUsers).Methods("GET")
 
-	// Proxy routes (authenticated)
+	// Proxy routes (authenticated + rate limited) — wildcard for all providers
 	proxyRouter := r.PathPrefix("/proxy").Subrouter()
 	proxyRouter.Use(authSvc.AuthMiddleware)
 	proxyRouter.Use(mw.RateLimit(redisClient, 60, time.Minute))
-	proxyRouter.HandleFunc("/openai/v1/chat/completions", proxyHandler.ProxyChat).Methods("POST")
+	proxyRouter.PathPrefix("/{provider}/").HandlerFunc(proxyHandler.ProxyChat).Methods("POST")
 
 	// Apply global middleware
 	handler := mw.CORS()(r)
