@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -81,13 +82,34 @@ func main() {
 	// Ollama — always registered (no auth required)
 	registry.Register(proxy.NewOllamaProvider(cfg.OllamaURL))
 
+	// Intelligent Routing + Cache
+	healthTracker := proxy.NewHealthTracker(redisClient)
+	modelMapper := proxy.NewModelMapper(registry)
+	strategy := proxy.RoutingStrategy(cfg.RoutingStrategy)
+
+	var fallbackOrder []string
+	if cfg.FallbackOrder != "" {
+		fallbackOrder = strings.Split(cfg.FallbackOrder, ",")
+	}
+
+	router := proxy.NewRouter(registry, healthTracker, modelMapper, strategy, fallbackOrder)
+
+	var cache *proxy.SemanticCache
+	if cfg.CacheEnabled {
+		ttl, err := time.ParseDuration(cfg.CacheTTL)
+		if err != nil {
+			ttl = time.Hour
+		}
+		cache = proxy.NewSemanticCache(redisClient, ttl)
+	}
+
 	// Handlers
 	authHandler := auth.NewHandler(authSvc)
 	auditHandler := audit.NewHandler(auditSvc)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db)
-	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc)
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, router, cache, healthTracker)
 
 	r := mux.NewRouter()
 
@@ -135,6 +157,7 @@ func main() {
 	proxyRouter.Use(authSvc.AuthMiddleware)
 	proxyRouter.Use(mw.RateLimit(redisClient, 60, time.Minute))
 	proxyRouter.HandleFunc("/providers", proxyHandler.ListProviders).Methods("GET")
+	proxyRouter.HandleFunc("/chat", proxyHandler.UnifiedChat).Methods("POST")
 	proxyRouter.PathPrefix("/{provider}/").HandlerFunc(proxyHandler.ProxyChat).Methods("POST")
 
 	// Apply global middleware

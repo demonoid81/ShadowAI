@@ -41,6 +41,22 @@ func (r *Registry) List() []string {
 	return names
 }
 
+// FindByModel returns all providers that list the given model in SupportedModels().
+func (r *Registry) FindByModel(model string) []Provider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []Provider
+	for _, p := range r.providers {
+		for _, m := range p.SupportedModels() {
+			if m == model {
+				result = append(result, p)
+				break
+			}
+		}
+	}
+	return result
+}
+
 // ListProviders returns all registered providers.
 func (r *Registry) ListProviders() []Provider {
 	r.mu.RLock()

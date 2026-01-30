@@ -14,6 +14,10 @@ type Config struct {
 	OpenRouterAPIKey string
 	OllamaURL        string
 	ServerPort       string
+	RoutingStrategy  string
+	FallbackOrder    string
+	CacheEnabled     bool
+	CacheTTL         string
 }
 
 func Load() *Config {
@@ -29,6 +33,10 @@ func Load() *Config {
 		OpenRouterAPIKey: getEnv("OPENROUTER_API_KEY", ""),
 		OllamaURL:        getEnv("OLLAMA_URL", "http://localhost:11434"),
 		ServerPort:       getEnv("SERVER_PORT", "8080"),
+		RoutingStrategy:  getEnv("ROUTING_STRATEGY", "cheapest"),
+		FallbackOrder:    getEnv("FALLBACK_ORDER", ""),
+		CacheEnabled:     getEnv("CACHE_ENABLED", "true") == "true",
+		CacheTTL:         getEnv("CACHE_TTL", "1h"),
 	}
 }
 
