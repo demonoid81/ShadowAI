@@ -59,6 +59,12 @@ type Config struct {
 	FirewallRLEnabled            bool
 	FirewallRLMaxCharsPerMinute  int
 	FirewallRLMaxFlagsPerMinute  int
+	FirewallMTEnabled            bool
+	FirewallMTWindowSize         int
+	FirewallMTHeuristicThreshold float64
+	FirewallSAEnabled            bool
+	FirewallSAThreshold          float64
+	FirewallSABlockThreshold     float64
 }
 
 func Load() *Config {
@@ -124,6 +130,12 @@ func Load() *Config {
 		FirewallRLEnabled:            getEnv("FIREWALL_RL_ENABLED", "false") == "true",
 		FirewallRLMaxCharsPerMinute:  getEnvInt("FIREWALL_RL_MAX_CHARS_PER_MINUTE", 50000),
 		FirewallRLMaxFlagsPerMinute:  getEnvInt("FIREWALL_RL_MAX_FLAGS_PER_MINUTE", 5),
+		FirewallMTEnabled:            getEnv("FIREWALL_MT_ENABLED", "true") == "true",
+		FirewallMTWindowSize:         getEnvInt("FIREWALL_MT_WINDOW_SIZE", 10),
+		FirewallMTHeuristicThreshold: getEnvFloat("FIREWALL_MT_HEURISTIC_THRESHOLD", 0.6),
+		FirewallSAEnabled:            getEnv("FIREWALL_SA_ENABLED", "true") == "true",
+		FirewallSAThreshold:          getEnvFloat("FIREWALL_SA_THRESHOLD", 0.5),
+		FirewallSABlockThreshold:     getEnvFloat("FIREWALL_SA_BLOCK_THRESHOLD", 0.75),
 	}
 }
 

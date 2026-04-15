@@ -133,8 +133,18 @@ func main() {
 			MaxCharsPerMinute: cfg.FirewallRLMaxCharsPerMinute,
 			MaxFlagsPerMinute: cfg.FirewallRLMaxFlagsPerMinute,
 		}))
+		firewallPipeline.Register(firewall.NewMultiTurnInspector(firewall.MultiTurnConfig{
+			Enabled:            cfg.FirewallMTEnabled,
+			WindowSize:         cfg.FirewallMTWindowSize,
+			HeuristicThreshold: cfg.FirewallMTHeuristicThreshold,
+		}))
+		firewallPipeline.Register(firewall.NewSemanticInspector(firewall.SemanticConfig{
+			Enabled:        cfg.FirewallSAEnabled,
+			Threshold:      cfg.FirewallSAThreshold,
+			BlockThreshold: cfg.FirewallSABlockThreshold,
+		}))
 
-		log.Printf("firewall pipeline: enabled with 8 inspectors (judge=%v)", cfg.FirewallJudgeEnabled)
+		log.Printf("firewall pipeline: enabled with 10 inspectors (judge=%v)", cfg.FirewallJudgeEnabled)
 	}
 
 	// Provider Registry — skip providers without API keys
