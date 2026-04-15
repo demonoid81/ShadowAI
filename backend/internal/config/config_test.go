@@ -1,0 +1,302 @@
+package config
+
+import (
+	"testing"
+	"time"
+)
+
+func TestGetEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		fallback string
+		envVal   string
+		setEnv   bool
+		want     string
+	}{
+		{"returns fallback when not set", "TEST_GETENV_UNSET", "default", "", false, "default"},
+		{"returns env value when set", "TEST_GETENV_SET", "default", "custom", true, "custom"},
+		{"returns empty string when set to empty", "TEST_GETENV_EMPTY", "default", "", true, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv(tt.key, tt.envVal)
+			}
+			got := getEnv(tt.key, tt.fallback)
+			if got != tt.want {
+				t.Errorf("getEnv(%q, %q) = %q, want %q", tt.key, tt.fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetDuration(t *testing.T) {
+	fallback := 10 * time.Second
+
+	tests := []struct {
+		name   string
+		key    string
+		envVal string
+		setEnv bool
+		want   time.Duration
+	}{
+		{"returns fallback when not set", "TEST_DUR_UNSET", "", false, fallback},
+		{"parses valid duration", "TEST_DUR_VALID", "30s", true, 30 * time.Second},
+		{"parses minutes", "TEST_DUR_MIN", "5m", true, 5 * time.Minute},
+		{"returns fallback on invalid", "TEST_DUR_INVALID", "notaduration", true, fallback},
+		{"returns fallback on empty", "TEST_DUR_EMPTY", "", true, fallback},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv(tt.key, tt.envVal)
+			}
+			got := getDuration(tt.key, fallback)
+			if got != tt.want {
+				t.Errorf("getDuration(%q, %v) = %v, want %v", tt.key, fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetEnvInt(t *testing.T) {
+	fallback := 42
+
+	tests := []struct {
+		name   string
+		key    string
+		envVal string
+		setEnv bool
+		want   int
+	}{
+		{"returns fallback when not set", "TEST_INT_UNSET", "", false, fallback},
+		{"parses valid int", "TEST_INT_VALID", "100", true, 100},
+		{"returns fallback on non-numeric", "TEST_INT_NAN", "abc", true, fallback},
+		{"returns fallback on zero", "TEST_INT_ZERO", "0", true, fallback},
+		{"returns fallback on negative", "TEST_INT_NEG", "-5", true, fallback},
+		{"returns fallback on empty", "TEST_INT_EMPTY", "", true, fallback},
+		{"parses large int", "TEST_INT_LARGE", "1048576", true, 1048576},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv(tt.key, tt.envVal)
+			}
+			got := getEnvInt(tt.key, fallback)
+			if got != tt.want {
+				t.Errorf("getEnvInt(%q, %d) = %d, want %d", tt.key, fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadDefaults(t *testing.T) {
+	// Unset all env vars that Load() reads to ensure defaults
+	envVars := []string{
+		"DATABASE_URL", "REDIS_URL", "JWT_SECRET", "DLP_MODE",
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+		"MISTRAL_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+		"OLLAMA_URL", "INTERNAL_DB_SOURCES", "INTERNAL_DB_REFRESH_INTERVAL",
+		"INTERNAL_DB_QUERY_TIMEOUT", "ALLOWED_PROVIDER_HOSTS",
+		"SERVER_PORT", "ROUTING_STRATEGY", "FALLBACK_ORDER",
+		"CACHE_ENABLED", "CACHE_TTL", "PROVIDER_CONNECTIVITY_INTERVAL",
+		"MAX_COMPLETION_TOKENS", "CORS_ALLOWED_HOSTS", "TRUSTED_PROXY_CIDRS",
+		"SERVER_READ_TIMEOUT", "SERVER_WRITE_TIMEOUT",
+		"SERVER_IDLE_TIMEOUT", "SERVER_READ_HEADER_TIMEOUT",
+		"SERVER_MAX_HEADER_BYTES",
+	}
+	for _, k := range envVars {
+		t.Setenv(k, "")
+	}
+	// Now unset them properly — t.Setenv sets them to "", but we need LookupEnv to return false.
+	// Unfortunately t.Setenv doesn't support unsetting. We set known defaults via CACHE_ENABLED="true".
+	// Instead, let's just verify the values that don't depend on LookupEnv returning false.
+
+	// For a clean test, set CACHE_ENABLED to "true" (its default) since we can't unset with t.Setenv.
+	t.Setenv("CACHE_ENABLED", "true")
+
+	cfg := Load()
+
+	checks := []struct {
+		name string
+		got  interface{}
+		want interface{}
+	}{
+		{"ServerPort default is empty string (env set to empty)", cfg.ServerPort, ""},
+		{"DLPMode default is empty string (env set to empty)", cfg.DLPMode, ""},
+		{"CacheEnabled true when set to true", cfg.CacheEnabled, true},
+		{"CacheTTL is empty (env set to empty)", cfg.CacheTTL, ""},
+		{"RoutingStrategy is empty (env set to empty)", cfg.RoutingStrategy, ""},
+	}
+
+	for _, c := range checks {
+		t.Run(c.name, func(t *testing.T) {
+			if c.got != c.want {
+				t.Errorf("got %v, want %v", c.got, c.want)
+			}
+		})
+	}
+}
+
+func TestLoadDefaultsClean(t *testing.T) {
+	// Use a subtest approach: we can't truly unset env vars with t.Setenv,
+	// but we can test Load() behavior in the current environment
+	// by checking that returned config is non-nil and has expected types.
+	cfg := Load()
+	if cfg == nil {
+		t.Fatal("Load() returned nil")
+	}
+
+	// ServerPort should have some value (either from env or default "8080")
+	if cfg.ServerPort == "" {
+		t.Error("ServerPort should not be empty")
+	}
+
+	// Duration fields should be positive
+	if cfg.ServerReadTimeout <= 0 {
+		t.Errorf("ServerReadTimeout should be positive, got %v", cfg.ServerReadTimeout)
+	}
+	if cfg.ServerWriteTimeout <= 0 {
+		t.Errorf("ServerWriteTimeout should be positive, got %v", cfg.ServerWriteTimeout)
+	}
+	if cfg.ServerIdleTimeout <= 0 {
+		t.Errorf("ServerIdleTimeout should be positive, got %v", cfg.ServerIdleTimeout)
+	}
+	if cfg.ServerReadHeaderTimeout <= 0 {
+		t.Errorf("ServerReadHeaderTimeout should be positive, got %v", cfg.ServerReadHeaderTimeout)
+	}
+}
+
+func TestLoadWithCustomEnvVars(t *testing.T) {
+	t.Setenv("SERVER_PORT", "9090")
+	t.Setenv("DLP_MODE", "audit")
+	t.Setenv("CACHE_ENABLED", "false")
+	t.Setenv("CACHE_TTL", "30m")
+	t.Setenv("ROUTING_STRATEGY", "latency")
+	t.Setenv("DATABASE_URL", "postgres://custom:custom@db:5432/mydb")
+	t.Setenv("JWT_SECRET", "my-secret-key-for-testing-1234!!")
+	t.Setenv("MAX_COMPLETION_TOKENS", "4096")
+	t.Setenv("SERVER_READ_TIMEOUT", "30s")
+	t.Setenv("SERVER_WRITE_TIMEOUT", "60s")
+	t.Setenv("SERVER_MAX_HEADER_BYTES", "2097152")
+
+	cfg := Load()
+
+	tests := []struct {
+		name string
+		got  interface{}
+		want interface{}
+	}{
+		{"ServerPort override", cfg.ServerPort, "9090"},
+		{"DLPMode override", cfg.DLPMode, "audit"},
+		{"CacheEnabled false", cfg.CacheEnabled, false},
+		{"CacheTTL override", cfg.CacheTTL, "30m"},
+		{"RoutingStrategy override", cfg.RoutingStrategy, "latency"},
+		{"DatabaseURL override", cfg.DatabaseURL, "postgres://custom:custom@db:5432/mydb"},
+		{"JWTSecret override", cfg.JWTSecret, "my-secret-key-for-testing-1234!!"},
+		{"MaxCompletionTokens override", cfg.MaxCompletionTokens, 4096},
+		{"ServerReadTimeout override", cfg.ServerReadTimeout, 30 * time.Second},
+		{"ServerWriteTimeout override", cfg.ServerWriteTimeout, 60 * time.Second},
+		{"ServerMaxHeaderBytes override", cfg.ServerMaxHeaderBytes, 2097152},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("got %v, want %v", tt.got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCacheEnabledValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		envVal string
+		want   bool
+	}{
+		{"true string", "true", true},
+		{"false string", "false", false},
+		{"empty string", "", false},
+		{"random string", "yes", false},
+		{"1 is not true", "1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CACHE_ENABLED", tt.envVal)
+			cfg := Load()
+			if cfg.CacheEnabled != tt.want {
+				t.Errorf("CacheEnabled with %q = %v, want %v", tt.envVal, cfg.CacheEnabled, tt.want)
+			}
+		})
+	}
+}
+
+func TestDurationEnvVars(t *testing.T) {
+	tests := []struct {
+		name    string
+		envKey  string
+		envVal  string
+		getField func(*Config) time.Duration
+		want    time.Duration
+	}{
+		{
+			"read timeout 30s",
+			"SERVER_READ_TIMEOUT", "30s",
+			func(c *Config) time.Duration { return c.ServerReadTimeout },
+			30 * time.Second,
+		},
+		{
+			"write timeout 2m",
+			"SERVER_WRITE_TIMEOUT", "2m",
+			func(c *Config) time.Duration { return c.ServerWriteTimeout },
+			2 * time.Minute,
+		},
+		{
+			"idle timeout 5m",
+			"SERVER_IDLE_TIMEOUT", "5m",
+			func(c *Config) time.Duration { return c.ServerIdleTimeout },
+			5 * time.Minute,
+		},
+		{
+			"read header timeout 10s",
+			"SERVER_READ_HEADER_TIMEOUT", "10s",
+			func(c *Config) time.Duration { return c.ServerReadHeaderTimeout },
+			10 * time.Second,
+		},
+		{
+			"provider connectivity interval 10m",
+			"PROVIDER_CONNECTIVITY_INTERVAL", "10m",
+			func(c *Config) time.Duration { return c.ProviderConnectivityInterval },
+			10 * time.Minute,
+		},
+		{
+			"internal db refresh interval 1m",
+			"INTERNAL_DB_REFRESH_INTERVAL", "1m",
+			func(c *Config) time.Duration { return c.InternalDBRefreshInterval },
+			1 * time.Minute,
+		},
+		{
+			"internal db query timeout 15s",
+			"INTERNAL_DB_QUERY_TIMEOUT", "15s",
+			func(c *Config) time.Duration { return c.InternalDBQueryTimeout },
+			15 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.envKey, tt.envVal)
+			cfg := Load()
+			got := tt.getField(cfg)
+			if got != tt.want {
+				t.Errorf("%s = %v, want %v", tt.envKey, got, tt.want)
+			}
+		})
+	}
+}
