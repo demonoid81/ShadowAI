@@ -482,7 +482,6 @@ func (h *Handler) ListProviders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) TestAllProviders(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -1421,11 +1420,9 @@ func copyHeadersWithoutContentLength(dst, src http.Header) {
 }
 
 func (h *Handler) auditPayload(payload []byte, piiFindings []pii.Finding, decision dlp.Decision) string {
-	_ = piiFindings
-
 	sanitized := string(payload)
 	if h != nil && h.dlpSvc != nil && decision.Action == dlp.DLPActionSanitize {
-		sanitized = h.dlpSvc.Sanitize(sanitized, decision.Findings)
+		sanitized = h.dlpSvc.Sanitize(sanitized, piiFindings)
 	}
 
 	for _, p := range pii.Patterns {
