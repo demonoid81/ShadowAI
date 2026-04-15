@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -51,6 +52,22 @@ func (f *fakeRedis) Get(_ context.Context, key string) *redis.StringCmd {
 		return cmd
 	}
 	cmd.SetVal(v)
+	return cmd
+}
+
+func (f *fakeRedis) Set(_ context.Context, key string, value interface{}, _ time.Duration) *redis.StatusCmd {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch v := value.(type) {
+	case string:
+		f.data[key] = v
+	case []byte:
+		f.data[key] = string(v)
+	default:
+		f.data[key] = fmt.Sprint(v)
+	}
+	cmd := redis.NewStatusCmd(context.Background())
+	cmd.SetVal("OK")
 	return cmd
 }
 

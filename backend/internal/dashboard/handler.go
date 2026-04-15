@@ -24,12 +24,18 @@ type Stats struct {
 
 func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	var s Stats
-	h.db.QueryRowContext(r.Context(),
+	if err := h.db.QueryRowContext(r.Context(),
 		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN policy_action='blocked' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
-		FROM audit_logs`).Scan(&s.TotalRequests, &s.BlockedRequests, &s.TotalCost, &s.TotalTokens)
+		FROM audit_logs`).Scan(&s.TotalRequests, &s.BlockedRequests, &s.TotalCost, &s.TotalTokens); err != nil {
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
 
-	h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE is_active=true`).Scan(&s.ActiveUsers)
+	if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE is_active=true`).Scan(&s.ActiveUsers); err != nil {
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s)
@@ -55,8 +61,15 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	var points []UsagePoint
 	for rows.Next() {
 		var p UsagePoint
-		rows.Scan(&p.Date, &p.Requests, &p.Cost, &p.Tokens)
+		if err := rows.Scan(&p.Date, &p.Requests, &p.Cost, &p.Tokens); err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
 		points = append(points, p)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
 	}
 	if points == nil {
 		points = []UsagePoint{}
@@ -85,8 +98,15 @@ func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
 	var users []TopUser
 	for rows.Next() {
 		var u TopUser
-		rows.Scan(&u.UserID, &u.Email, &u.Requests, &u.Cost)
+		if err := rows.Scan(&u.UserID, &u.Email, &u.Requests, &u.Cost); err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
 		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
 	}
 	if users == nil {
 		users = []TopUser{}

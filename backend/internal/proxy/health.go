@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -13,6 +14,8 @@ const (
 	healthKeyTTL       = 10 * time.Minute
 	latencyListMaxLen  = 100
 	healthKeyPrefix    = "health:"
+	providerCheckTTL    = 24 * time.Hour
+	providerCheckPrefix = "provider-check:"
 )
 
 // ProviderHealth holds health metrics for a single provider.
@@ -23,7 +26,20 @@ type ProviderHealth struct {
 	AvgLatencyMs float64
 }
 
-// RedisClient is the subset of redis.Client methods used by HealthTracker.
+// ProviderConnectivityCheck stores the latest connectivity probe result.
+type ProviderConnectivityCheck struct {
+	Provider      string    `json:"provider"`
+	Host          string    `json:"host"`
+	Port          string    `json:"port"`
+	Scheme        string    `json:"scheme"`
+	Reachable     bool      `json:"reachable"`
+	LatencyMs     int64     `json:"latency_ms"`
+	EgressBlocked bool      `json:"egress_blocked"`
+	Message       string    `json:"message"`
+	CheckedAt     time.Time `json:"checked_at"`
+}
+
+// RedisClient is the subset of redis.Client methods used by cache and health tracking.
 type RedisClient interface {
 	Incr(ctx context.Context, key string) *redis.IntCmd
 	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
@@ -31,6 +47,7 @@ type RedisClient interface {
 	LPush(ctx context.Context, key string, values ...interface{}) *redis.IntCmd
 	LTrim(ctx context.Context, key string, start, stop int64) *redis.StatusCmd
 	LRange(ctx context.Context, key string, start, stop int64) *redis.StringSliceCmd
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
 }
 
 // HealthTracker records provider success/failure/latency metrics in Redis.
@@ -51,6 +68,9 @@ func failKey(provider string) string {
 }
 func latencyKey(provider string) string {
 	return fmt.Sprintf("%s%s:latency", healthKeyPrefix, provider)
+}
+func providerCheckKey(provider string) string {
+	return fmt.Sprintf("%s%s", providerCheckPrefix, provider)
 }
 
 // RecordSuccess increments the success counter and records latency.
@@ -110,6 +130,49 @@ func (h *HealthTracker) GetAllHealth(ctx context.Context, providers []string) ma
 	result := make(map[string]*ProviderHealth, len(providers))
 	for _, p := range providers {
 		result[p] = h.GetHealth(ctx, p)
+	}
+	return result
+}
+
+// RecordConnectivityCheck stores provider connectivity test results with TTL.
+func (h *HealthTracker) RecordConnectivityCheck(ctx context.Context, check *ProviderConnectivityCheck) {
+	if h == nil || h.redis == nil || check == nil || check.Provider == "" {
+		return
+	}
+	if check.CheckedAt.IsZero() {
+		check.CheckedAt = time.Now().UTC()
+	}
+	payload, err := json.Marshal(check)
+	if err != nil {
+		return
+	}
+	h.redis.Set(ctx, providerCheckKey(check.Provider), payload, providerCheckTTL)
+}
+
+// GetConnectivityCheck returns the latest connectivity result for a provider.
+func (h *HealthTracker) GetConnectivityCheck(ctx context.Context, provider string) *ProviderConnectivityCheck {
+	if h == nil || h.redis == nil || provider == "" {
+		return nil
+	}
+	raw, err := h.redis.Get(ctx, providerCheckKey(provider)).Result()
+	if err != nil {
+		return nil
+	}
+	var check ProviderConnectivityCheck
+	if err := json.Unmarshal([]byte(raw), &check); err != nil {
+		return nil
+	}
+	if check.Provider == "" {
+		check.Provider = provider
+	}
+	return &check
+}
+
+// GetAllConnectivity returns latest connectivity checks for requested providers.
+func (h *HealthTracker) GetAllConnectivity(ctx context.Context, providers []string) map[string]*ProviderConnectivityCheck {
+	result := make(map[string]*ProviderConnectivityCheck, len(providers))
+	for _, provider := range providers {
+		result[provider] = h.GetConnectivityCheck(ctx, provider)
 	}
 	return result
 }

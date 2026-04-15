@@ -27,7 +27,43 @@ func (s *Service) UpdateBudget(ctx context.Context, b *domain.Budget) error {
 	return s.repo.Upsert(ctx, b)
 }
 
-func (s *Service) CheckBudget(ctx context.Context, userID string) (bool, error) {
+func (s *Service) CheckBudgetAfterUsage(ctx context.Context, userID string, additionalTokens int, additionalSpent float64) (bool, error) {
+	b, err := s.repo.GetByUserID(ctx, userID)
+	if err != nil {
+		return true, nil // no budget = unlimited
+	}
+
+	spentKey := fmt.Sprintf("budget:%s:spent", userID)
+	tokensKey := fmt.Sprintf("budget:%s:tokens", userID)
+	spentStr, err := s.redis.Get(ctx, spentKey).Result()
+	if err == redis.Nil {
+		spentStr = "0"
+	} else if err != nil {
+		return true, err
+	}
+	tokensStr, err := s.redis.Get(ctx, tokensKey).Result()
+	if err == redis.Nil {
+		tokensStr = "0"
+	} else if err != nil {
+		return true, err
+	}
+
+	spent, _ := strconv.ParseFloat(spentStr, 64)
+	tokens, _ := strconv.ParseInt(tokensStr, 10, 64)
+
+	totalSpent := b.MonthlySpentUSD + spent + additionalSpent
+	totalTokens := b.MonthlyTokensUsed + int(tokens) + additionalTokens
+
+	if b.MonthlyLimitUSD > 0 && totalSpent >= b.MonthlyLimitUSD {
+		return false, nil
+	}
+	if b.MonthlyTokenLimit > 0 && totalTokens >= b.MonthlyTokenLimit {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *Service) CheckBudget(ctx context.Context, userID string, additionalTokens int) (bool, error) {
 	b, err := s.repo.GetByUserID(ctx, userID)
 	if err != nil {
 		return true, nil // no budget = unlimited
@@ -42,9 +78,18 @@ func (s *Service) CheckBudget(ctx context.Context, userID string) (bool, error) 
 	}
 
 	spent, _ := strconv.ParseFloat(spentStr, 64)
+	tokens, _ := s.redis.Get(ctx, fmt.Sprintf("budget:%s:tokens", userID)).Int64()
 	totalSpent := b.MonthlySpentUSD + spent
+	totalTokens := b.MonthlyTokensUsed + int(tokens) + additionalTokens
 
-	return totalSpent < b.MonthlyLimitUSD, nil
+	if b.MonthlyLimitUSD > 0 && totalSpent >= b.MonthlyLimitUSD {
+		return false, nil
+	}
+	if b.MonthlyTokenLimit > 0 && totalTokens >= b.MonthlyTokenLimit {
+		return false, nil
+	}
+
+	return true, nil
 }
 
 func (s *Service) RecordUsage(ctx context.Context, userID string, cost float64, tokens int) error {

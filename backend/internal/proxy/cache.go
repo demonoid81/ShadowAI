@@ -42,7 +42,17 @@ func NewSemanticCache(rc RedisClient, ttl time.Duration) *SemanticCache {
 
 // CacheKey computes a SHA256 hash key from provider, model, and messages JSON.
 func CacheKey(provider, model string, messagesJSON []byte) string {
+	return CacheKeyForUser("", provider, model, messagesJSON)
+}
+
+// CacheKeyForUser computes a SHA256 hash key from user, provider, model, and messages JSON.
+func CacheKeyForUser(userID, provider, model string, messagesJSON []byte) string {
 	h := sha256.New()
+	if userID != "" {
+		h.Write([]byte("user:"))
+		h.Write([]byte(userID))
+		h.Write([]byte("|"))
+	}
 	h.Write([]byte(provider))
 	h.Write([]byte("|"))
 	h.Write([]byte(model))
@@ -73,7 +83,7 @@ func (c *SemanticCache) Set(ctx context.Context, key string, entry *CacheEntry) 
 	if err != nil {
 		return err
 	}
-	return c.redis.(*redis.Client).Set(ctx, key, data, c.ttl).Err()
+	return c.redis.Set(ctx, key, data, c.ttl).Err()
 }
 
 // ShouldCache returns true if the response should be cached.

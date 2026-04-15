@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"time"
+	"syscall"
 
 	"github.com/gorilla/mux"
 
@@ -13,6 +17,8 @@ import (
 	"github.com/shadowai/backend/internal/budget"
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/dashboard"
+	"github.com/shadowai/backend/internal/dlp"
+	"github.com/shadowai/backend/internal/internaldb"
 	mw "github.com/shadowai/backend/internal/middleware"
 	"github.com/shadowai/backend/internal/platform/postgres"
 	rdb "github.com/shadowai/backend/internal/platform/redis"
@@ -22,6 +28,10 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if len(cfg.JWTSecret) < 32 {
+		log.Printf("warning: JWT_SECRET is shorter than 32 chars; set a strong secret in production")
+	}
+	mw.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
 
 	db, err := postgres.Connect(cfg.DatabaseURL)
 	if err != nil {
@@ -40,12 +50,43 @@ func main() {
 	auditRepo := audit.NewRepository(db)
 	policyRepo := policy.NewRepository(db)
 	budgetRepo := budget.NewRepository(db)
+	internalDBRepo := internaldb.NewRepository(db)
 
 	// Services
 	authSvc := auth.NewService(authRepo, cfg.JWTSecret)
 	auditSvc := audit.NewService(auditRepo)
 	policySvc := policy.NewService(policyRepo)
 	budgetSvc := budget.NewService(budgetRepo, redisClient)
+	internalDBManager, err := internaldb.NewManager(internalDBRepo, cfg.InternalDBSources, cfg.InternalDBQueryTimeout)
+	if err != nil {
+		log.Printf("internal DB sources: %v", err)
+	}
+	if internalDBManager != nil && cfg.InternalDBRefreshInterval > 0 {
+		refreshStop := make(chan struct{})
+		defer close(refreshStop)
+		refreshTicker := time.NewTicker(cfg.InternalDBRefreshInterval)
+		go func() {
+			defer refreshTicker.Stop()
+			for {
+				select {
+				case <-refreshTicker.C:
+					if err := internalDBManager.RefreshSources(context.Background()); err != nil {
+						log.Printf("internal DB refresh: %v", err)
+					}
+				case <-refreshStop:
+					return
+				}
+			}
+		}()
+	}
+	defer func() {
+		if internalDBManager != nil {
+			if err := internalDBManager.Close(); err != nil {
+				log.Printf("internal DB close: %v", err)
+			}
+		}
+	}()
+	dlpSvc := dlp.NewService(cfg.DLPMode)
 
 	// Provider Registry — skip providers without API keys
 	registry := proxy.NewRegistry()
@@ -109,13 +150,46 @@ func main() {
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db)
-	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, router, cache, healthTracker)
+	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc)
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens)
+
+	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
+	defer connectivityCancel()
+	runConnectivityCheck := func() {
+		summary := proxyHandler.RunScheduledConnectivityCheck(connectivityCtx)
+		if summary.LastError != nil {
+			log.Printf("provider connectivity scheduler error: %v", summary.LastError)
+			return
+		}
+		if summary.Critical > 0 {
+			log.Printf("provider connectivity scheduler alert: total=%d reachable=%d unreachable=%d egress_blocked=%d stale=%d", summary.Total, summary.Reachable, summary.Unreachable, summary.EgressBlocked, summary.Stale)
+			return
+		}
+		log.Printf("provider connectivity scheduler: ok total=%d reachable=%d", summary.Total, summary.Reachable)
+	}
+	if cfg.ProviderConnectivityInterval > 0 {
+		go func() {
+			runConnectivityCheck()
+			ticker := time.NewTicker(cfg.ProviderConnectivityInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					runConnectivityCheck()
+				case <-connectivityCtx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	r := mux.NewRouter()
 
 	// Public routes
-	r.HandleFunc("/api/auth/login", authHandler.Login).Methods("POST")
-	r.HandleFunc("/api/auth/register", authHandler.Register).Methods("POST")
+	publicAuth := r.PathPrefix("/api/auth").Subrouter()
+	publicAuth.HandleFunc("/login", authHandler.Login).Methods("POST")
+	publicAuth.HandleFunc("/register", authHandler.Register).Methods("POST")
+	publicAuth.Use(mw.RateLimitPublic(redisClient, 20, time.Minute))
 
 	// Health check
 	r.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -129,13 +203,13 @@ func main() {
 
 	// Users (admin only)
 	admin := api.PathPrefix("").Subrouter()
-	admin.Use(auth.RequireRole("admin"))
+	admin.Use(auth.RequireRole(auth.RoleAdmin))
 	admin.HandleFunc("/users", authHandler.ListUsers).Methods("GET")
 	admin.HandleFunc("/users/{id}", authHandler.GetUser).Methods("GET")
 	admin.HandleFunc("/users/{id}", authHandler.UpdateUser).Methods("PUT")
 
 	// Audit logs
-	api.HandleFunc("/audit/logs", auditHandler.List).Methods("GET")
+	admin.HandleFunc("/audit/logs", auditHandler.List).Methods("GET")
 
 	// Policies (admin)
 	admin.HandleFunc("/policies", policyHandler.List).Methods("GET")
@@ -144,29 +218,80 @@ func main() {
 	admin.HandleFunc("/policies/{id}", policyHandler.Delete).Methods("DELETE")
 
 	// Budgets
-	api.HandleFunc("/budgets/{user_id}", budgetHandler.Get).Methods("GET")
+	budgets := api.PathPrefix("/budgets").Subrouter()
+	budgets.Use(auth.RequireAdminOrSelf("user_id"))
+	budgets.HandleFunc("/{user_id}", budgetHandler.Get).Methods("GET")
 	admin.HandleFunc("/budgets/{user_id}", budgetHandler.Update).Methods("PUT")
 
 	// Dashboard
-	api.HandleFunc("/dashboard/stats", dashHandler.GetStats).Methods("GET")
-	api.HandleFunc("/dashboard/usage", dashHandler.GetUsage).Methods("GET")
-	api.HandleFunc("/dashboard/top-users", dashHandler.GetTopUsers).Methods("GET")
+	admin.HandleFunc("/dashboard/stats", dashHandler.GetStats).Methods("GET")
+	admin.HandleFunc("/dashboard/usage", dashHandler.GetUsage).Methods("GET")
+	admin.HandleFunc("/dashboard/top-users", dashHandler.GetTopUsers).Methods("GET")
+	internalDBList := auth.RequireRole(auth.RoleAdmin, auth.RoleAnalyst, auth.RoleAuditor)
+	api.Handle("/internal-dbs", internalDBList(http.HandlerFunc(internalDBHandler.ListSources))).Methods("GET")
+	api.Handle("/internal-dbs/", internalDBList(http.HandlerFunc(internalDBHandler.ListSources))).Methods("GET")
+
+	internalDBQuery := auth.RequireRole(auth.RoleAdmin, auth.RoleAnalyst)
+	api.Handle("/internal-dbs/query", internalDBQuery(http.HandlerFunc(internalDBHandler.Query))).Methods("POST")
+	api.Handle("/internal-dbs/query/", internalDBQuery(http.HandlerFunc(internalDBHandler.Query))).Methods("POST")
+
+	internalDBAdmin := api.PathPrefix("/internal-dbs/sources").Subrouter()
+	internalDBAdmin.Use(auth.RequireRole(auth.RoleAdmin))
+	internalDBAdmin.HandleFunc("", internalDBHandler.ListManagedSources).Methods("GET")
+	internalDBAdmin.HandleFunc("/", internalDBHandler.ListManagedSources).Methods("GET")
+	internalDBAdmin.HandleFunc("", internalDBHandler.CreateSource).Methods("POST")
+	internalDBAdmin.HandleFunc("/", internalDBHandler.CreateSource).Methods("POST")
+	internalDBAdmin.HandleFunc("/refresh", internalDBHandler.RefreshSources).Methods("POST")
+	internalDBAdmin.HandleFunc("/{id}/test", internalDBHandler.TestSource).Methods("POST")
+	internalDBAdmin.HandleFunc("/{id}", internalDBHandler.GetSource).Methods("GET")
+	internalDBAdmin.HandleFunc("/{id}", internalDBHandler.UpdateSource).Methods("PUT")
+	internalDBAdmin.HandleFunc("/{id}", internalDBHandler.DeleteSource).Methods("DELETE")
+	api.HandleFunc("/auth/revoke", authHandler.RevokeTokens).Methods("POST")
+	api.HandleFunc("/auth/rotate-api-key", authHandler.RotateAPIKey).Methods("POST")
 
 	// Proxy routes (authenticated + rate limited) — wildcard for all providers
 	proxyRouter := r.PathPrefix("/proxy").Subrouter()
 	proxyRouter.Use(authSvc.AuthMiddleware)
 	proxyRouter.Use(mw.RateLimit(redisClient, 60, time.Minute))
 	proxyRouter.HandleFunc("/providers", proxyHandler.ListProviders).Methods("GET")
+	proxyRouter.Handle("/providers/connectivity", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.ProviderConnectivity))).Methods("GET")
+	proxyRouter.Handle("/providers/connectivity/alerts", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.ProviderConnectivityAlerts))).Methods("GET")
+	proxyRouter.Handle("/providers/test", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.TestAllProviders))).Methods("POST")
+	proxyRouter.Handle("/providers/{provider}/test", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.TestProvider))).Methods("POST")
 	proxyRouter.HandleFunc("/chat", proxyHandler.UnifiedChat).Methods("POST")
 	proxyRouter.PathPrefix("/{provider}/").HandlerFunc(proxyHandler.ProxyChat).Methods("POST")
 
 	// Apply global middleware
-	handler := mw.CORS()(r)
+	handler := mw.CORS(cfg.CORSAllowedHosts)(r)
+	handler = mw.SecurityHeaders(handler)
 	handler = mw.Logging(handler)
 	handler = mw.Recovery(handler)
 
 	log.Printf("ShadowAI starting on :%s", cfg.ServerPort)
-	if err := http.ListenAndServe(":"+cfg.ServerPort, handler); err != nil {
+	srv := &http.Server{
+		Addr:              ":" + cfg.ServerPort,
+		Handler:           handler,
+		ReadTimeout:       cfg.ServerReadTimeout,
+		WriteTimeout:      cfg.ServerWriteTimeout,
+		IdleTimeout:       cfg.ServerIdleTimeout,
+		ReadHeaderTimeout: cfg.ServerReadHeaderTimeout,
+		MaxHeaderBytes:    cfg.ServerMaxHeaderBytes,
+	}
+
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-shutdownCh
+		log.Printf("shutdown signal received")
+		connectivityCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("shutdown error: %v", err)
+		}
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: %v", err)
 	}
 }
