@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1060,6 +1062,43 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		allText += m.Content + " "
 	}
 
+	// 3.9. Firewall Pipeline — request inspection
+	if h.firewallPipeline != nil {
+		fwPayload := &firewall.Payload{
+			Text:     allText,
+			Model:    model,
+			Provider: "unified",
+			UserID:   claims.UserID,
+			Phase:    firewall.PhaseRequest,
+		}
+		fwDecision, fwErr := h.firewallPipeline.InspectRequest(r.Context(), fwPayload)
+		if fwErr != nil {
+			http.Error(w, `{"error":"firewall error"}`, http.StatusInternalServerError)
+			return
+		}
+		if fwDecision.Action == firewall.ActionBlock {
+			if h.auditSvc != nil {
+				h.auditSvc.Log(&domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody:  sanitizePayload(bodyBytes),
+					Model:        model, Provider: "unified",
+					Endpoint:     "/proxy/chat", StatusCode: 403,
+					PIIDetected:  len(fwDecision.Findings) > 0,
+					PolicyAction: "blocked",
+					DurationMs:   int(time.Since(start).Milliseconds()),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":     "blocked by firewall",
+				"reason":    fwDecision.Reason,
+				"inspector": fwDecision.InspectorName,
+			})
+			return
+		}
+	}
+
 	findings := pii.Scan(allText)
 	piiTypes := pii.DetectedTypes(findings)
 	piiDetected := len(findings) > 0
@@ -1217,6 +1256,34 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 
 			accumulated := string(respBytes)
+
+			// Firewall Pipeline — response inspection (streaming)
+			if h.firewallPipeline != nil {
+				fwPayload := &firewall.Payload{
+					Text: accumulated, Model: providerModel, Provider: candidate.Name,
+					UserID: claims.UserID, Phase: firewall.PhaseResponse,
+				}
+				fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+				if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
+					if h.auditSvc != nil {
+						h.auditSvc.Log(&domain.AuditLog{
+							ID: uuid.New().String(), UserID: claims.UserID,
+							RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
+							Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
+							StatusCode: 403, PolicyAction: "blocked",
+							DurationMs: int(time.Since(start).Milliseconds()),
+						})
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					json.NewEncoder(w).Encode(map[string]string{
+						"error": "blocked by firewall", "reason": fwDecision.Reason,
+						"inspector": fwDecision.InspectorName,
+					})
+					return
+				}
+			}
+
 			responseFindings := pii.Scan(accumulated)
 			responseDecision := dlp.Decision{Action: dlp.DLPActionAllow}
 			if h.dlpSvc != nil {
@@ -1299,6 +1366,33 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusPaymentRequired)
 			json.NewEncoder(w).Encode(map[string]string{"error": "budget exceeded"})
 			return
+		}
+
+		// Firewall Pipeline — response inspection (non-streaming)
+		if h.firewallPipeline != nil {
+			fwPayload := &firewall.Payload{
+				Text: string(respBody), Model: providerModel, Provider: candidate.Name,
+				UserID: claims.UserID, Phase: firewall.PhaseResponse,
+			}
+			fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+			if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
+				if h.auditSvc != nil {
+					h.auditSvc.Log(&domain.AuditLog{
+						ID: uuid.New().String(), UserID: claims.UserID,
+						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
+						Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
+						StatusCode: 403, PolicyAction: "blocked",
+						DurationMs: int(time.Since(start).Milliseconds()),
+					})
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "blocked by firewall", "reason": fwDecision.Reason,
+					"inspector": fwDecision.InspectorName,
+				})
+				return
+			}
 		}
 
 		responseFindings := pii.Scan(string(respBody))
@@ -1411,10 +1505,42 @@ func validateChatRequest(req *chatRequest) error {
 	return nil
 }
 
+// secretPatterns holds compiled regexps for DLP secret redaction in audit logs.
+// Compiled once via sync.Once to avoid per-call overhead.
+var (
+	secretPatterns     []secretPattern
+	secretPatternsOnce sync.Once
+)
+
+type secretPattern struct {
+	name string
+	re   *regexp.Regexp
+}
+
+func getSecretPatterns() []secretPattern {
+	secretPatternsOnce.Do(func() {
+		secretPatterns = []secretPattern{
+			{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}\b`)},
+			{"aws_key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+			{"anthropic_key", regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9\-_]{10,})`)},
+			{"github_token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`)},
+			{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----`)},
+			{"bearer_token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}\b`)},
+			{"api_secret", regexp.MustCompile(`(?i)\b(api[_-]?secret|secret[_-]?key|access[_-]?key)\s*[:=]\s*[A-Za-z0-9._/+]{16,}`)},
+		}
+	})
+	return secretPatterns
+}
+
 func sanitizePayload(payload []byte) string {
 	sanitized := string(payload)
+	// PII patterns
 	for _, p := range pii.Patterns {
 		sanitized = p.Pattern.ReplaceAllString(sanitized, "[redacted:"+p.Name+"]")
+	}
+	// DLP secret patterns — redact API keys, tokens, private keys
+	for _, sp := range getSecretPatterns() {
+		sanitized = sp.re.ReplaceAllString(sanitized, "[redacted:"+sp.name+"]")
 	}
 	if len(sanitized) > maxAuditBodyChars {
 		return sanitized[:maxAuditBodyChars] + "..."
@@ -1517,12 +1643,17 @@ func copyHeadersWithoutContentLength(dst, src http.Header) {
 
 func (h *Handler) auditPayload(payload []byte, piiFindings []pii.Finding, decision dlp.Decision) string {
 	sanitized := string(payload)
-	if h != nil && h.dlpSvc != nil && decision.Action == dlp.DLPActionSanitize {
+	// Always sanitize via DLP if service available (not just on Sanitize action)
+	if h != nil && h.dlpSvc != nil {
 		sanitized = h.dlpSvc.Sanitize(sanitized, piiFindings)
 	}
-
+	// Also apply PII redaction
 	for _, p := range pii.Patterns {
 		sanitized = p.Pattern.ReplaceAllString(sanitized, "[redacted:"+p.Name+"]")
+	}
+	// Also apply DLP secret pattern redaction as defense-in-depth
+	for _, sp := range getSecretPatterns() {
+		sanitized = sp.re.ReplaceAllString(sanitized, "[redacted:"+sp.name+"]")
 	}
 	if len(sanitized) > maxAuditBodyChars {
 		return sanitized[:maxAuditBodyChars] + "..."
@@ -1600,4 +1731,17 @@ func (h *Handler) mergePolicyAction(policyAction string, dlpAction dlp.Action) s
 		}
 		return policyAction
 	}
+}
+
+// FirewallStatus returns the current status of all firewall inspectors.
+func (h *Handler) FirewallStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.firewallPipeline == nil {
+		json.NewEncoder(w).Encode(map[string]any{"enabled": false, "inspectors": []any{}})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"enabled":    true,
+		"inspectors": h.firewallPipeline.Status(),
+	})
 }

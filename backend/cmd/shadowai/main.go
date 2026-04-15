@@ -317,6 +317,7 @@ func main() {
 	proxyRouter.Handle("/providers/connectivity/alerts", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.ProviderConnectivityAlerts))).Methods("GET")
 	proxyRouter.Handle("/providers/test", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.TestAllProviders))).Methods("POST")
 	proxyRouter.Handle("/providers/{provider}/test", auth.RequireRole(auth.RoleAdmin)(http.HandlerFunc(proxyHandler.TestProvider))).Methods("POST")
+	proxyRouter.HandleFunc("/firewall/status", proxyHandler.FirewallStatus).Methods("GET")
 	proxyRouter.HandleFunc("/chat", proxyHandler.UnifiedChat).Methods("POST")
 	proxyRouter.PathPrefix("/{provider}/").HandlerFunc(proxyHandler.ProxyChat).Methods("POST")
 

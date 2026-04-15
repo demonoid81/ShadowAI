@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 type mockInspector struct {
@@ -130,8 +131,8 @@ func TestFlagContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if d.Action != ActionAllow {
-		t.Errorf("expected allow (flag doesn't block), got %s", d.Action)
+	if d.Action != ActionFlag {
+		t.Errorf("expected flag (worst non-block action tracked), got %s", d.Action)
 	}
 	if len(d.Findings) != 2 {
 		t.Errorf("expected 2 findings, got %d", len(d.Findings))
@@ -160,8 +161,8 @@ func TestSanitizeContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if d.Action != ActionAllow {
-		t.Errorf("expected allow, got %s", d.Action)
+	if d.Action != ActionSanitize {
+		t.Errorf("expected sanitize (worst non-block action tracked), got %s", d.Action)
 	}
 	if len(d.Findings) != 1 {
 		t.Errorf("expected 1 finding, got %d", len(d.Findings))
@@ -220,6 +221,9 @@ func TestAggregatesFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if d.Action != ActionFlag {
+		t.Errorf("expected flag (worst non-block action), got %s", d.Action)
+	}
 	if len(d.Findings) != 3 {
 		t.Errorf("expected 3 aggregated findings, got %d", len(d.Findings))
 	}
@@ -265,5 +269,107 @@ func TestNilDecisionSkipped(t *testing.T) {
 	}
 	if len(d.Findings) != 1 {
 		t.Errorf("expected 1 finding, got %d", len(d.Findings))
+	}
+}
+
+// TestFlagActionTracked — flag action is preserved in final decision, not collapsed to allow.
+func TestFlagActionTracked(t *testing.T) {
+	p := NewPipeline()
+	p.Register(&mockInspector{
+		name: "flagger",
+		requestDecision: &Decision{
+			Action:   ActionFlag,
+			Reason:   "suspicious pattern",
+			Severity: SeverityMedium,
+			Findings: []Finding{{Type: "test", Severity: SeverityMedium, Match: "pattern"}},
+		},
+	})
+
+	d, err := p.InspectRequest(context.Background(), &Payload{Text: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Action != ActionFlag {
+		t.Errorf("expected flag action to be tracked, got %s", d.Action)
+	}
+	if d.Reason != "suspicious pattern" {
+		t.Errorf("expected reason 'suspicious pattern', got %q", d.Reason)
+	}
+	if d.InspectorName != "flagger" {
+		t.Errorf("expected inspector name 'flagger', got %q", d.InspectorName)
+	}
+}
+
+// TestSanitizeOverridesFlag — sanitize is worse than flag, so sanitize wins.
+func TestSanitizeOverridesFlag(t *testing.T) {
+	p := NewPipeline()
+	p.Register(&mockInspector{
+		name: "flagger",
+		requestDecision: &Decision{
+			Action:   ActionFlag,
+			Reason:   "flagged",
+			Severity: SeverityLow,
+		},
+	})
+	p.Register(&mockInspector{
+		name: "sanitizer",
+		requestDecision: &Decision{
+			Action:   ActionSanitize,
+			Reason:   "needs sanitization",
+			Severity: SeverityMedium,
+		},
+	})
+
+	d, err := p.InspectRequest(context.Background(), &Payload{Text: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Action != ActionSanitize {
+		t.Errorf("expected sanitize (overrides flag), got %s", d.Action)
+	}
+	if d.InspectorName != "sanitizer" {
+		t.Errorf("expected inspector name 'sanitizer', got %q", d.InspectorName)
+	}
+}
+
+// TestContentRateLimiterRecordFlagOnPipelineFlag — when a flag decision occurs,
+// ContentRateLimiter.RecordFlag is called automatically.
+func TestContentRateLimiterRecordFlagOnPipelineFlag(t *testing.T) {
+	p := NewPipeline()
+
+	rl := NewContentRateLimiter(ContentRateLimitConfig{
+		Enabled:           true,
+		MaxCharsPerMinute: 100000,
+		MaxFlagsPerMinute: 3,
+		Window:            time.Minute,
+	})
+	p.Register(rl)
+
+	p.Register(&mockInspector{
+		name: "flagger",
+		requestDecision: &Decision{
+			Action:   ActionFlag,
+			Reason:   "suspicious",
+			Severity: SeverityMedium,
+		},
+	})
+
+	payload := &Payload{Text: "test", UserID: "flaguser"}
+
+	// Send 3 requests — each triggers a flag, RecordFlag should be called
+	for i := 0; i < 3; i++ {
+		_, err := p.InspectRequest(context.Background(), payload)
+		if err != nil {
+			t.Fatalf("request %d: unexpected error: %v", i, err)
+		}
+	}
+
+	// 4th request: ContentRateLimiter should block due to 3 flags accumulated
+	d, err := p.InspectRequest(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Action != ActionBlock {
+		t.Errorf("expected block after flag limit exceeded, got %s: %s", d.Action, d.Reason)
 	}
 }

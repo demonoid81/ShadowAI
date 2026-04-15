@@ -154,7 +154,12 @@
     "reason": "Причина",
     "timestamp": "Время",
     "user": "Пользователь",
-    "noBlocks": "Нет блокировок"
+    "noBlocks": "Нет блокировок",
+    "loading": "Загрузка...",
+    "notEnabled": "Файрвол не включён",
+    "endpoint": "Эндпоинт",
+    "provider": "Провайдер",
+    "statusCode": "Статус"
   },
   "internalDb": {
     "title": "Внутренние базы данных",

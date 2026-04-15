@@ -96,6 +96,9 @@ func (p *Pipeline) run(
 ) (*Decision, error) {
 	var allFindings []Finding
 	highestSeverity := SeverityLow
+	finalAction := ActionAllow
+	var finalReason string
+	var finalInspectorName string
 
 	for _, inspector := range p.inspectors {
 		d, err := fn(inspector)(ctx, payload)
@@ -117,13 +120,45 @@ func (p *Pipeline) run(
 			d.Findings = allFindings
 			return d, nil
 		}
+
+		// Track worst non-block action: sanitize > flag > allow
+		if compareAction(d.Action, finalAction) > 0 {
+			finalAction = d.Action
+			finalReason = d.Reason
+			finalInspectorName = d.InspectorName
+		}
+
+		if d.Action == ActionFlag {
+			p.recordFlag(payload.UserID)
+		}
 	}
 
 	return &Decision{
-		Action:   ActionAllow,
-		Severity: highestSeverity,
-		Findings: allFindings,
+		Action:        finalAction,
+		Reason:        finalReason,
+		Severity:      highestSeverity,
+		Findings:      allFindings,
+		InspectorName: finalInspectorName,
 	}, nil
+}
+
+// recordFlag вызывает RecordFlag у ContentRateLimiter, если он зарегистрирован.
+func (p *Pipeline) recordFlag(userID string) {
+	for _, inspector := range p.inspectors {
+		if rl, ok := inspector.(*ContentRateLimiter); ok {
+			rl.RecordFlag(userID)
+		}
+	}
+}
+
+// compareAction сравнивает действия по степени серьёзности.
+func compareAction(a, b Action) int {
+	order := map[Action]int{
+		ActionAllow:    0,
+		ActionFlag:     1,
+		ActionSanitize: 2,
+	}
+	return order[a] - order[b]
 }
 
 func compareSeverity(a, b Severity) int {

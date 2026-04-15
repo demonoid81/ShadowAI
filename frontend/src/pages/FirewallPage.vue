@@ -5,12 +5,14 @@
     <!-- Inspector Pipeline -->
     <div class="bg-dark-900 border border-dark-700 rounded-xl p-6 mb-6">
       <h3 class="text-lg font-semibold mb-4">{{ $t('firewall.pipeline') }}</h3>
-      <div class="space-y-2">
-        <div v-for="(inspector, i) in inspectors" :key="i"
+      <div v-if="loading" class="text-gray-500 text-sm">{{ $t('firewall.loading') }}</div>
+      <div v-else-if="!firewallEnabled" class="text-gray-500 text-sm">{{ $t('firewall.notEnabled') }}</div>
+      <div v-else class="space-y-2">
+        <div v-for="(inspector, i) in inspectors" :key="inspector.name"
           class="flex items-center justify-between px-4 py-3 bg-dark-800 rounded-lg">
           <div class="flex items-center gap-3">
             <span class="w-6 h-6 rounded-full bg-primary-600/30 text-primary-400 flex items-center justify-center text-xs font-bold">{{ i + 1 }}</span>
-            <span class="font-medium">{{ $t(inspector.labelKey) }}</span>
+            <span class="font-medium">{{ inspectorLabel(inspector.name) }}</span>
           </div>
           <div class="flex items-center gap-4 text-sm">
             <span class="text-gray-500">{{ $t('firewall.' + inspector.phase) }}</span>
@@ -33,15 +35,19 @@
             <th class="px-4 py-2">{{ $t('firewall.timestamp') }}</th>
             <th class="px-4 py-2">{{ $t('firewall.user') }}</th>
             <th class="px-4 py-2">{{ $t('audit.model') }}</th>
-            <th class="px-4 py-2">{{ $t('firewall.reason') }}</th>
+            <th class="px-4 py-2">{{ $t('firewall.endpoint') }}</th>
+            <th class="px-4 py-2">{{ $t('firewall.provider') }}</th>
+            <th class="px-4 py-2">{{ $t('firewall.statusCode') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="b in blocks" :key="b.id" class="border-b border-dark-800">
             <td class="px-4 py-2 text-gray-500">{{ new Date(b.created_at).toLocaleString() }}</td>
             <td class="px-4 py-2">{{ b.user_id?.slice(0, 8) }}...</td>
-            <td class="px-4 py-2 text-gray-400">{{ b.model }}</td>
-            <td class="px-4 py-2 text-red-400">{{ b.policy_action }}</td>
+            <td class="px-4 py-2 text-gray-400">{{ b.model || '-' }}</td>
+            <td class="px-4 py-2 text-gray-400">{{ b.endpoint || '-' }}</td>
+            <td class="px-4 py-2 text-gray-400">{{ b.provider || '-' }}</td>
+            <td class="px-4 py-2 text-red-400">{{ b.status_code || '-' }}</td>
           </tr>
         </tbody>
       </table>
@@ -52,24 +58,51 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import api from '../api/client'
+import api, { proxyApi } from '../api/client'
 
 const { t } = useI18n()
 
-const inspectors = [
-  { labelKey: 'firewall.pii', phase: 'both', enabled: true },
-  { labelKey: 'firewall.dlp', phase: 'both', enabled: true },
-  { labelKey: 'firewall.policy', phase: 'request', enabled: true },
-  { labelKey: 'firewall.promptInjection', phase: 'request', enabled: true },
-  { labelKey: 'firewall.jailbreak', phase: 'request', enabled: true },
-  { labelKey: 'firewall.contentModeration', phase: 'both', enabled: true },
-  { labelKey: 'firewall.outputValidation', phase: 'response', enabled: true },
-  { labelKey: 'firewall.contentRateLimit', phase: 'request', enabled: true },
-  { labelKey: 'firewall.multiTurn', phase: 'request', enabled: true },
-  { labelKey: 'firewall.semantic', phase: 'request', enabled: true }
-]
+interface InspectorInfo {
+  name: string
+  enabled: boolean
+  phase: string
+}
 
+const nameToLabelKey: Record<string, string> = {
+  pii: 'firewall.pii',
+  dlp: 'firewall.dlp',
+  policy: 'firewall.policy',
+  prompt_injection: 'firewall.promptInjection',
+  jailbreak: 'firewall.jailbreak',
+  content_moderation: 'firewall.contentModeration',
+  output_validation: 'firewall.outputValidation',
+  content_ratelimit: 'firewall.contentRateLimit',
+  multiturn: 'firewall.multiTurn',
+  semantic: 'firewall.semantic',
+}
+
+function inspectorLabel(name: string): string {
+  const key = nameToLabelKey[name]
+  return key ? t(key) : name
+}
+
+const loading = ref(true)
+const firewallEnabled = ref(false)
+const inspectors = ref<InspectorInfo[]>([])
 const blocks = ref<any[]>([])
+
+async function fetchFirewallStatus() {
+  try {
+    const { data } = await proxyApi.get('/firewall/status')
+    firewallEnabled.value = data.enabled
+    inspectors.value = data.inspectors || []
+  } catch {
+    firewallEnabled.value = false
+    inspectors.value = []
+  } finally {
+    loading.value = false
+  }
+}
 
 async function fetchBlocks() {
   try {
@@ -78,5 +111,8 @@ async function fetchBlocks() {
   } catch { /* admin only */ }
 }
 
-onMounted(fetchBlocks)
+onMounted(() => {
+  fetchFirewallStatus()
+  fetchBlocks()
+})
 </script>

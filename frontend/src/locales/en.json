@@ -154,7 +154,12 @@
     "reason": "Reason",
     "timestamp": "Timestamp",
     "user": "User",
-    "noBlocks": "No recent blocks"
+    "noBlocks": "No recent blocks",
+    "loading": "Loading...",
+    "notEnabled": "Firewall is not enabled",
+    "endpoint": "Endpoint",
+    "provider": "Provider",
+    "statusCode": "Status"
   },
   "internalDb": {
     "title": "Internal Databases",

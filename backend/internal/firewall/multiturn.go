@@ -155,18 +155,20 @@ func (m *MultiTurnInspector) InspectResponse(ctx context.Context, p *Payload) (*
 	return &Decision{Action: ActionAllow}, nil
 }
 
-// extractUserMessages извлекает тексты пользовательских сообщений из payload.
+// extractUserMessages извлекает тексты сообщений из payload.
+// Включает все сообщения (не только user) для полного контекста сессии.
+// Если Messages пуст, используется Text как fallback (синтетическое user-сообщение).
 func (m *MultiTurnInspector) extractUserMessages(p *Payload) []string {
 	if len(p.Messages) > 0 {
 		var msgs []string
 		for _, msg := range p.Messages {
-			if msg.Role == "user" && msg.Content != "" {
+			if msg.Content != "" {
 				msgs = append(msgs, msg.Content)
 			}
 		}
 		return msgs
 	}
-	// Fallback на Text
+	// Fallback на Text — создаём синтетическое user-сообщение
 	if p.Text != "" {
 		return []string{p.Text}
 	}
