@@ -9,6 +9,11 @@ const router = createRouter({
       meta: { public: true }
     },
     {
+      path: '/register',
+      component: () => import('../pages/RegisterPage.vue'),
+      meta: { public: true }
+    },
+    {
       path: '/',
       component: () => import('../layouts/DashboardLayout.vue'),
       children: [
@@ -17,7 +22,10 @@ const router = createRouter({
         { path: 'audit', component: () => import('../pages/AuditLogPage.vue') },
         { path: 'policies', component: () => import('../pages/PoliciesPage.vue') },
         { path: 'budget', component: () => import('../pages/BudgetPage.vue') },
-        { path: 'users', component: () => import('../pages/UsersPage.vue') }
+        { path: 'users', component: () => import('../pages/UsersPage.vue') },
+        { path: 'providers', component: () => import('../pages/ProvidersPage.vue') },
+        { path: 'firewall', component: () => import('../pages/FirewallPage.vue') },
+        { path: 'internal-db', component: () => import('../pages/InternalDbPage.vue') }
       ]
     }
   ]
