@@ -36,6 +36,21 @@ type Config struct {
 	ServerIdleTimeout       time.Duration
 	ServerReadHeaderTimeout time.Duration
 	ServerMaxHeaderBytes    int
+
+	// Firewall
+	FirewallEnabled              bool
+	FirewallPIEnabled            bool
+	FirewallPIHeuristicThreshold float64
+	FirewallPIJudgeThreshold     float64
+	FirewallJBEnabled            bool
+	FirewallJBHeuristicThreshold float64
+	FirewallJBJudgeThreshold     float64
+	FirewallJudgeEnabled         bool
+	FirewallJudgeProvider        string
+	FirewallJudgeModel           string
+	FirewallJudgeEndpoint        string
+	FirewallJudgeAPIKey          string
+	FirewallJudgeTimeout         time.Duration
 }
 
 func Load() *Config {
@@ -78,6 +93,21 @@ func Load() *Config {
 		ServerIdleTimeout:       idleTimeout,
 		ServerReadHeaderTimeout: readHeaderTimeout,
 		ServerMaxHeaderBytes:    getEnvInt("SERVER_MAX_HEADER_BYTES", 1<<20),
+
+		// Firewall
+		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",
+		FirewallPIEnabled:            getEnv("FIREWALL_PI_ENABLED", "true") == "true",
+		FirewallPIHeuristicThreshold: getEnvFloat("FIREWALL_PI_HEURISTIC_THRESHOLD", 0.8),
+		FirewallPIJudgeThreshold:     getEnvFloat("FIREWALL_PI_JUDGE_THRESHOLD", 0.4),
+		FirewallJBEnabled:            getEnv("FIREWALL_JB_ENABLED", "true") == "true",
+		FirewallJBHeuristicThreshold: getEnvFloat("FIREWALL_JB_HEURISTIC_THRESHOLD", 0.8),
+		FirewallJBJudgeThreshold:     getEnvFloat("FIREWALL_JB_JUDGE_THRESHOLD", 0.4),
+		FirewallJudgeEnabled:         getEnv("FIREWALL_JUDGE_ENABLED", "false") == "true",
+		FirewallJudgeProvider:        getEnv("FIREWALL_JUDGE_PROVIDER", "ollama"),
+		FirewallJudgeModel:           getEnv("FIREWALL_JUDGE_MODEL", "llama3.2"),
+		FirewallJudgeEndpoint:        getEnv("FIREWALL_JUDGE_ENDPOINT", "http://localhost:11434"),
+		FirewallJudgeAPIKey:          getEnv("FIREWALL_JUDGE_API_KEY", ""),
+		FirewallJudgeTimeout:         getDuration("FIREWALL_JUDGE_TIMEOUT", 5*time.Second),
 	}
 }
 
@@ -95,6 +125,18 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed

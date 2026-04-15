@@ -21,6 +21,7 @@ import (
 	"github.com/shadowai/backend/internal/budget"
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/domain"
+	"github.com/shadowai/backend/internal/firewall"
 	"github.com/shadowai/backend/internal/pii"
 	"github.com/shadowai/backend/internal/policy"
 )
@@ -90,6 +91,7 @@ type Handler struct {
 	cache         *SemanticCache
 	healthTracker *HealthTracker
 	maxCompletionTokens int
+	firewallPipeline *firewall.Pipeline
 }
 
 // NewHandler creates a new multi-provider proxy handler.
@@ -104,6 +106,7 @@ func NewHandler(
 	cache *SemanticCache,
 	healthTracker *HealthTracker,
 	maxCompletionTokens int,
+	firewallPipeline *firewall.Pipeline,
 ) *Handler {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -127,6 +130,7 @@ func NewHandler(
 		cache:         cache,
 		healthTracker: healthTracker,
 		maxCompletionTokens: maxCompletionTokens,
+		firewallPipeline: firewallPipeline,
 	}
 }
 
@@ -196,6 +200,43 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	endpoint := r.URL.Path
 	if idx := strings.Index(endpoint, "/"+providerName+"/"); idx >= 0 {
 		endpoint = endpoint[idx+len(providerName)+1:]
+	}
+
+	// 3.9. Firewall Pipeline — request inspection
+	if h.firewallPipeline != nil {
+		fwPayload := &firewall.Payload{
+			Text:     allText,
+			Model:    model,
+			Provider: providerName,
+			UserID:   claims.UserID,
+			Phase:    firewall.PhaseRequest,
+		}
+		fwDecision, fwErr := h.firewallPipeline.InspectRequest(r.Context(), fwPayload)
+		if fwErr != nil {
+			http.Error(w, `{"error":"firewall error"}`, http.StatusInternalServerError)
+			return
+		}
+		if fwDecision.Action == firewall.ActionBlock {
+			if h.auditSvc != nil {
+				h.auditSvc.Log(&domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody:  sanitizePayload(bodyBytes),
+					Model:        model, Provider: providerName,
+					Endpoint:     endpoint, StatusCode: 403,
+					PIIDetected:  len(fwDecision.Findings) > 0,
+					PolicyAction: "blocked",
+					DurationMs:   int(time.Since(start).Milliseconds()),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":     "blocked by firewall",
+				"reason":    fwDecision.Reason,
+				"inspector": fwDecision.InspectorName,
+			})
+			return
+		}
 	}
 
 	// 4. PII + DLP Detection
@@ -317,6 +358,34 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		accumulated := string(respBytes)
+
+		// Firewall Pipeline — response inspection (streaming)
+		if h.firewallPipeline != nil {
+			fwPayload := &firewall.Payload{
+				Text: accumulated, Model: model, Provider: providerName,
+				UserID: claims.UserID, Phase: firewall.PhaseResponse,
+			}
+			fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+			if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
+				if h.auditSvc != nil {
+					h.auditSvc.Log(&domain.AuditLog{
+						ID: uuid.New().String(), UserID: claims.UserID,
+						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
+						Model: model, Provider: providerName, Endpoint: endpoint,
+						StatusCode: 403, PolicyAction: "blocked",
+						DurationMs: int(time.Since(start).Milliseconds()),
+					})
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "blocked by firewall", "reason": fwDecision.Reason,
+					"inspector": fwDecision.InspectorName,
+				})
+				return
+			}
+		}
+
 		responseFindings := pii.Scan(accumulated)
 		responseDecision := dlp.Decision{Action: dlp.DLPActionAllow}
 		if h.dlpSvc != nil {
@@ -370,6 +439,33 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"read upstream"}`, http.StatusBadGateway)
 		return
+	}
+
+	// Firewall Pipeline — response inspection (non-streaming)
+	if h.firewallPipeline != nil {
+		fwPayload := &firewall.Payload{
+			Text: string(respBody), Model: model, Provider: providerName,
+			UserID: claims.UserID, Phase: firewall.PhaseResponse,
+		}
+		fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+		if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
+			if h.auditSvc != nil {
+				h.auditSvc.Log(&domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
+					Model: model, Provider: providerName, Endpoint: endpoint,
+					StatusCode: 403, PolicyAction: "blocked",
+					DurationMs: int(time.Since(start).Milliseconds()),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "blocked by firewall", "reason": fwDecision.Reason,
+				"inspector": fwDecision.InspectorName,
+			})
+			return
+		}
 	}
 
 	promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBody)

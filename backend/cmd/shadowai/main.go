@@ -18,6 +18,7 @@ import (
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/dashboard"
 	"github.com/shadowai/backend/internal/dlp"
+	"github.com/shadowai/backend/internal/firewall"
 	"github.com/shadowai/backend/internal/internaldb"
 	mw "github.com/shadowai/backend/internal/middleware"
 	"github.com/shadowai/backend/internal/platform/postgres"
@@ -88,6 +89,40 @@ func main() {
 	}()
 	dlpSvc := dlp.NewService(cfg.DLPMode)
 
+	// Firewall Pipeline
+	var firewallPipeline *firewall.Pipeline
+	if cfg.FirewallEnabled {
+		firewallPipeline = firewall.NewPipeline()
+		firewallPipeline.Register(firewall.NewPIIInspector())
+		firewallPipeline.Register(firewall.NewDLPInspector(dlpSvc))
+		firewallPipeline.Register(firewall.NewPolicyInspector(policySvc.Engine))
+
+		var judge *firewall.Judge
+		if cfg.FirewallJudgeEnabled {
+			judge = firewall.NewJudge(firewall.JudgeConfig{
+				Provider: cfg.FirewallJudgeProvider,
+				Model:    cfg.FirewallJudgeModel,
+				Endpoint: cfg.FirewallJudgeEndpoint,
+				APIKey:   cfg.FirewallJudgeAPIKey,
+				Timeout:  cfg.FirewallJudgeTimeout,
+				Enabled:  true,
+			})
+		}
+
+		firewallPipeline.Register(firewall.NewPromptInjectionInspector(firewall.PromptInjectionConfig{
+			Enabled:            cfg.FirewallPIEnabled,
+			HeuristicThreshold: cfg.FirewallPIHeuristicThreshold,
+			JudgeThreshold:     cfg.FirewallPIJudgeThreshold,
+		}, judge))
+		firewallPipeline.Register(firewall.NewJailbreakInspector(firewall.JailbreakConfig{
+			Enabled:            cfg.FirewallJBEnabled,
+			HeuristicThreshold: cfg.FirewallJBHeuristicThreshold,
+			JudgeThreshold:     cfg.FirewallJBJudgeThreshold,
+		}, judge))
+
+		log.Printf("firewall pipeline: enabled with 5 inspectors (judge=%v)", cfg.FirewallJudgeEnabled)
+	}
+
 	// Provider Registry — skip providers without API keys
 	registry := proxy.NewRegistry()
 	if cfg.OpenAIAPIKey != "" {
@@ -151,7 +186,7 @@ func main() {
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db)
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc)
-	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens)
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline)
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
 	defer connectivityCancel()
