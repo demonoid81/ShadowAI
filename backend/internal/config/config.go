@@ -51,6 +51,14 @@ type Config struct {
 	FirewallJudgeEndpoint        string
 	FirewallJudgeAPIKey          string
 	FirewallJudgeTimeout         time.Duration
+	FirewallCMEnabled            bool
+	FirewallCMHeuristicThreshold float64
+	FirewallCMJudgeThreshold     float64
+	FirewallOVEnabled            bool
+	FirewallOVHeuristicThreshold float64
+	FirewallRLEnabled            bool
+	FirewallRLMaxCharsPerMinute  int
+	FirewallRLMaxFlagsPerMinute  int
 }
 
 func Load() *Config {
@@ -108,6 +116,14 @@ func Load() *Config {
 		FirewallJudgeEndpoint:        getEnv("FIREWALL_JUDGE_ENDPOINT", "http://localhost:11434"),
 		FirewallJudgeAPIKey:          getEnv("FIREWALL_JUDGE_API_KEY", ""),
 		FirewallJudgeTimeout:         getDuration("FIREWALL_JUDGE_TIMEOUT", 5*time.Second),
+		FirewallCMEnabled:            getEnv("FIREWALL_CM_ENABLED", "true") == "true",
+		FirewallCMHeuristicThreshold: getEnvFloat("FIREWALL_CM_HEURISTIC_THRESHOLD", 0.7),
+		FirewallCMJudgeThreshold:     getEnvFloat("FIREWALL_CM_JUDGE_THRESHOLD", 0.3),
+		FirewallOVEnabled:            getEnv("FIREWALL_OV_ENABLED", "true") == "true",
+		FirewallOVHeuristicThreshold: getEnvFloat("FIREWALL_OV_HEURISTIC_THRESHOLD", 0.7),
+		FirewallRLEnabled:            getEnv("FIREWALL_RL_ENABLED", "false") == "true",
+		FirewallRLMaxCharsPerMinute:  getEnvInt("FIREWALL_RL_MAX_CHARS_PER_MINUTE", 50000),
+		FirewallRLMaxFlagsPerMinute:  getEnvInt("FIREWALL_RL_MAX_FLAGS_PER_MINUTE", 5),
 	}
 }
 

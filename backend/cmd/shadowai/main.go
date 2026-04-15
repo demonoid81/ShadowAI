@@ -119,8 +119,22 @@ func main() {
 			HeuristicThreshold: cfg.FirewallJBHeuristicThreshold,
 			JudgeThreshold:     cfg.FirewallJBJudgeThreshold,
 		}, judge))
+		firewallPipeline.Register(firewall.NewContentModerationInspector(firewall.ContentModerationConfig{
+			Enabled:            cfg.FirewallCMEnabled,
+			HeuristicThreshold: cfg.FirewallCMHeuristicThreshold,
+			JudgeThreshold:     cfg.FirewallCMJudgeThreshold,
+		}, judge))
+		firewallPipeline.Register(firewall.NewOutputValidationInspector(firewall.OutputValidationConfig{
+			Enabled:            cfg.FirewallOVEnabled,
+			HeuristicThreshold: cfg.FirewallOVHeuristicThreshold,
+		}))
+		firewallPipeline.Register(firewall.NewContentRateLimiter(firewall.ContentRateLimitConfig{
+			Enabled:           cfg.FirewallRLEnabled,
+			MaxCharsPerMinute: cfg.FirewallRLMaxCharsPerMinute,
+			MaxFlagsPerMinute: cfg.FirewallRLMaxFlagsPerMinute,
+		}))
 
-		log.Printf("firewall pipeline: enabled with 5 inspectors (judge=%v)", cfg.FirewallJudgeEnabled)
+		log.Printf("firewall pipeline: enabled with 8 inspectors (judge=%v)", cfg.FirewallJudgeEnabled)
 	}
 
 	// Provider Registry — skip providers without API keys
