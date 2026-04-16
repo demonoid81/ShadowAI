@@ -29,6 +29,15 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # ВАЖНО: GET /metrics экспортирует Prometheus-телеметрию (audit queue,
+    # firewall decisions, budget blocks) и НЕ защищён app-level auth.
+    # В prod:
+    #   - либо не публиковать порт 8080 наружу, а проксировать только /api и
+    #     /proxy через reverse proxy с ACL на /metrics,
+    #   - либо добавить basic auth / IP-allowlist на /metrics на уровне
+    #     ingress (nginx auth_basic, Traefik middleware, mTLS).
+    # Публикация /metrics без ограничений = утечка runtime и security
+    # телеметрии наружу.
     ports:
       - "8080:8080"
     environment:

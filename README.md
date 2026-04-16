@@ -706,6 +706,73 @@ make test
 
 ---
 
+## Observability (Prometheus)
+
+Backend экспортирует метрики для scrape по `GET /metrics` в стандартном Prometheus text format.
+
+### Экспортируемые метрики
+
+| Метрика | Тип | Labels | Назначение |
+|---|---|---|---|
+| `shadowai_audit_queue_depth` | gauge | — | Глубина audit-очереди. Alert при росте → проблемы с БД |
+| `shadowai_audit_dropped_total` | counter | — | Потеряно audit-событий из-за переполнения канала |
+| `shadowai_audit_inserted_total` | counter | — | Успешно записано в БД |
+| `shadowai_audit_failed_total` | counter | — | Ошибки на `INSERT` |
+| `shadowai_firewall_decisions_total` | counter | `phase, inspector, action` | Все решения pipeline |
+| `shadowai_proxy_budget_blocks_total` | counter | `streaming` | 402 по бюджету |
+| `shadowai_stream_usage_parse_fail_total` | counter | `provider` | SSE без usage |
+
+### 🔒 Критичное infra требование
+
+**`GET /metrics` НЕ защищён application-level auth** — Prometheus scrapers не авторизуются JWT. В production эндпоинт должен быть ограничен на уровне infrastructure:
+
+**Вариант A — internal-only network (рекомендуется):**
+- Не публиковать порт backend наружу; scrape делается из того же k8s namespace / docker network
+- Reverse-proxy (nginx/traefik) пропускает только `/api/*` и `/proxy/*`; `/metrics` не проксируется
+- Пример в `frontend/nginx.conf`: нет location для `/metrics`
+
+**Вариант B — external scrape с auth:**
+- `nginx`: `location /metrics { auth_basic "metrics"; auth_basic_user_file /etc/nginx/.htpasswd; allow 10.0.0.0/8; deny all; }`
+- `Traefik`: middleware `basicauth` + `ipwhitelist`
+- mTLS через сервисную сеть (Istio/Linkerd)
+
+**Вариант C — отдельный порт:** биндить `/metrics` на 127.0.0.1:9090 и scrape через sidecar.
+
+Публикация `/metrics` в интернет без ограничений = утечка внутренней runtime и security-телеметрии.
+
+### Пример scrape-конфига
+
+```yaml
+scrape_configs:
+  - job_name: shadowai
+    static_configs:
+      - targets: ['shadowai-backend:8080']
+    metrics_path: /metrics
+    scrape_interval: 15s
+```
+
+### Пример alert rules
+
+```yaml
+groups:
+  - name: shadowai
+    rules:
+      - alert: ShadowAIAuditDropping
+        expr: rate(shadowai_audit_dropped_total[5m]) > 0
+        annotations:
+          summary: "Audit log entries dropped — security events потеряны"
+      - alert: ShadowAIAuditQueueHigh
+        expr: shadowai_audit_queue_depth > 500
+        annotations:
+          summary: "Audit queue растёт — БД медленная"
+      - alert: ShadowAIStreamParseFailHigh
+        expr: rate(shadowai_stream_usage_parse_fail_total[10m]) > 0.1
+        annotations:
+          summary: "Streaming usage не парсится — риск обхода budget"
+```
+
+---
+
 ## Полезные команды
 
 | Команда | Описание |
