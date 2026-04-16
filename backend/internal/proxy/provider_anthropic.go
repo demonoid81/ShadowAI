@@ -19,6 +19,11 @@ var anthropicPricing = map[string][2]float64{
 var anthropicFallbackPricing = [2]float64{3.0 / 1_000_000, 15.0 / 1_000_000}
 
 type anthropicResponse struct {
+	// Model возвращается Anthropic в non-stream ответе и является
+	// источником истины для model-specific pricing lookup. Ранее cost
+	// считался с пустым model, что всегда попадало в fallback pricing —
+	// для sonnet/opus это было материально неточно.
+	Model string `json:"model,omitempty"`
 	Usage struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
@@ -56,7 +61,14 @@ func (p *AnthropicProvider) ParseResponse(body []byte) (promptTokens, completion
 	pt := resp.Usage.InputTokens
 	ct := resp.Usage.OutputTokens
 	tt := pt + ct
-	c := calculateProviderCost(anthropicPricing, anthropicFallbackPricing, "", pt, ct)
+	// Model-specific pricing: сначала модель из ответа провайдера,
+	// затем provider default. Пустая строка попадала в fallback pricing
+	// независимо от модели (баг симметричный PR a147978).
+	model := resp.Model
+	if model == "" {
+		model = p.DefaultModel()
+	}
+	c := calculateProviderCost(anthropicPricing, anthropicFallbackPricing, model, pt, ct)
 	return pt, ct, tt, c, nil
 }
 

@@ -240,6 +240,78 @@ func TestOpenAICompat_ParseResponse_DefaultsToProviderDefault(t *testing.T) {
 	}
 }
 
+// TestAnthropicParseResponse_ModelSpecificPricing — regression (PR-1):
+// до фикса cost считался по fallback pricing независимо от resp.model,
+// потому что Anthropic ParseResponse передавал "" в calculateProviderCost.
+// Симметричный баг с OpenAICompat, закрытым в a147978.
+func TestAnthropicParseResponse_ModelSpecificPricing(t *testing.T) {
+	p := NewAnthropicProvider("key")
+	// opus: {15.0/1M, 75.0/1M}; fallback sonnet default: {3.0/1M, 15.0/1M}
+	// 100 input + 50 output:
+	//   opus pricing     → 100*15e-6 + 50*75e-6 = 5.25e-3
+	//   fallback pricing → 100*3e-6  + 50*15e-6 = 1.05e-3
+	resp := `{"model":"claude-3-opus-20240229","usage":{"input_tokens":100,"output_tokens":50}}`
+	_, _, _, cost, err := p.ParseResponse([]byte(resp))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantOpus = 5.25e-3
+	if cost < wantOpus*0.99 || cost > wantOpus*1.01 {
+		t.Errorf("cost = %g, expected ~%g (opus pricing). Если похоже на 1.05e-3 — баг вернулся: cost считается по fallback", cost, wantOpus)
+	}
+}
+
+// TestAnthropicParseResponse_DefaultsToProviderDefault — без model в resp
+// fallback на provider default (claude-3-5-sonnet), а не на "".
+func TestAnthropicParseResponse_DefaultsToProviderDefault(t *testing.T) {
+	p := NewAnthropicProvider("key")
+	// Default — claude-3-5-sonnet-20241022: {3.0/1M, 15.0/1M}
+	resp := `{"usage":{"input_tokens":100,"output_tokens":50}}`
+	_, _, _, cost, err := p.ParseResponse([]byte(resp))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantSonnet = 1.05e-3 // 100*3e-6 + 50*15e-6
+	if cost < wantSonnet*0.99 || cost > wantSonnet*1.01 {
+		t.Errorf("cost = %g, expected ~%g (default model pricing)", cost, wantSonnet)
+	}
+}
+
+// TestGeminiParseResponse_ModelSpecificPricing — regression (PR-1):
+// до фикса cost считался по fallback независимо от modelVersion.
+func TestGeminiParseResponse_ModelSpecificPricing(t *testing.T) {
+	p := NewGeminiProvider("key")
+	// pro: {3.5/1M, 10.5/1M}; fallback = gemini-pro-like: {0.50/1M, 1.50/1M}
+	// 100 prompt + 50 candidates:
+	//   pro pricing      → 100*3.5e-6  + 50*10.5e-6 = 8.75e-4
+	//   fallback pricing → 100*0.5e-6  + 50*1.5e-6  = 1.25e-4
+	resp := `{"modelVersion":"gemini-1.5-pro","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50,"totalTokenCount":150}}`
+	_, _, _, cost, err := p.ParseResponse([]byte(resp))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantPro = 8.75e-4
+	if cost < wantPro*0.99 || cost > wantPro*1.01 {
+		t.Errorf("cost = %g, expected ~%g (pro pricing). Если похоже на 1.25e-4 — баг вернулся: fallback pricing", cost, wantPro)
+	}
+}
+
+// TestGeminiParseResponse_DefaultsToProviderDefault — без modelVersion
+// fallback на provider default (gemini-1.5-flash).
+func TestGeminiParseResponse_DefaultsToProviderDefault(t *testing.T) {
+	p := NewGeminiProvider("key")
+	// Default — gemini-1.5-flash: {0.075/1M, 0.30/1M}
+	resp := `{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50,"totalTokenCount":150}}`
+	_, _, _, cost, err := p.ParseResponse([]byte(resp))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantFlash = 2.25e-5 // 100*0.075e-6 + 50*0.30e-6
+	if cost < wantFlash*0.99 || cost > wantFlash*1.01 {
+		t.Errorf("cost = %g, expected ~%g (flash default pricing)", cost, wantFlash)
+	}
+}
+
 // --- Groq ---
 
 func TestGroqBuildRequest(t *testing.T) {

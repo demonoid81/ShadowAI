@@ -17,6 +17,11 @@ var geminiPricing = map[string][2]float64{
 var geminiFallbackPricing = [2]float64{0.50 / 1_000_000, 1.50 / 1_000_000}
 
 type geminiResponse struct {
+	// ModelVersion возвращается Gemini в non-stream ответе (аналогично
+	// полю modelVersion в stream chunks). Используется для pricing.
+	// До фикса — передавалось "" в calculateProviderCost, все запросы
+	// падали на fallback pricing (баг симметричный PR a147978).
+	ModelVersion  string `json:"modelVersion,omitempty"`
 	UsageMetadata struct {
 		PromptTokenCount     int `json:"promptTokenCount"`
 		CandidatesTokenCount int `json:"candidatesTokenCount"`
@@ -60,7 +65,14 @@ func (p *GeminiProvider) ParseResponse(body []byte) (promptTokens, completionTok
 	if tt == 0 {
 		tt = pt + ct
 	}
-	c := calculateProviderCost(geminiPricing, geminiFallbackPricing, "", pt, ct)
+	// Model-specific pricing: modelVersion из ответа → fallback на
+	// provider default. Пустая строка раньше давала fallback pricing
+	// на каждый запрос.
+	model := resp.ModelVersion
+	if model == "" {
+		model = p.DefaultModel()
+	}
+	c := calculateProviderCost(geminiPricing, geminiFallbackPricing, model, pt, ct)
 	return pt, ct, tt, c, nil
 }
 
