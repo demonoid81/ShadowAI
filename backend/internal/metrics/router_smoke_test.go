@@ -7,33 +7,36 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/shadowai/backend/internal/metrics"
 )
 
-// TestMetricsRouterSmoke проверяет, что регистрация маршрута /metrics через
-// тот же паттерн, что используется в cmd/shadowai/main.go, действительно
-// отдаёт текстовый Prometheus-формат на GET /metrics, без auth middleware.
-//
-// Этот тест специально воспроизводит setup из main.go, а не вызывает
-// promhttp.Handler() напрямую — чтобы поймать regression, если кто-то
-// случайно спрячет /metrics под AuthMiddleware или переименует путь.
+// TestMetricsRouterSmoke проверяет РЕАЛЬНЫЙ wiring маршрута /metrics:
+// main.go вызывает metrics.RegisterRoute(r), и этот тест вызывает ТУ ЖЕ
+// функцию. Это гарантирует, что regression-guard сработает при:
+//   - rename пути в RegisterRoute
+//   - случайном заворачивании endpoint'а в AuthMiddleware (Prometheus ломается)
+//   - изменении accepted methods или Content-Type handler'а
 func TestMetricsRouterSmoke(t *testing.T) {
 	// Инициализируем хоть одну метрику, чтобы выдача была ненулевой.
 	metrics.RecordFirewallDecision("request", "smoke_test", "allow")
 
-	// Мини-реплика main.go route setup: только /metrics, без auth.
+	// Используем production-функцию регистрации маршрута.
 	r := mux.NewRouter()
-	r.Handle("/metrics", promhttp.Handler()).Methods("GET")
+	metrics.RegisterRoute(r)
+
+	// Path-константа тоже используется из production-источника, а не
+	// захардкожена в тесте — чтобы случайный rename главного пути ломал
+	// именно этот тест, а не сам scrape config.
+	path := metrics.MetricsPath
 
 	// Позитивный кейс: GET /metrics → 200 + Prometheus text format.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	r.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /metrics: status = %d, expected 200", rec.Code)
+		t.Fatalf("GET %s: status = %d, expected 200", path, rec.Code)
 	}
 
 	contentType := rec.Header().Get("Content-Type")
@@ -44,25 +47,35 @@ func TestMetricsRouterSmoke(t *testing.T) {
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "shadowai_firewall_decisions_total") {
-		t.Errorf("/metrics body does not contain expected ShadowAI metric:\n%s", body)
+		t.Errorf("%s body does not contain expected ShadowAI metric:\n%s", path, body)
 	}
 
 	// Regression guard: методы кроме GET → 405 (а не 200, что означало бы
 	// отсутствие restrictions).
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(m, "/metrics", nil)
+		req := httptest.NewRequest(m, path, nil)
 		r.ServeHTTP(rec, req)
 		if rec.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s /metrics: status = %d, expected 405", m, rec.Code)
+			t.Errorf("%s %s: status = %d, expected 405", m, path, rec.Code)
 		}
 	}
 
 	// Negative: несуществующий путь → 404.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/metrics/admin", nil)
+	req = httptest.NewRequest(http.MethodGet, path+"/admin", nil)
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("GET /metrics/admin: status = %d, expected 404", rec.Code)
+		t.Errorf("GET %s/admin: status = %d, expected 404", path, rec.Code)
+	}
+}
+
+// TestMetricsPath — guard-тест: путь /metrics является контрактом со
+// scrape-инфраструктурой. Изменение этого пути должно быть осознанным
+// решением (требуется обновление всех prometheus.yml). Если вы
+// намеренно меняете путь — обновите эту константу и этот тест.
+func TestMetricsPath(t *testing.T) {
+	if metrics.MetricsPath != "/metrics" {
+		t.Errorf("MetricsPath = %q, expected /metrics (scrape contract changed?)", metrics.MetricsPath)
 	}
 }

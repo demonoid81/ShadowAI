@@ -5,8 +5,11 @@ services:
       POSTGRES_DB: shadowai
       POSTGRES_USER: shadowai
       POSTGRES_PASSWORD: shadowai_secret
+    # Postgres доступен только с хоста (для миграций через make) и
+    # внутри docker-сети (для backend). Никогда не экспортировать в
+    # интернет — сейчас используется default-password 'shadowai_secret'.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,8 +20,10 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Redis также только на localhost — без auth, кэш и rate-limit
+    # хранятся открыто.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -31,15 +36,21 @@ services:
       dockerfile: Dockerfile
     # ВАЖНО: GET /metrics экспортирует Prometheus-телеметрию (audit queue,
     # firewall decisions, budget blocks) и НЕ защищён app-level auth.
-    # В prod:
-    #   - либо не публиковать порт 8080 наружу, а проксировать только /api и
-    #     /proxy через reverse proxy с ACL на /metrics,
-    #   - либо добавить basic auth / IP-allowlist на /metrics на уровне
-    #     ingress (nginx auth_basic, Traefik middleware, mTLS).
-    # Публикация /metrics без ограничений = утечка runtime и security
-    # телеметрии наружу.
+    #
+    # Backend биндится ТОЛЬКО на 127.0.0.1, поэтому:
+    #   - frontend nginx (который внутри той же docker-сети) проксирует
+    #     /api и /proxy на backend:8080
+    #   - извне порт 8080 недоступен — /metrics нельзя scrape'нуть с хоста
+    #   - Prometheus-scraper должен быть в той же docker-сети
+    #     (compose network 'default' или явная overlay)
+    #
+    # Если нужен external scrape — добавить basic auth / IP-allowlist на
+    # nginx-уровне. См. README секцию "Observability (Prometheus)".
+    #
+    # Для отладки backend напрямую с хоста можно временно изменить на
+    # "8080:8080" ЛОКАЛЬНО, но НЕ коммитить.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       DATABASE_URL: postgres://shadowai:shadowai_secret@postgres:5432/shadowai?sslmode=disable
       REDIS_URL: redis://redis:6379/0
