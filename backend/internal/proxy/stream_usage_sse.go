@@ -50,7 +50,12 @@ func walkSSE(body []byte, fn func(sseEvent) error) error {
 	)
 
 	flush := func() error {
-		if len(curData) == 0 && curEvent == "" {
+		// WHATWG EventSource spec §9.2.6: если data buffer пустой (не
+		// было ни одной "data:" строки), событие НЕ dispatch'ится —
+		// state просто сбрасывается. Одинокое "event: ping\n\n"
+		// обновляет event type buffer, но callback не вызывается.
+		if len(curData) == 0 {
+			curEvent = ""
 			return nil
 		}
 		ev := sseEvent{

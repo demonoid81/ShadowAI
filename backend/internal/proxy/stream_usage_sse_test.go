@@ -207,6 +207,48 @@ func TestWalkSSE_LineWithoutColon(t *testing.T) {
 	}
 }
 
+// TestWalkSSE_EventWithoutDataNotDispatched — WHATWG EventSource spec §9.2.6:
+// если data buffer пустой, dispatch НЕ происходит. Только сбрасывается state.
+//
+// Практический случай: Anthropic может прислать "event: ping\n\n" keepalive
+// без data; provider parser не должен получить спуриозный empty event.
+func TestWalkSSE_EventWithoutDataNotDispatched(t *testing.T) {
+	body := []byte("event: ping\n\ndata: real\n\n")
+	got, err := collect(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("events = %d, want 1 (event: без data: не должно dispatch'иться)", len(got))
+	}
+	if got[0].Event != "" {
+		t.Errorf("event = %q, want '' (ping не должен остаться в state)", got[0].Event)
+	}
+	if string(got[0].Data) != "real" {
+		t.Errorf("data = %q, want 'real'", got[0].Data)
+	}
+}
+
+// TestWalkSSE_EventWithEmptyDataDispatched — регрессия-guard для границы:
+// "event: x\ndata:\n\n" имеет data:-строку (пусть с пустым value),
+// поэтому dispatch ДОЛЖЕН произойти.
+func TestWalkSSE_EventWithEmptyDataDispatched(t *testing.T) {
+	body := []byte("event: message_stop\ndata:\n\n")
+	got, err := collect(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("events = %d, want 1 (data: даже с пустым value → dispatch)", len(got))
+	}
+	if got[0].Event != "message_stop" {
+		t.Errorf("event = %q, want message_stop", got[0].Event)
+	}
+	if string(got[0].Data) != "" {
+		t.Errorf("data = %q, want empty", got[0].Data)
+	}
+}
+
 func TestWalkSSE_EmptyBody(t *testing.T) {
 	got, err := collect(nil)
 	if err != nil {
