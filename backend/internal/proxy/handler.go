@@ -460,15 +460,20 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		}
 		policyAction = responsePolicyAction
 
-		// Post-call budget accounting для streaming. ParseResponse может вернуть
-		// 0 для SSE-потоков без usage — это known limitation (требует SSE parser).
-		// Но даже в этом случае вызываем учёт + проверку, чтобы предотвратить
-		// полный обход бюджетной системы через stream=true.
-		promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
-		// Метрика: парсинг usage не удался для streaming.
-		if totalTokens == 0 && cost == 0 {
+		// Post-call budget accounting для streaming через provider-specific
+		// SSE parser (см. internal/proxy/stream_usage_*.go).
+		// parseStreamingUsage — soft-fail: Found=false не ошибка, это валидный
+		// fallback path для провайдеров без include_usage поддержки.
+		streamUsage, parseErr := parseStreamingUsage(provider, respBytes, model)
+		// Метрика: usage не был успешно извлечён из потока. Включает как
+		// real parser errors, так и soft-fail (Found=false).
+		if parseErr != nil || !streamUsage.Found {
 			metrics.RecordStreamUsageParseFail(providerName)
 		}
+		promptTokens := streamUsage.PromptTokens
+		completionTokens := streamUsage.CompletionTokens
+		totalTokens := streamUsage.TotalTokens
+		cost := streamUsage.CostUSD
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
@@ -1433,10 +1438,14 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 
 			// Post-call budget accounting для UnifiedChat streaming.
 			// См. комментарий в ProxyChat streaming.
-			promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
-			if totalTokens == 0 && cost == 0 {
+			streamUsage, parseErr := parseStreamingUsage(provider, respBytes, providerModel)
+			if parseErr != nil || !streamUsage.Found {
 				metrics.RecordStreamUsageParseFail(candidate.Name)
 			}
+			promptTokens := streamUsage.PromptTokens
+			completionTokens := streamUsage.CompletionTokens
+			totalTokens := streamUsage.TotalTokens
+			cost := streamUsage.CostUSD
 			recordStreamUsage := func() {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
