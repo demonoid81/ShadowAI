@@ -22,6 +22,14 @@ func TestMetricsEndpoint(t *testing.T) {
 	RecordBudgetBlock(false)
 	RecordStreamUsageParseFail("openai")
 
+	// PR-2: judge метрики.
+	RecordJudgeRequest("openai", "prompt_injection")
+	RecordJudgeFail("openai", "jailbreak")
+	RecordJudgeTimeout("ollama", "prompt_injection")
+	RecordJudgeMalformed("openai", "content_moderation")
+	RecordJudgeFallback("openai", "content_moderation")
+	ObserveJudgeLatency("openai", "prompt_injection", 0.5)
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	promhttp.Handler().ServeHTTP(rec, req)
@@ -41,6 +49,13 @@ func TestMetricsEndpoint(t *testing.T) {
 		"shadowai_firewall_decisions_total",
 		"shadowai_proxy_budget_blocks_total",
 		"shadowai_stream_usage_parse_fail_total",
+		// PR-2: judge observability
+		"shadowai_judge_requests_total",
+		"shadowai_judge_fail_total",
+		"shadowai_judge_timeout_total",
+		"shadowai_judge_malformed_total",
+		"shadowai_judge_fallback_total",
+		"shadowai_judge_latency_seconds",
 	}
 	for _, name := range expected {
 		if !strings.Contains(body, name) {
@@ -56,6 +71,10 @@ func TestMetricsEndpoint(t *testing.T) {
 		`streaming="true"`,
 		`streaming="false"`,
 		`provider="openai"`,
+		// PR-2: judge метрики используют (provider, threat_type).
+		`threat_type="prompt_injection"`,
+		`threat_type="jailbreak"`,
+		`threat_type="content_moderation"`,
 	}
 	for _, label := range expectedLabels {
 		if !strings.Contains(body, label) {
