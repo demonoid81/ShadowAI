@@ -17,6 +17,12 @@ func GetClaims(ctx context.Context) *Claims {
 	return c
 }
 
+// WithClaims встраивает Claims в context. Используется при тестировании
+// handler'ов в обход AuthMiddleware.
+func WithClaims(ctx context.Context, c *Claims) context.Context {
+	return context.WithValue(ctx, claimsKey, c)
+}
+
 func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var claims *Claims

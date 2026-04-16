@@ -22,11 +22,16 @@ type EvalResult struct {
 	Rule   string `json:"rule"`
 }
 
-type Engine struct {
-	repo *Repository
+// RuleLister абстрагирует источник правил для тестируемости.
+type RuleLister interface {
+	List(ctx context.Context) ([]domain.PolicyRule, error)
 }
 
-func NewEngine(repo *Repository) *Engine {
+type Engine struct {
+	repo RuleLister
+}
+
+func NewEngine(repo RuleLister) *Engine {
 	return &Engine{repo: repo}
 }
 

@@ -10,12 +10,19 @@ import (
 	"github.com/shadowai/backend/internal/domain"
 )
 
+// BudgetRepo абстрагирует Repository для тестируемости.
+type BudgetRepo interface {
+	GetByUserID(ctx context.Context, userID string) (*domain.Budget, error)
+	Upsert(ctx context.Context, b *domain.Budget) error
+	UpdateSpent(ctx context.Context, userID string, addCost float64, addTokens int) error
+}
+
 type Service struct {
-	repo  *Repository
+	repo  BudgetRepo
 	redis *redis.Client
 }
 
-func NewService(repo *Repository, rdb *redis.Client) *Service {
+func NewService(repo BudgetRepo, rdb *redis.Client) *Service {
 	return &Service{repo: repo, redis: rdb}
 }
 
