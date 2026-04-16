@@ -1,6 +1,10 @@
 package firewall
 
-import "context"
+import (
+	"context"
+
+	"github.com/shadowai/backend/internal/metrics"
+)
 
 type Phase string
 
@@ -115,6 +119,9 @@ func (p *Pipeline) run(
 
 		d.InspectorName = inspector.Name()
 		allFindings = append(allFindings, d.Findings...)
+
+		// Prometheus: увеличиваем счётчик решений по (phase, inspector, action).
+		metrics.RecordFirewallDecision(string(payload.Phase), d.InspectorName, string(d.Action))
 
 		if compareSeverity(d.Severity, highestSeverity) > 0 {
 			highestSeverity = d.Severity

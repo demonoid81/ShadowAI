@@ -24,6 +24,7 @@ import (
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/firewall"
+	"github.com/shadowai/backend/internal/metrics"
 	"github.com/shadowai/backend/internal/pii"
 	"github.com/shadowai/backend/internal/policy"
 )
@@ -338,6 +339,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			PIIDetected: piiDetected, PIITypes: requestPIITypes,
 			PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
 		})
+		metrics.RecordBudgetBlock(false)
 		http.Error(w, `{"error":"budget exceeded"}`, http.StatusPaymentRequired)
 		return
 	}
@@ -463,6 +465,10 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		// Но даже в этом случае вызываем учёт + проверку, чтобы предотвратить
 		// полный обход бюджетной системы через stream=true.
 		promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
+		// Метрика: парсинг usage не удался для streaming.
+		if totalTokens == 0 && cost == 0 {
+			metrics.RecordStreamUsageParseFail(providerName)
+		}
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
@@ -474,6 +480,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
 		if err == nil && !allowedAfter {
 			recordUsage()
+			metrics.RecordBudgetBlock(true)
 			h.auditSvc.Log(&domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -560,6 +567,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
 	if err == nil && !allowedAfter {
 		recordUsage()
+		metrics.RecordBudgetBlock(false)
 		h.auditSvc.Log(&domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -1267,6 +1275,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			StatusCode: 402, PIIDetected: piiDetected, PIITypes: requestPIITypes,
 			PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
 		})
+		metrics.RecordBudgetBlock(false)
 		http.Error(w, `{"error":"budget exceeded"}`, http.StatusPaymentRequired)
 		return
 	}
@@ -1425,6 +1434,9 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			// Post-call budget accounting для UnifiedChat streaming.
 			// См. комментарий в ProxyChat streaming.
 			promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
+			if totalTokens == 0 && cost == 0 {
+				metrics.RecordStreamUsageParseFail(candidate.Name)
+			}
 			recordStreamUsage := func() {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
@@ -1433,6 +1445,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
 			if err == nil && !allowedAfter {
 				recordStreamUsage()
+				metrics.RecordBudgetBlock(true)
 				h.auditSvc.Log(&domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
@@ -1487,6 +1500,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
 		if err == nil && !allowedAfter {
 			recordUsage()
+			metrics.RecordBudgetBlock(false)
 			h.auditSvc.Log(&domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),

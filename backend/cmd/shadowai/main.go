@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
@@ -255,6 +256,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	}).Methods("GET")
+
+	// Prometheus /metrics endpoint. Без auth middleware (Prometheus scrapers
+	// не авторизуются JWT). Ограничивать на уровне infra (ingress/firewall).
+	// Если нужна basic auth или mTLS — это делается в reverse proxy.
+	r.Handle("/metrics", promhttp.Handler()).Methods("GET")
 
 	// Protected API routes
 	api := r.PathPrefix("/api").Subrouter()

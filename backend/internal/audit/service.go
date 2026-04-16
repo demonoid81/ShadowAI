@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/shadowai/backend/internal/domain"
+	"github.com/shadowai/backend/internal/metrics"
 )
 
 // Repo абстрагирует Repository для тестируемости.
@@ -37,8 +38,10 @@ func NewService(repo Repo) *Service {
 func (s *Service) Log(entry *domain.AuditLog) {
 	select {
 	case s.ch <- entry:
+		metrics.RecordAuditQueue(len(s.ch))
 	default:
 		s.dropped.Add(1)
+		metrics.AuditDroppedTotal.Inc()
 		log.Printf("audit: channel full, dropping entry (total dropped=%d)", s.dropped.Load())
 	}
 }
@@ -51,11 +54,14 @@ func (s *Service) Stats() (queueDepth int, dropped, inserted, failed uint64) {
 func (s *Service) worker() {
 	defer close(s.done)
 	for entry := range s.ch {
+		metrics.RecordAuditQueue(len(s.ch))
 		if err := s.repo.Insert(context.Background(), entry); err != nil {
 			s.failed.Add(1)
+			metrics.AuditFailedTotal.Inc()
 			log.Printf("audit: insert error (total failed=%d): %v", s.failed.Load(), err)
 		} else {
 			s.inserted.Add(1)
+			metrics.AuditInsertedTotal.Inc()
 		}
 	}
 }
