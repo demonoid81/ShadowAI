@@ -5,9 +5,10 @@ services:
       POSTGRES_DB: shadowai
       POSTGRES_USER: shadowai
       POSTGRES_PASSWORD: shadowai_secret
-    # Postgres доступен только с хоста (для миграций через make) и
-    # внутри docker-сети (для backend). Никогда не экспортировать в
-    # интернет — сейчас используется default-password 'shadowai_secret'.
+    # Postgres bind только на loopback: доступен с docker-хоста
+    # (для миграций через make) и внутри docker-сети (для backend),
+    # но НЕ с других машин. Никогда не менять на 0.0.0.0/публичный —
+    # используется default-password 'shadowai_secret'.
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -20,8 +21,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Redis также только на localhost — без auth, кэш и rate-limit
-    # хранятся открыто.
+    # Redis bind только на loopback — доступен с docker-хоста и из
+    # docker-сети, но не извне. Без auth: кэш и rate-limit-state хранятся
+    # открыто, поэтому публиковать наружу категорически нельзя.
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -37,18 +39,21 @@ services:
     # ВАЖНО: GET /metrics экспортирует Prometheus-телеметрию (audit queue,
     # firewall decisions, budget blocks) и НЕ защищён app-level auth.
     #
-    # Backend биндится ТОЛЬКО на 127.0.0.1, поэтому:
-    #   - frontend nginx (который внутри той же docker-сети) проксирует
-    #     /api и /proxy на backend:8080
-    #   - извне порт 8080 недоступен — /metrics нельзя scrape'нуть с хоста
+    # Port-publish ограничен loopback'ом (127.0.0.1):
+    #   - С самого docker-хоста (localhost:8080) backend ДОСТУПЕН —
+    #     это нужно для отладки, make migrate и т.п.
+    #   - ИЗВНЕ docker-хоста (другие машины в сети) — НЕдоступен, т.к.
+    #     Docker bind'ит порт только на loopback-интерфейс.
     #   - Prometheus-scraper должен быть в той же docker-сети
-    #     (compose network 'default' или явная overlay)
+    #     (сервис внутри compose network) либо на docker-хосте;
+    #     для scrape из другого хоста используйте reverse proxy с auth.
     #
-    # Если нужен external scrape — добавить basic auth / IP-allowlist на
-    # nginx-уровне. См. README секцию "Observability (Prometheus)".
+    # Reverse proxy (frontend nginx) проксирует только /api и /proxy на
+    # backend:8080 внутри docker-сети, но НЕ /metrics — см. nginx.conf.
     #
-    # Для отладки backend напрямую с хоста можно временно изменить на
-    # "8080:8080" ЛОКАЛЬНО, но НЕ коммитить.
+    # В prod считать этот bind МИНИМУМОМ: если docker-хост публичный,
+    # дополнительно ограничить host firewall'ом (iptables/ufw).
+    # См. README секцию "Observability (Prometheus)".
     ports:
       - "127.0.0.1:8080:8080"
     environment:
