@@ -60,12 +60,16 @@ func (d *DLPInspector) inspect(text string) *Decision {
 		}
 	}
 
-	return &Decision{
+	result := &Decision{
 		Action:   action,
 		Reason:   decision.Reason,
 		Severity: highestFindingSeverity(fwFindings),
 		Findings: fwFindings,
 	}
+	if action == ActionSanitize {
+		result.SanitizedText = d.svc.Sanitize(text, piiFindings)
+	}
+	return result
 }
 
 // dlpSeverityToFirewall maps dlp.Severity to firewall Severity.

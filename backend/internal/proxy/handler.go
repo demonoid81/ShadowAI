@@ -206,8 +206,13 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 	// 3.9. Firewall Pipeline — request inspection
 	if h.firewallPipeline != nil {
+		fwMessages := make([]firewall.Message, 0, len(chatReq.Messages))
+		for _, m := range chatReq.Messages {
+			fwMessages = append(fwMessages, firewall.Message{Role: m.Role, Content: m.Content})
+		}
 		fwPayload := &firewall.Payload{
 			Text:     allText,
+			Messages: fwMessages,
 			Model:    model,
 			Provider: providerName,
 			UserID:   claims.UserID,
@@ -238,6 +243,23 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				"inspector": fwDecision.InspectorName,
 			})
 			return
+		}
+		// ActionFlag: фиксируем в аудите как предупреждение, но продолжаем обработку.
+		if fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
+			h.auditSvc.Log(&domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				RequestBody:  sanitizePayload(bodyBytes),
+				Model:        model, Provider: providerName,
+				Endpoint:     endpoint, StatusCode: 200,
+				PIIDetected:  len(fwDecision.Findings) > 0,
+				PolicyAction: "warned",
+				DurationMs:   int(time.Since(start).Milliseconds()),
+			})
+		}
+		// ActionSanitize: подменяем downstream-текст для дальнейших проверок.
+		// bodyBytes не трогаем — существующий DLP-путь ниже уже санитизирует requestPayload.
+		if fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
+			allText = fwDecision.SanitizedText
 		}
 	}
 
@@ -386,6 +408,19 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
+				h.auditSvc.Log(&domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
+					Model: model, Provider: providerName, Endpoint: endpoint,
+					StatusCode: 200, PolicyAction: "warned",
+					DurationMs: int(time.Since(start).Milliseconds()),
+				})
+			}
+			if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
+				accumulated = fwDecision.SanitizedText
+				respBytes = []byte(accumulated)
+			}
 		}
 
 		responseFindings := pii.Scan(accumulated)
@@ -467,6 +502,18 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				"inspector": fwDecision.InspectorName,
 			})
 			return
+		}
+		if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
+			h.auditSvc.Log(&domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
+				Model: model, Provider: providerName, Endpoint: endpoint,
+				StatusCode: 200, PolicyAction: "warned",
+				DurationMs: int(time.Since(start).Milliseconds()),
+			})
+		}
+		if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
+			respBody = []byte(fwDecision.SanitizedText)
 		}
 	}
 
@@ -1064,8 +1111,13 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 
 	// 3.9. Firewall Pipeline — request inspection
 	if h.firewallPipeline != nil {
+		fwMessages := make([]firewall.Message, 0, len(chatReq.Messages))
+		for _, m := range chatReq.Messages {
+			fwMessages = append(fwMessages, firewall.Message{Role: m.Role, Content: m.Content})
+		}
 		fwPayload := &firewall.Payload{
 			Text:     allText,
+			Messages: fwMessages,
 			Model:    model,
 			Provider: "unified",
 			UserID:   claims.UserID,
@@ -1096,6 +1148,20 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				"inspector": fwDecision.InspectorName,
 			})
 			return
+		}
+		if fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
+			h.auditSvc.Log(&domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				RequestBody:  sanitizePayload(bodyBytes),
+				Model:        model, Provider: "unified",
+				Endpoint:     "/proxy/chat", StatusCode: 200,
+				PIIDetected:  len(fwDecision.Findings) > 0,
+				PolicyAction: "warned",
+				DurationMs:   int(time.Since(start).Milliseconds()),
+			})
+		}
+		if fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
+			allText = fwDecision.SanitizedText
 		}
 	}
 
@@ -1282,6 +1348,19 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					})
 					return
 				}
+				if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
+					h.auditSvc.Log(&domain.AuditLog{
+						ID: uuid.New().String(), UserID: claims.UserID,
+						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
+						Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
+						StatusCode: 200, PolicyAction: "warned",
+						DurationMs: int(time.Since(start).Milliseconds()),
+					})
+				}
+				if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
+					accumulated = fwDecision.SanitizedText
+					respBytes = []byte(accumulated)
+				}
 			}
 
 			responseFindings := pii.Scan(accumulated)
@@ -1392,6 +1471,18 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					"inspector": fwDecision.InspectorName,
 				})
 				return
+			}
+			if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
+				h.auditSvc.Log(&domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
+					Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
+					StatusCode: 200, PolicyAction: "warned",
+					DurationMs: int(time.Since(start).Milliseconds()),
+				})
+			}
+			if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
+				respBody = []byte(fwDecision.SanitizedText)
 			}
 		}
 
@@ -1524,7 +1615,7 @@ func getSecretPatterns() []secretPattern {
 			{"aws_key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
 			{"anthropic_key", regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9\-_]{10,})`)},
 			{"github_token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`)},
-			{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----`)},
+			{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]+PRIVATE KEY-----[A-Za-z0-9+/=\s]*?-----END [A-Z ]+PRIVATE KEY-----`)},
 			{"bearer_token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}\b`)},
 			{"api_secret", regexp.MustCompile(`(?i)\b(api[_-]?secret|secret[_-]?key|access[_-]?key)\s*[:=]\s*[A-Za-z0-9._/+]{16,}`)},
 		}

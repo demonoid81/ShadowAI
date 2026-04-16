@@ -42,6 +42,9 @@ type Decision struct {
 	Severity      Severity  `json:"severity"`
 	Findings      []Finding `json:"findings"`
 	InspectorName string    `json:"inspector_name"`
+	// SanitizedText непусто только когда Action == ActionSanitize.
+	// Содержит очищенную версию исходного текста.
+	SanitizedText string `json:"sanitized_text,omitempty"`
 }
 
 type Message struct {
@@ -99,6 +102,7 @@ func (p *Pipeline) run(
 	finalAction := ActionAllow
 	var finalReason string
 	var finalInspectorName string
+	var finalSanitizedText string
 
 	for _, inspector := range p.inspectors {
 		d, err := fn(inspector)(ctx, payload)
@@ -126,6 +130,7 @@ func (p *Pipeline) run(
 			finalAction = d.Action
 			finalReason = d.Reason
 			finalInspectorName = d.InspectorName
+			finalSanitizedText = d.SanitizedText
 		}
 
 		if d.Action == ActionFlag {
@@ -139,6 +144,7 @@ func (p *Pipeline) run(
 		Severity:      highestSeverity,
 		Findings:      allFindings,
 		InspectorName: finalInspectorName,
+		SanitizedText: finalSanitizedText,
 	}, nil
 }
 

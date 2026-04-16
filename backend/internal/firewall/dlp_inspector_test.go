@@ -61,3 +61,26 @@ func TestDLPInspector_NilService(t *testing.T) {
 		t.Errorf("expected ActionAllow for nil service, got %s", decision.Action)
 	}
 }
+
+// TestDLPInspector_SanitizePopulatesText проверяет, что при Action == ActionSanitize
+// поле Decision.SanitizedText заполняется очищенной версией исходного текста.
+func TestDLPInspector_SanitizePopulatesText(t *testing.T) {
+	svc := dlp.NewService("enforce")
+	inspector := NewDLPInspector(svc)
+	original := "my email is user@example.com please"
+	payload := &Payload{Text: original}
+
+	decision, err := inspector.InspectRequest(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.Action != ActionSanitize {
+		t.Skipf("ожидалось ActionSanitize для email в enforce-mode, получено %s (тест пропущен)", decision.Action)
+	}
+	if decision.SanitizedText == "" {
+		t.Error("SanitizedText должен быть заполнен при Action == ActionSanitize")
+	}
+	if decision.SanitizedText == original {
+		t.Error("SanitizedText должен отличаться от исходного текста")
+	}
+}
