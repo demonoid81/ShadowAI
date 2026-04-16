@@ -290,3 +290,155 @@ func TestUnifiedChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T)
 		t.Errorf("RequestBody в audit содержит не санитизированный email: %s", entry.RequestBody)
 	}
 }
+
+// TestProxyChat_Streaming_FirewallFlagPlusResponseDLPSanitize — wiring test
+// для streaming-ветки ProxyChat. Покрывает отдельный audit site в streaming
+// path (handler.go:454), где корреляция проверяется на другом коде.
+//
+// Сценарий: firewall flag на request + DLP sanitize на response (потому что
+// upstream возвращает контент с email'ом, который триггерит sanitize).
+func TestProxyChat_Streaming_FirewallFlagPlusResponseDLPSanitize(t *testing.T) {
+	// Upstream возвращает SSE-like контент с email → DLP на response санитизирует
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"please contact support@example.com\"}}]}\n\ndata: [DONE]\n"))
+	}))
+	defer upstream.Close()
+
+	registry := NewRegistry()
+	registry.Register(&mockOpenAIProvider{url: upstream.URL})
+
+	auditRepo := &captureAuditRepo{}
+	auditSvc := audit.NewService(auditRepo)
+
+	policySvc := &policy.Service{Engine: policy.NewEngine(emptyPolicyRepo{})}
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	budgetSvc := budget.NewService(unlimitedBudgetRepo{}, rdb)
+
+	dlpSvc := dlp.NewService("enforce")
+
+	pipeline := firewall.NewPipeline()
+	pipeline.Register(flagInspector{})
+
+	h := NewHandler(
+		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
+		"", nil, nil, nil, 0, pipeline,
+	)
+
+	// stream: true активирует streaming branch
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hello, need help"}]}`
+	req := httptest.NewRequest("POST", "/proxy/openai/v1/chat/completions", strings.NewReader(body))
+	req = mux.SetURLVars(req, map[string]string{"provider": "openai"})
+	claims := &auth.Claims{UserID: "test-user", Email: "admin@example.com", Role: "user"}
+	req = req.WithContext(auth.WithClaims(req.Context(), claims))
+
+	rec := httptest.NewRecorder()
+	h.ProxyChat(rec, req)
+	auditSvc.Close()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	entries := auditRepo.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 audit entry (streaming path), got %d:\n%+v", len(entries), entries)
+	}
+
+	entry := entries[0]
+	if entry.PolicyAction != string(dlp.DLPActionSanitize) {
+		t.Errorf("streaming PolicyAction = %q, expected %q — firewall flag (request) + DLP sanitize (response) должен оставаться sanitized",
+			entry.PolicyAction, dlp.DLPActionSanitize)
+	}
+
+	// Response в audit должен быть санитизирован
+	if strings.Contains(entry.ResponseBody, "support@example.com") {
+		t.Errorf("streaming ResponseBody содержит не санитизированный email: %s", entry.ResponseBody)
+	}
+
+	// Клиент получает санитизированный ответ (а не исходный с email)
+	if strings.Contains(rec.Body.String(), "support@example.com") {
+		t.Errorf("client response содержит не санитизированный email: %s", rec.Body.String())
+	}
+}
+
+// TestUnifiedChat_Streaming_FirewallFlagPlusResponseDLPSanitize — аналогичный
+// тест для UnifiedChat streaming path (handler.go:1351, 1379). Дублированная
+// логика корреляции в unified streaming-ветке имеет свой независимый audit call.
+func TestUnifiedChat_Streaming_FirewallFlagPlusResponseDLPSanitize(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"please contact support@example.com\"}}]}\n\ndata: [DONE]\n"))
+	}))
+	defer upstream.Close()
+
+	registry := NewRegistry()
+	registry.Register(&mockOpenAIProvider{url: upstream.URL})
+
+	auditRepo := &captureAuditRepo{}
+	auditSvc := audit.NewService(auditRepo)
+
+	policySvc := &policy.Service{Engine: policy.NewEngine(emptyPolicyRepo{})}
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	budgetSvc := budget.NewService(unlimitedBudgetRepo{}, rdb)
+
+	dlpSvc := dlp.NewService("enforce")
+
+	pipeline := firewall.NewPipeline()
+	pipeline.Register(flagInspector{})
+
+	modelMapper := NewModelMapper(registry)
+	router := NewRouter(registry, nil, modelMapper, StrategyCheapest, nil)
+
+	h := NewHandler(
+		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
+		"", router, nil, nil, 0, pipeline,
+	)
+
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hello, need help"}]}`
+	req := httptest.NewRequest("POST", "/proxy/chat", strings.NewReader(body))
+	claims := &auth.Claims{UserID: "test-user", Email: "admin@example.com", Role: "user"}
+	req = req.WithContext(auth.WithClaims(req.Context(), claims))
+
+	rec := httptest.NewRecorder()
+	h.UnifiedChat(rec, req)
+	auditSvc.Close()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	entries := auditRepo.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 audit entry (unified streaming), got %d:\n%+v", len(entries), entries)
+	}
+
+	entry := entries[0]
+	if entry.PolicyAction != string(dlp.DLPActionSanitize) {
+		t.Errorf("unified streaming PolicyAction = %q, expected %q",
+			entry.PolicyAction, dlp.DLPActionSanitize)
+	}
+	if entry.Endpoint != "/proxy/chat" {
+		t.Errorf("Endpoint = %q, expected /proxy/chat", entry.Endpoint)
+	}
+	if strings.Contains(entry.ResponseBody, "support@example.com") {
+		t.Errorf("unified streaming ResponseBody содержит не санитизированный email: %s", entry.ResponseBody)
+	}
+	if strings.Contains(rec.Body.String(), "support@example.com") {
+		t.Errorf("client response содержит не санитизированный email: %s", rec.Body.String())
+	}
+}
