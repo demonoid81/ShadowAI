@@ -238,13 +238,13 @@ func TestSecretDetection(t *testing.T) {
 		},
 		{
 			name:      "Private key header",
-			text:      "-----BEGIN RSA PRIVATE KEY-----",
+			text:      "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKc\n-----END RSA PRIVATE KEY-----",
 			wantType:  "private_key",
 			wantFound: true,
 		},
 		{
 			name:      "Private key EC",
-			text:      "-----BEGIN EC PRIVATE KEY-----",
+			text:      "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBvJpaoPe/abcdefgh\n-----END EC PRIVATE KEY-----",
 			wantType:  "private_key",
 			wantFound: true,
 		},
@@ -544,6 +544,22 @@ func TestSanitize_PreservesTextAroundFindings(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Deduplication: same position and type should be deduped
 // ---------------------------------------------------------------------------
+
+func TestSanitize_FullPEMBlock(t *testing.T) {
+	svc := NewService("enforce")
+	pem := "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC\nabcdefghijklmnopqrstuvwxyz==\n-----END RSA PRIVATE KEY-----"
+	input := "here is my key: " + pem + " please use it"
+	result := svc.Sanitize(input, nil)
+	if strings.Contains(result, "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKc") {
+		t.Errorf("PEM body not redacted: %s", result)
+	}
+	if strings.Contains(result, "-----END RSA PRIVATE KEY-----") {
+		t.Errorf("PEM footer not redacted: %s", result)
+	}
+	if !strings.Contains(result, "[redacted:private_key]") {
+		t.Errorf("no redaction marker: %s", result)
+	}
+}
 
 func TestEvaluate_DeduplicatesFindings(t *testing.T) {
 	svc := NewService("audit")

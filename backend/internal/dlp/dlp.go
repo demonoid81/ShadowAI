@@ -251,7 +251,7 @@ var secretPatterns = []struct {
 	{"aws_access_key", SeverityHigh, `\bAKIA[0-9A-Z]{16}\b`},
 	{"anthropic_api_key", SeverityHigh, `\b(sk-ant-[A-Za-z0-9-_]{10,})`},
 	{"github_token", SeverityHigh, `\bgh[pousr]_[A-Za-z0-9]{20,}\b`},
-	{"private_key", SeverityHigh, `-----BEGIN [A-Z ]+PRIVATE KEY-----`},
+	{"private_key", SeverityHigh, `(?s)-----BEGIN [A-Z ]+PRIVATE KEY-----[A-Za-z0-9+/=\s]*?-----END [A-Z ]+PRIVATE KEY-----`},
 	{"bearer_token", SeverityHigh, `(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}\b`},
 }
 
