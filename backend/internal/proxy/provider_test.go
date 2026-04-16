@@ -200,6 +200,46 @@ func TestMistralName(t *testing.T) {
 	}
 }
 
+// TestMistralParseResponse_ModelSpecificPricing — regression: до фикса
+// cost считался по fallback pricing независимо от resp.model, потому что
+// OpenAICompat.ParseResponse передавал "" в calculateProviderCost.
+// Теперь model-specific pricing работает для всех OpenAI-compatible
+// провайдеров (Mistral, Groq, OpenRouter).
+func TestMistralParseResponse_ModelSpecificPricing(t *testing.T) {
+	p := NewMistralProvider("key")
+	// mistral-large: {3.0/1M, 9.0/1M}; fallback mistral-small: {1.0/1M, 3.0/1M}
+	// 100 prompt + 50 completion:
+	//   large pricing    → 100*3e-6 + 50*9e-6 = 7.5e-4
+	//   fallback pricing → 100*1e-6 + 50*3e-6 = 2.5e-4
+	resp := `{"model":"mistral-large-latest","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`
+	_, _, _, cost, err := p.ParseResponse([]byte(resp))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantLarge = 7.5e-4
+	if cost < wantLarge*0.99 || cost > wantLarge*1.01 {
+		t.Errorf("cost = %g, expected ~%g (model-specific pricing). Если похоже на 2.5e-4 — баг вернулся: cost считается по fallback", cost, wantLarge)
+	}
+}
+
+// TestOpenAICompat_ParseResponse_DefaultsToProviderDefault — если resp
+// не содержит model (некоторые реализации опускают поле), fallback идёт
+// на p.Default модель, а не на "" → всё ещё используется model-specific
+// pricing провайдера по умолчанию.
+func TestOpenAICompat_ParseResponse_DefaultsToProviderDefault(t *testing.T) {
+	p := NewMistralProvider("key")
+	// Default для Mistral — mistral-small-latest: {1.0/1M, 3.0/1M}
+	resp := `{"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`
+	_, _, _, cost, err := p.ParseResponse([]byte(resp))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantSmall = 2.5e-4 // mistral-small-latest pricing
+	if cost < wantSmall*0.99 || cost > wantSmall*1.01 {
+		t.Errorf("cost = %g, expected ~%g (default model pricing)", cost, wantSmall)
+	}
+}
+
 // --- Groq ---
 
 func TestGroqBuildRequest(t *testing.T) {
