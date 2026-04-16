@@ -67,6 +67,10 @@ func TestApplyFlagCorrelation(t *testing.T) {
 		{"allowed flagged becomes warned", "allowed", true, "warned"},
 		{"blocked flagged stays blocked", "blocked", true, "blocked"},
 		{"warned flagged stays warned", "warned", true, "warned"},
+		{"sanitized flagged stays sanitized", "sanitized", true, "sanitized"},
+		{"sanitized not flagged stays sanitized", "sanitized", false, "sanitized"},
+		{"blocked not flagged stays blocked", "blocked", false, "blocked"},
+		{"unknown flagged becomes warned", "", true, "warned"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

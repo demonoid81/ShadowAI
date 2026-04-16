@@ -1657,12 +1657,19 @@ func sanitizeChatRequestBody(body []byte, dlpSvc *dlp.Service) []byte {
 }
 
 // applyFlagCorrelation возвращает PolicyAction с учётом firewall-flag.
-// Блокировки не меняются; allowed с флагом становится "warned".
+// Приоритет (от большего к меньшему): blocked > sanitized > warned > allowed.
+// - blocked не меняется
+// - sanitized не меняется (санитизация информативнее warn)
+// - warned не меняется
+// - allowed с флагом становится "warned"
 func applyFlagCorrelation(action string, flagged bool) string {
 	if !flagged {
 		return action
 	}
-	if action == string(policy.ActionBlocked) {
+	switch action {
+	case string(policy.ActionBlocked),
+		string(dlp.DLPActionSanitize),
+		string(policy.ActionWarned):
 		return action
 	}
 	return string(policy.ActionWarned)
