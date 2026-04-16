@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/shadowai/backend/internal/dlp"
+	"github.com/shadowai/backend/internal/policy"
 )
 
 func TestSanitizeChatRequestBody_RedactsSecret(t *testing.T) {
@@ -53,6 +54,64 @@ func TestSanitizeChatRequestBody_InvalidJSON(t *testing.T) {
 	out := sanitizeChatRequestBody(body, svc)
 	if string(out) != string(body) {
 		t.Error("invalid JSON should return body unchanged (fail-safe)")
+	}
+}
+
+// TestPolicyActionFlow_FirewallFlagPlusDLPSanitize воспроизводит сценарий,
+// из-за которого был заведён баг: firewall pipeline вернул ActionFlag
+// (firewallFlagged=true), затем downstream h.dlpSvc.Evaluate вернул
+// DLPActionSanitize. Скорректированный PolicyAction обязан быть "sanitized",
+// а не "warned" — иначе факт реальной санитизации payload теряется в audit.
+func TestPolicyActionFlow_FirewallFlagPlusDLPSanitize(t *testing.T) {
+	h := &Handler{}
+
+	// Шаг 1: merge policy (allowed) + DLP sanitize → "sanitized".
+	merged := h.mergePolicyAction(string(policy.ActionAllowed), dlp.DLPActionSanitize)
+	if merged != string(dlp.DLPActionSanitize) {
+		t.Fatalf("mergePolicyAction(allowed, Sanitize) = %q, expected %q",
+			merged, dlp.DLPActionSanitize)
+	}
+
+	// Шаг 2: корреляция с firewallFlagged=true не должна затирать sanitized.
+	final := applyFlagCorrelation(merged, true)
+	if final != string(dlp.DLPActionSanitize) {
+		t.Errorf("applyFlagCorrelation(sanitized, flagged=true) = %q, expected %q — flag не должен понижать sanitized до warned",
+			final, dlp.DLPActionSanitize)
+	}
+
+	// Обратный контроль: без флага результат также должен остаться sanitized.
+	noFlag := applyFlagCorrelation(merged, false)
+	if noFlag != string(dlp.DLPActionSanitize) {
+		t.Errorf("applyFlagCorrelation(sanitized, flagged=false) = %q, expected %q",
+			noFlag, dlp.DLPActionSanitize)
+	}
+}
+
+// TestPolicyActionFlow_FirewallFlagOnly проверяет, что чистый flag без DLP
+// санитизации действительно переводит allowed → warned (ожидаемое поведение).
+func TestPolicyActionFlow_FirewallFlagOnly(t *testing.T) {
+	h := &Handler{}
+	merged := h.mergePolicyAction(string(policy.ActionAllowed), dlp.DLPActionAllow)
+	if merged != string(policy.ActionAllowed) {
+		t.Fatalf("mergePolicyAction(allowed, Allow) = %q, expected allowed", merged)
+	}
+	final := applyFlagCorrelation(merged, true)
+	if final != string(policy.ActionWarned) {
+		t.Errorf("applyFlagCorrelation(allowed, flagged=true) = %q, expected warned", final)
+	}
+}
+
+// TestPolicyActionFlow_FirewallFlagPlusBlock проверяет, что block всегда
+// побеждает flag — блокировка должна оставаться видимой в audit.
+func TestPolicyActionFlow_FirewallFlagPlusBlock(t *testing.T) {
+	h := &Handler{}
+	merged := h.mergePolicyAction(string(policy.ActionBlocked), dlp.DLPActionAllow)
+	if merged != string(policy.ActionBlocked) {
+		t.Fatalf("mergePolicyAction(blocked, Allow) = %q, expected blocked", merged)
+	}
+	final := applyFlagCorrelation(merged, true)
+	if final != string(policy.ActionBlocked) {
+		t.Errorf("applyFlagCorrelation(blocked, flagged=true) = %q, expected blocked (flag не должен затирать block)", final)
 	}
 }
 
