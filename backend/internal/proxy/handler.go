@@ -205,6 +205,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3.9. Firewall Pipeline — request inspection
+	firewallFlagged := false
 	if h.firewallPipeline != nil {
 		fwMessages := make([]firewall.Message, 0, len(chatReq.Messages))
 		for _, m := range chatReq.Messages {
@@ -244,22 +245,20 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		// ActionFlag: фиксируем в аудите как предупреждение, но продолжаем обработку.
-		if fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
-			h.auditSvc.Log(&domain.AuditLog{
-				ID: uuid.New().String(), UserID: claims.UserID,
-				RequestBody:  sanitizePayload(bodyBytes),
-				Model:        model, Provider: providerName,
-				Endpoint:     endpoint, StatusCode: 200,
-				PIIDetected:  len(fwDecision.Findings) > 0,
-				PolicyAction: "warned",
-				DurationMs:   int(time.Since(start).Milliseconds()),
-			})
+		// ActionFlag: помечаем для корреляции в финальной audit-записи (без отдельной записи).
+		if fwDecision.Action == firewall.ActionFlag {
+			firewallFlagged = true
 		}
-		// ActionSanitize: подменяем downstream-текст для дальнейших проверок.
-		// bodyBytes не трогаем — существующий DLP-путь ниже уже санитизирует requestPayload.
+		// ActionSanitize: санитизируем как локальный allText, так и outbound body через DLP.
 		if fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
 			allText = fwDecision.SanitizedText
+			if h.dlpSvc != nil {
+				bodyBytes = sanitizeChatRequestBody(bodyBytes, h.dlpSvc)
+				// Перепарсить для единообразия downstream-кода
+				if err := json.Unmarshal(bodyBytes, &chatReq); err == nil {
+					_ = chatReq
+				}
+			}
 		}
 	}
 
@@ -311,7 +310,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policyAction := h.mergePolicyAction(string(evalResult.Action), requestDecision.Action)
+	policyAction := applyFlagCorrelation(h.mergePolicyAction(string(evalResult.Action), requestDecision.Action), firewallFlagged)
 	if evalResult.Action == policy.ActionBlocked {
 		h.auditSvc.Log(&domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
@@ -408,14 +407,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
-				h.auditSvc.Log(&domain.AuditLog{
-					ID: uuid.New().String(), UserID: claims.UserID,
-					RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
-					Model: model, Provider: providerName, Endpoint: endpoint,
-					StatusCode: 200, PolicyAction: "warned",
-					DurationMs: int(time.Since(start).Milliseconds()),
-				})
+			if fwErr == nil && fwDecision.Action == firewall.ActionFlag {
+				firewallFlagged = true
 			}
 			if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
 				accumulated = fwDecision.SanitizedText
@@ -429,7 +422,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			responseDecision = h.dlpSvc.Evaluate(accumulated, responseFindings)
 		}
 
-		responsePolicyAction := h.mergePolicyAction(policyAction, responseDecision.Action)
+		responsePolicyAction := applyFlagCorrelation(h.mergePolicyAction(policyAction, responseDecision.Action), firewallFlagged)
 		responsePIITypes := appendUniqueTypes(piiTypes, pii.DetectedTypes(responseFindings))
 		responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(requestDecision.Findings))
 		responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
@@ -503,14 +496,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
-			h.auditSvc.Log(&domain.AuditLog{
-				ID: uuid.New().String(), UserID: claims.UserID,
-				RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
-				Model: model, Provider: providerName, Endpoint: endpoint,
-				StatusCode: 200, PolicyAction: "warned",
-				DurationMs: int(time.Since(start).Milliseconds()),
-			})
+		if fwErr == nil && fwDecision.Action == firewall.ActionFlag {
+			firewallFlagged = true
 		}
 		if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
 			respBody = []byte(fwDecision.SanitizedText)
@@ -552,7 +539,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		responseDecision = h.dlpSvc.Evaluate(string(respBody), responseFindings)
 	}
 
-	responsePolicyAction := h.mergePolicyAction(policyAction, responseDecision.Action)
+	responsePolicyAction := applyFlagCorrelation(h.mergePolicyAction(policyAction, responseDecision.Action), firewallFlagged)
 	responsePIITypes := appendUniqueTypes(piiTypes, pii.DetectedTypes(responseFindings))
 	responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(requestDecision.Findings))
 	responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
@@ -1110,6 +1097,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3.9. Firewall Pipeline — request inspection
+	firewallFlagged := false
 	if h.firewallPipeline != nil {
 		fwMessages := make([]firewall.Message, 0, len(chatReq.Messages))
 		for _, m := range chatReq.Messages {
@@ -1149,19 +1137,17 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
-			h.auditSvc.Log(&domain.AuditLog{
-				ID: uuid.New().String(), UserID: claims.UserID,
-				RequestBody:  sanitizePayload(bodyBytes),
-				Model:        model, Provider: "unified",
-				Endpoint:     "/proxy/chat", StatusCode: 200,
-				PIIDetected:  len(fwDecision.Findings) > 0,
-				PolicyAction: "warned",
-				DurationMs:   int(time.Since(start).Milliseconds()),
-			})
+		if fwDecision.Action == firewall.ActionFlag {
+			firewallFlagged = true
 		}
 		if fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
 			allText = fwDecision.SanitizedText
+			if h.dlpSvc != nil {
+				bodyBytes = sanitizeChatRequestBody(bodyBytes, h.dlpSvc)
+				if err := json.Unmarshal(bodyBytes, &chatReq); err == nil {
+					_ = chatReq
+				}
+			}
 		}
 	}
 
@@ -1210,7 +1196,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policyAction := h.mergePolicyAction(string(evalResult.Action), requestDecision.Action)
+	policyAction := applyFlagCorrelation(h.mergePolicyAction(string(evalResult.Action), requestDecision.Action), firewallFlagged)
 	if evalResult.Action == policy.ActionBlocked {
 		h.auditSvc.Log(&domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
@@ -1348,14 +1334,8 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					})
 					return
 				}
-				if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
-					h.auditSvc.Log(&domain.AuditLog{
-						ID: uuid.New().String(), UserID: claims.UserID,
-						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
-						Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
-						StatusCode: 200, PolicyAction: "warned",
-						DurationMs: int(time.Since(start).Milliseconds()),
-					})
+				if fwErr == nil && fwDecision.Action == firewall.ActionFlag {
+					firewallFlagged = true
 				}
 				if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
 					accumulated = fwDecision.SanitizedText
@@ -1368,7 +1348,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			if h.dlpSvc != nil {
 				responseDecision = h.dlpSvc.Evaluate(accumulated, responseFindings)
 			}
-			responsePolicyAction := h.mergePolicyAction(policyAction, responseDecision.Action)
+			responsePolicyAction := applyFlagCorrelation(h.mergePolicyAction(policyAction, responseDecision.Action), firewallFlagged)
 			responsePIITypes := appendUniqueTypes(piiTypes, pii.DetectedTypes(responseFindings))
 			responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(requestDecision.Findings))
 			responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
@@ -1472,14 +1452,8 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			if fwErr == nil && fwDecision.Action == firewall.ActionFlag && h.auditSvc != nil {
-				h.auditSvc.Log(&domain.AuditLog{
-					ID: uuid.New().String(), UserID: claims.UserID,
-					RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
-					Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
-					StatusCode: 200, PolicyAction: "warned",
-					DurationMs: int(time.Since(start).Milliseconds()),
-				})
+			if fwErr == nil && fwDecision.Action == firewall.ActionFlag {
+				firewallFlagged = true
 			}
 			if fwErr == nil && fwDecision.Action == firewall.ActionSanitize && fwDecision.SanitizedText != "" {
 				respBody = []byte(fwDecision.SanitizedText)
@@ -1491,7 +1465,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		if h.dlpSvc != nil {
 			responseDecision = h.dlpSvc.Evaluate(string(respBody), responseFindings)
 		}
-		responsePolicyAction := h.mergePolicyAction(policyAction, responseDecision.Action)
+		responsePolicyAction := applyFlagCorrelation(h.mergePolicyAction(policyAction, responseDecision.Action), firewallFlagged)
 		responsePIITypes := appendUniqueTypes(piiTypes, pii.DetectedTypes(responseFindings))
 		responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(requestDecision.Findings))
 		responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
@@ -1637,6 +1611,61 @@ func sanitizePayload(payload []byte) string {
 		return sanitized[:maxAuditBodyChars] + "..."
 	}
 	return sanitized
+}
+
+// sanitizeChatRequestBody pass каждое message.content через dlpSvc.Sanitize
+// и пересериализует chat request в JSON. Если парсинг/сериализация падает,
+// возвращает исходное тело без модификации (fail-safe).
+func sanitizeChatRequestBody(body []byte, dlpSvc *dlp.Service) []byte {
+	if dlpSvc == nil || len(body) == 0 {
+		return body
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	messagesVal, ok := raw["messages"].([]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for i, m := range messagesVal {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].(string)
+		if !ok || content == "" {
+			continue
+		}
+		sanitized := dlpSvc.Sanitize(content, pii.Scan(content))
+		if sanitized != content {
+			msg["content"] = sanitized
+			messagesVal[i] = msg
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	raw["messages"] = messagesVal
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// applyFlagCorrelation возвращает PolicyAction с учётом firewall-flag.
+// Блокировки не меняются; allowed с флагом становится "warned".
+func applyFlagCorrelation(action string, flagged bool) string {
+	if !flagged {
+		return action
+	}
+	if action == string(policy.ActionBlocked) {
+		return action
+	}
+	return string(policy.ActionWarned)
 }
 
 func parseAllowedProviderHosts(raw string) map[string]struct{} {
