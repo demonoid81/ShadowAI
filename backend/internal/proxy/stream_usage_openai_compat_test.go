@@ -201,22 +201,6 @@ func TestParseOpenAICompatStreamUsage_OpenRouterCostAsSourceOfTruth(t *testing.T
 	}
 }
 
-func TestParseOpenAICompatStreamUsage_MidStreamErrorIgnored(t *testing.T) {
-	// Mid-stream error frame от OpenRouter: non-standard schema,
-	// не должен ломать парсер — continue до следующего data.
-	body := []byte("" +
-		`data: {"error":{"code":"RATE_LIMIT","message":"slow down"},"finish_reason":"error"}` + "\n\n" +
-		`data: [DONE]` + "\n\n")
-
-	u, err := parseOpenAICompatStreamUsage(body, "model", openAIPricing, openAIFallbackPricing)
-	if err != nil {
-		t.Errorf("mid-stream error не должен вызывать parser error, got: %v", err)
-	}
-	if u.Found {
-		t.Errorf("Found=true при error-only frame; want false")
-	}
-}
-
 func TestParseOpenAICompatStreamUsage_LastUsageWins(t *testing.T) {
 	// Если несколько chunks содержат usage, берём последний.
 	body := []byte("" +
@@ -249,6 +233,84 @@ func TestParseOpenAICompatStreamUsage_ModelFallbackToRequest(t *testing.T) {
 	const want = 0.15e-6*10 + 0.60e-6*5
 	if u.CostUSD < want*0.99 || u.CostUSD > want*1.01 {
 		t.Errorf("cost = %g, want ~%g (pricing по requestModel fallback)", u.CostUSD, want)
+	}
+}
+
+// TestParseOpenAICompatStreamUsage_MalformedJSONReturnsError — контракт
+// StreamUsageProvider: malformed SSE frame → parser error, НЕ soft
+// Found=false. Без этого регресс формата провайдера размывается до
+// "usage legitimately absent", что скрывает реальную проблему парсинга.
+func TestParseOpenAICompatStreamUsage_MalformedJSONReturnsError(t *testing.T) {
+	// Валидные data: frame'ы, но один из них — mid-stream truncated JSON.
+	body := []byte("" +
+		`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{"content":"wor` + "\n\n" + // truncated
+		`data: [DONE]` + "\n\n")
+
+	_, err := parseOpenAICompatStreamUsage(body, "gpt-4o", openAIPricing, openAIFallbackPricing)
+	if err == nil {
+		t.Error("malformed JSON frame должен вернуть parser error, а не Found=false")
+	}
+}
+
+// TestParseOpenAICompatStreamUsage_MidStreamErrorNotMalformed — граница:
+// валидный JSON с error-полем (OpenRouter mid-stream error notification) —
+// НЕ malformed. Парсится успешно, просто без usage update. Это
+// отличается от TestParseOpenAICompatStreamUsage_MalformedJSONReturnsError
+// тем, что JSON синтаксически валиден.
+func TestParseOpenAICompatStreamUsage_MidStreamErrorNotMalformed(t *testing.T) {
+	body := []byte("" +
+		`data: {"error":{"code":"RATE_LIMIT","message":"slow down"},"finish_reason":"error"}` + "\n\n" +
+		`data: [DONE]` + "\n\n")
+
+	u, err := parseOpenAICompatStreamUsage(body, "model", openAIPricing, openAIFallbackPricing)
+	if err != nil {
+		t.Errorf("валидный JSON с error-полем не должен вызывать parser error: %v", err)
+	}
+	if u.Found {
+		t.Errorf("Found=true для error-only потока; want false")
+	}
+}
+
+// TestParseOpenAICompatStreamUsage_ExplicitZeroCost — OpenRouter может
+// вернуть authoritative "cost":0 для free/promotional route. Это
+// должно браться как source of truth, а НЕ fallback на pricing table.
+func TestParseOpenAICompatStreamUsage_ExplicitZeroCost(t *testing.T) {
+	body := []byte("" +
+		`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"cost":0}}` + "\n\n" +
+		`data: [DONE]` + "\n\n")
+
+	u, err := parseOpenAICompatStreamUsage(body, "openai/gpt-4o", openRouterPricing, openRouterFallbackPricing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u.Found {
+		t.Fatal("Found=false; должно быть true, т.к. есть usage и explicit cost")
+	}
+	// cost=0 — authoritative значение от провайдера (free route).
+	// Если бы мы пересчитали через pricing table для openai/gpt-4o,
+	// получили бы 100*5e-6 + 50*15e-6 = 1.25e-3 ≠ 0.
+	if u.CostUSD != 0 {
+		t.Errorf("cost = %g, want 0 (authoritative zero от провайдера, а не fallback pricing)", u.CostUSD)
+	}
+}
+
+// TestParseOpenAICompatStreamUsage_CostAbsentFallsBackToPricing — симметрия
+// с предыдущим: если cost-поле отсутствует в JSON (не просто 0), fallback
+// на pricing table — правильное поведение.
+func TestParseOpenAICompatStreamUsage_CostAbsentFallsBackToPricing(t *testing.T) {
+	body := []byte("" +
+		`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}` + "\n\n" +
+		`data: [DONE]` + "\n\n")
+
+	u, err := parseOpenAICompatStreamUsage(body, "openai/gpt-4o", openRouterPricing, openRouterFallbackPricing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// openai/gpt-4o pricing: {5e-6, 15e-6} → 100*5e-6 + 50*15e-6 = 1.25e-3
+	const want = 1.25e-3
+	if u.CostUSD < want*0.99 || u.CostUSD > want*1.01 {
+		t.Errorf("cost = %g, want ~%g (pricing table fallback, т.к. cost-поле отсутствует)", u.CostUSD, want)
 	}
 }
 

@@ -9,12 +9,14 @@ import "encoding/json"
 // --- OpenAI-compat (OpenAI, OpenRouter, Groq, Mistral) ---
 
 type openAIUsage struct {
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
-	// Cost присутствует у OpenRouter (authoritative billing). У остальных
-	// провайдеров обычно отсутствует — используем pricing table.
-	Cost float64 `json:"cost,omitempty"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	// Cost — pointer, чтобы отличить "поля нет в JSON" (nil) от
+	// "explicit 0" (OpenRouter может прислать 0 для free/promotional
+	// routes, и это authoritative значение, а не сигнал использовать
+	// локальную pricing table).
+	Cost *float64 `json:"cost,omitempty"`
 }
 
 type openAIStreamChunk struct {

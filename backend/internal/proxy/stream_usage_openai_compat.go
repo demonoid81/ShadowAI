@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 )
@@ -111,9 +112,12 @@ func parseOpenAICompatStreamUsage(
 
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal(e.Data, &chunk); err != nil {
-			// Неразобранный chunk (например, mid-stream error от OpenRouter
-			// с нестандартной схемой) — не ломаем поток, просто пропускаем.
-			return nil
+			// Real malformed JSON — контракт StreamUsageProvider требует
+			// вернуть parser error. Это отличается от "frame валидный JSON,
+			// но без ожидаемых полей" (например, OpenRouter mid-stream error
+			// в {"error":{...}}): тот случай парсится успешно и просто
+			// не обновляет lastUsage.
+			return fmt.Errorf("openai-compat: malformed SSE frame: %w", err)
 		}
 		if chunk.Usage != nil {
 			lastUsage = chunk.Usage
@@ -146,21 +150,22 @@ func parseOpenAICompatStreamUsage(
 		Model:            lastModel,
 	}
 
-	// OpenRouter включает usage.cost в финальный chunk. Если он есть —
-	// это authoritative billing от провайдера, использовать как есть.
-	// Иначе считаем локально по pricing table.
-	if lastUsage.Cost > 0 {
-		usage.CostUSD = lastUsage.Cost
+	// OpenRouter включает usage.cost в финальный chunk. Если поле
+	// присутствует в JSON (даже с нулевым значением для free routes) —
+	// это authoritative billing от провайдера. Иначе считаем локально.
+	if lastUsage.Cost != nil {
+		usage.CostUSD = *lastUsage.Cost
 	} else {
 		usage.CostUSD = calculateProviderCost(pricing, fallback, pricingModel,
 			lastUsage.PromptTokens, lastUsage.CompletionTokens)
 	}
 
-	// Found=true требует хотя бы какого-то content'а: токенов или явного cost.
+	// Found=true: либо провайдер прислал token counts, либо authoritative
+	// cost (включая explicit 0 для free routes).
 	usage.Found = lastUsage.PromptTokens > 0 ||
 		lastUsage.CompletionTokens > 0 ||
 		lastUsage.TotalTokens > 0 ||
-		lastUsage.Cost > 0
+		lastUsage.Cost != nil
 	return usage, nil
 }
 
