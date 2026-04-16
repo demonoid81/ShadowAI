@@ -198,3 +198,95 @@ func TestProxyChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T) {
 		t.Errorf("response не JSON: %v\nbody: %s", err, rec.Body.String())
 	}
 }
+
+// TestUnifiedChat_FirewallFlagPlusDLPSanitize_WiringIntegration — wiring-level
+// тест для UnifiedChat (/proxy/chat). Дублирует assertions провайдер-specific
+// теста, но идёт через intelligent routing path с Router + fallback loop.
+// UnifiedChat имеет собственные audit sites (handler.go:1199, 1351, 1468) —
+// этот тест проверяет, что корреляция sanitized работает и там.
+func TestUnifiedChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T) {
+	// 1. Mock upstream LLM (отвечает на любой путь)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"safe response"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstream.Close()
+
+	// 2. Provider и registry
+	registry := NewRegistry()
+	registry.Register(&mockOpenAIProvider{url: upstream.URL})
+
+	// 3. Audit capture
+	auditRepo := &captureAuditRepo{}
+	auditSvc := audit.NewService(auditRepo)
+
+	// 4. Policy без правил
+	policySvc := &policy.Service{Engine: policy.NewEngine(emptyPolicyRepo{})}
+
+	// 5. Budget с miniredis
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	budgetSvc := budget.NewService(unlimitedBudgetRepo{}, rdb)
+
+	// 6. DLP enforce
+	dlpSvc := dlp.NewService("enforce")
+
+	// 7. Firewall pipeline с always-flag
+	pipeline := firewall.NewPipeline()
+	pipeline.Register(flagInspector{})
+
+	// 8. Router для UnifiedChat (без healthTracker, без fallback order)
+	modelMapper := NewModelMapper(registry)
+	router := NewRouter(registry, nil, modelMapper, StrategyCheapest, nil)
+
+	// 9. Handler с router — это ключевое отличие от ProxyChat-теста
+	h := NewHandler(
+		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
+		"", router, nil, nil,
+		0,
+		pipeline,
+	)
+
+	// 10. Request к /proxy/chat
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"please reply to user@example.com with a greeting"}]}`
+	req := httptest.NewRequest("POST", "/proxy/chat", strings.NewReader(body))
+	claims := &auth.Claims{UserID: "test-user", Email: "admin@example.com", Role: "user"}
+	req = req.WithContext(auth.WithClaims(req.Context(), claims))
+
+	rec := httptest.NewRecorder()
+
+	// 11. Exec
+	h.UnifiedChat(rec, req)
+
+	// 12. Flush audit
+	auditSvc.Close()
+
+	// 13. Ассерты
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	entries := auditRepo.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 audit entry (без промежуточных warned), got %d:\n%+v", len(entries), entries)
+	}
+
+	entry := entries[0]
+	if entry.PolicyAction != string(dlp.DLPActionSanitize) {
+		t.Errorf("PolicyAction = %q, expected %q — UnifiedChat: firewall flag + DLP sanitize должен остаться sanitized",
+			entry.PolicyAction, dlp.DLPActionSanitize)
+	}
+
+	if entry.Endpoint != "/proxy/chat" {
+		t.Errorf("Endpoint = %q, expected /proxy/chat", entry.Endpoint)
+	}
+
+	if strings.Contains(entry.RequestBody, "user@example.com") {
+		t.Errorf("RequestBody в audit содержит не санитизированный email: %s", entry.RequestBody)
+	}
+}
