@@ -34,6 +34,12 @@ type OpenAICompatProvider struct {
 	Default      string
 	Pricing      map[string][2]float64
 	Fallback     [2]float64
+	// InjectIncludeUsage=true заставляет BuildRequest добавлять
+	// stream_options.include_usage=true в streaming-запросы. Включать
+	// только для провайдеров с документированной поддержкой (OpenAI).
+	// Для Groq/Mistral/OpenRouter флаг оставлять false — best-effort
+	// parsing без mutation запроса.
+	InjectIncludeUsage bool
 }
 
 func (p *OpenAICompatProvider) Name() string {
@@ -41,6 +47,16 @@ func (p *OpenAICompatProvider) Name() string {
 }
 
 func (p *OpenAICompatProvider) BuildRequest(ctx context.Context, body []byte, model string) (*http.Request, error) {
+	// Если провайдер требует include_usage для stream accounting, inject'им его.
+	// Работает только для streaming-запросов (body.stream=true).
+	if p.InjectIncludeUsage {
+		patched, patchErr := patchOpenAIStreamOptions(body, true)
+		if patchErr == nil {
+			body = patched
+		}
+		// patchErr != nil → тихо продолжаем с исходным body. Accounting
+		// деградирует до Found=false, но отказ запроса был бы хуже.
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: build request: %w", p.ProviderName, err)

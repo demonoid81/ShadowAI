@@ -35,6 +35,10 @@ func NewOpenAIProvider(apiKey string) *OpenAIProvider {
 			Default:      "gpt-4o-mini",
 			Pricing:      openAIPricing,
 			Fallback:     openAIFallbackPricing,
+			// OpenAI имеет документированную поддержку stream_options.include_usage=true,
+			// который возвращает финальный chunk с usage перед [DONE].
+			// Без этого флага в streaming нет accounting — закрываем баг budget-обхода.
+			InjectIncludeUsage: true,
 		},
 	}
 }
@@ -65,4 +69,9 @@ func (p *OpenAIProvider) ParseResponse(body []byte) (promptTokens, completionTok
 	tt := resp.Usage.TotalTokens
 	c := calculateProviderCost(openAIPricing, openAIFallbackPricing, resp.Model, pt, ct)
 	return pt, ct, tt, c, nil
+}
+
+// ParseStreamUsage делегирует в общий OpenAI-compat парсер.
+func (p *OpenAIProvider) ParseStreamUsage(body []byte, requestModel string) (StreamUsage, error) {
+	return p.base.ParseStreamUsage(body, requestModel)
 }
