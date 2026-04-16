@@ -79,11 +79,15 @@ var (
 		Help: "Total LLM-as-Judge Evaluate() calls (enabled configuration).",
 	}, []string{"provider", "threat_type"})
 
-	// JudgeFailTotal — любая категория неуспеха judge. Сумма
-	// fail == timeout + malformed + error (transport/HTTP/build).
+	// JudgeFailTotal — НЕ-overlapping с timeout/malformed. Содержит
+	// только transport errors (DNS, refused, reset), HTTP ошибки
+	// (non-2xx), и build errors (JSON marshal, request construction).
+	// Timeout и malformed имеют отдельные counters и НЕ включаются сюда.
+	// Для "total non-success rate" в dashboard складывайте:
+	//   rate(fail) + rate(timeout) + rate(malformed).
 	JudgeFailTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadowai_judge_fail_total",
-		Help: "Total judge failures (transport, HTTP, build errors). Does not include timeout/malformed (see separate counters).",
+		Help: "Judge transport/HTTP/build errors. Non-overlapping with timeout_total and malformed_total.",
 	}, []string{"provider", "threat_type"})
 
 	// JudgeTimeoutTotal — отдельный счётчик timeout'ов для alerting

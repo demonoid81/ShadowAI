@@ -132,6 +132,19 @@ func (p *Pipeline) run(
 			return d, nil
 		}
 
+		// Cross-inspector signal (PR-3): если inspector вернул non-allow,
+		// помечаем payload.Meta["flagged"]="true" для downstream inspectors
+		// (MultiTurn.detectGradualBoundaryPush использует этот сигнал).
+		// Meta[] shared state — мутация безопасна: Payload.Meta передаётся
+		// только внутри одного request-cycle, и inspector'ы в pipeline
+		// запускаются последовательно.
+		if d.Action == ActionFlag || d.Action == ActionSanitize {
+			if payload.Meta == nil {
+				payload.Meta = make(map[string]string)
+			}
+			payload.Meta["flagged"] = "true"
+		}
+
 		// Track worst non-block action: sanitize > flag > allow
 		if compareAction(d.Action, finalAction) > 0 {
 			finalAction = d.Action
