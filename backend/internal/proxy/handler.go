@@ -218,6 +218,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			Provider: providerName,
 			UserID:   claims.UserID,
 			Phase:    firewall.PhaseRequest,
+			Meta:     extractFirewallMeta(r),
 		}
 		fwDecision, fwErr := h.firewallPipeline.InspectRequest(r.Context(), fwPayload)
 		if fwErr != nil {
@@ -459,12 +460,37 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 		// Post-call budget accounting для streaming. ParseResponse может вернуть
 		// 0 для SSE-потоков без usage — это known limitation (требует SSE parser).
-		// Но даже в этом случае вызываем учёт, чтобы предотвратить полный обход
-		// бюджетной системы через stream=true.
+		// Но даже в этом случае вызываем учёт + проверку, чтобы предотвратить
+		// полный обход бюджетной системы через stream=true.
 		promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
-		if cost > 0 {
-			_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+		recordUsage := func() {
+			if cost > 0 {
+				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+			}
 		}
+
+		// Post-call budget check. Работает даже при 0 tokens (защищает, если
+		// пользователь уже превысил лимит прошлыми запросами).
+		allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
+		if err == nil && !allowedAfter {
+			recordUsage()
+			h.auditSvc.Log(&domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
+				ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
+				Model:        model, Provider: providerName, Endpoint: endpoint,
+				StatusCode:   http.StatusPaymentRequired,
+				PromptTokens: promptTokens, CompletionTokens: completionTokens,
+				TotalTokens: totalTokens, CostUSD: cost,
+				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
+				PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+			})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusPaymentRequired)
+			json.NewEncoder(w).Encode(map[string]string{"error": "budget exceeded"})
+			return
+		}
+		recordUsage()
 
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
@@ -1129,6 +1155,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			Provider: "unified",
 			UserID:   claims.UserID,
 			Phase:    firewall.PhaseRequest,
+			Meta:     extractFirewallMeta(r),
 		}
 		fwDecision, fwErr := h.firewallPipeline.InspectRequest(r.Context(), fwPayload)
 		if fwErr != nil {
@@ -1396,12 +1423,33 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			policyAction = responsePolicyAction
 
 			// Post-call budget accounting для UnifiedChat streaming.
-			// См. комментарий в ProxyChat streaming: SSE без usage вернёт 0,
-			// но вызов обязателен, чтобы не было полного обхода бюджета.
+			// См. комментарий в ProxyChat streaming.
 			promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
-			if cost > 0 {
-				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+			recordStreamUsage := func() {
+				if cost > 0 {
+					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				}
 			}
+			allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
+			if err == nil && !allowedAfter {
+				recordStreamUsage()
+				h.auditSvc.Log(&domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
+					ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
+					Model:        providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
+					StatusCode:   http.StatusPaymentRequired,
+					PromptTokens: promptTokens, CompletionTokens: completionTokens,
+					TotalTokens: totalTokens, CostUSD: cost,
+					PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
+					PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				})
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPaymentRequired)
+				json.NewEncoder(w).Encode(map[string]string{"error": "budget exceeded"})
+				return
+			}
+			recordStreamUsage()
 
 			h.auditSvc.Log(&domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
@@ -1640,6 +1688,22 @@ func sanitizePayload(payload []byte) string {
 		return sanitized[:maxAuditBodyChars] + "..."
 	}
 	return sanitized
+}
+
+// extractFirewallMeta собирает request-level метаданные для firewall-инспекторов.
+// Клиент передаёт conversation_id через X-Conversation-ID header для корректного
+// per-conversation скоупинга MultiTurnInspector. Без заголовка разные чаты
+// одного UserID смешиваются.
+func extractFirewallMeta(r *http.Request) map[string]string {
+	meta := make(map[string]string)
+	if convID := strings.TrimSpace(r.Header.Get("X-Conversation-ID")); convID != "" {
+		// Ограничиваем длину чтобы исключить memory-abuse через header
+		if len(convID) > 128 {
+			convID = convID[:128]
+		}
+		meta["conversation_id"] = convID
+	}
+	return meta
 }
 
 // sanitizeChatRequestBody pass каждое message.content через dlpSvc.Sanitize

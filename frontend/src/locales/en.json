@@ -55,6 +55,7 @@
     "allowed": "Allowed",
     "blocked": "Blocked",
     "warned": "Warned",
+    "sanitized": "Sanitized",
     "filterModel": "Filter by model...",
     "total": "{count} total entries",
     "prev": "Prev",

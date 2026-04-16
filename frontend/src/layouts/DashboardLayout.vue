@@ -45,16 +45,20 @@ const { locale } = useI18n()
 
 const currentLocale = computed(() => locale.value)
 
-const nav = [
+// adminOnly помечает роуты, требующие role=admin. Для остальных пользователей
+// пункт меню скрывается; backend также защищён RequireRole(admin).
+const allNav = [
   { to: '/dashboard', icon: '\u{1F4CA}', labelKey: 'nav.dashboard' },
-  { to: '/audit', icon: '\u{1F4CB}', labelKey: 'nav.audit' },
-  { to: '/policies', icon: '\u{1F6E1}\u{FE0F}', labelKey: 'nav.policies' },
+  { to: '/audit', icon: '\u{1F4CB}', labelKey: 'nav.audit', adminOnly: true },
+  { to: '/policies', icon: '\u{1F6E1}\u{FE0F}', labelKey: 'nav.policies', adminOnly: true },
   { to: '/budget', icon: '\u{1F4B0}', labelKey: 'nav.budget' },
-  { to: '/users', icon: '\u{1F465}', labelKey: 'nav.users' },
+  { to: '/users', icon: '\u{1F465}', labelKey: 'nav.users', adminOnly: true },
   { to: '/providers', icon: '\u{1F310}', labelKey: 'nav.providers' },
-  { to: '/firewall', icon: '\u{1F525}', labelKey: 'nav.firewall' },
+  { to: '/firewall', icon: '\u{1F525}', labelKey: 'nav.firewall', adminOnly: true },
   { to: '/internal-db', icon: '\u{1F5C4}\u{FE0F}', labelKey: 'nav.internalDb' }
 ]
+
+const nav = computed(() => allNav.filter(item => !item.adminOnly || authStore.isAdmin))
 
 function setLocale(lang: string) {
   locale.value = lang

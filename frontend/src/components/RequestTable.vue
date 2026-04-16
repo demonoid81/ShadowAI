@@ -41,7 +41,11 @@ defineProps<{ logs: any[] }>()
 
 function policyClass(action: string) {
   if (action === 'blocked') return 'bg-red-900/50 text-red-400'
+  if (action === 'sanitized') return 'bg-orange-900/50 text-orange-400'
   if (action === 'warned') return 'bg-yellow-900/50 text-yellow-400'
-  return 'bg-green-900/50 text-green-400'
+  if (action === 'allowed') return 'bg-green-900/50 text-green-400'
+  // Любой неопознанный action НЕ показываем как allowed — явный серый цвет,
+  // чтобы не терять seсurity-события (например, новые типы action'ов).
+  return 'bg-dark-700 text-gray-400'
 }
 </script>

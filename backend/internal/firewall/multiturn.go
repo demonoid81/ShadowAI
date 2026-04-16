@@ -85,14 +85,22 @@ func (m *MultiTurnInspector) InspectRequest(ctx context.Context, p *Payload) (*D
 		userID = "_anonymous"
 	}
 
+	// Session key = userID + conversation_id. Разные диалоги одного
+	// пользователя НЕ должны смешиваться. Если клиент не передал
+	// conversation_id, fallback на userID-only (legacy behavior, но с warning).
+	sessionKey := userID
+	if convID := p.Meta["conversation_id"]; convID != "" {
+		sessionKey = userID + ":" + convID
+	}
+
 	// Извлечь пользовательские сообщения из payload
 	userMessages := m.extractUserMessages(p)
 	if len(userMessages) == 0 {
 		return &Decision{Action: ActionAllow}, nil
 	}
 
-	// Получить или создать сессию пользователя
-	session := m.getOrCreateSession(userID)
+	// Получить или создать сессию пользователя по составному ключу
+	session := m.getOrCreateSession(sessionKey)
 
 	session.mu.Lock()
 	// Добавить только НОВЫЕ сообщения.
