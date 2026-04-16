@@ -346,6 +346,8 @@ func main() {
 		connectivityCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Сначала останавливаем HTTP-приём, потом flush'им audit-очередь
+		// чтобы не потерять security-события на shutdown.
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("shutdown error: %v", err)
 		}
@@ -354,4 +356,10 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: %v", err)
 	}
+
+	// Flush audit queue перед exit — не теряем security-события.
+	auditSvc.Close()
+	depth, dropped, inserted, failed := auditSvc.Stats()
+	log.Printf("audit shutdown: inserted=%d failed=%d dropped=%d queue_depth_remaining=%d",
+		inserted, failed, dropped, depth)
 }

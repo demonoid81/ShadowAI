@@ -95,13 +95,23 @@ func (m *MultiTurnInspector) InspectRequest(ctx context.Context, p *Payload) (*D
 	session := m.getOrCreateSession(userID)
 
 	session.mu.Lock()
-	// Добавить новые сообщения
+	// Добавить только НОВЫЕ сообщения.
+	// Chat-клиенты обычно resend'ят всю историю на каждом turn; без
+	// дедупликации сессия бы накапливала дубликаты, искажая анализ.
 	now := time.Now()
+	existing := make(map[string]struct{}, len(session.messages))
+	for _, sm := range session.messages {
+		existing[sm.content] = struct{}{}
+	}
 	for _, msg := range userMessages {
+		if _, dup := existing[msg]; dup {
+			continue
+		}
 		session.messages = append(session.messages, sessionMessage{
 			content:   msg,
 			timestamp: now,
 		})
+		existing[msg] = struct{}{}
 	}
 
 	// Удалить просроченные сообщения

@@ -75,9 +75,16 @@ func (r *ContentRateLimiter) InspectRequest(_ context.Context, p *Payload) (*Dec
 		return &Decision{Action: ActionAllow, InspectorName: r.Name()}, nil
 	}
 
-	textLen := len(p.Text)
-	for _, m := range p.Messages {
-		textLen += len(m.Content)
+	// ВАЖНО: используем ЛИБО Messages, ЛИБО Text, чтобы не дублировать счёт.
+	// Handler при наличии Messages также заполняет Text = concat(Messages),
+	// поэтому суммирование обеих полей даёт двойной учёт.
+	textLen := 0
+	if len(p.Messages) > 0 {
+		for _, m := range p.Messages {
+			textLen += len(m.Content)
+		}
+	} else {
+		textLen = len(p.Text)
 	}
 
 	r.mu.Lock()

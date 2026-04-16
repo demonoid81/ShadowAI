@@ -373,7 +373,15 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 	// 8. Handle streaming
 	if chatReq.Stream {
-		// Collect full stream before releasing downstream output to guarantee DLP enforcement.
+		// ВНИМАНИЕ: текущая реализация streaming НЕ является real-time passthrough.
+		// Чтобы гарантировать enforcement DLP и firewall на response, handler
+		// буферизует весь upstream-stream, затем прогоняет его через inspectors
+		// и только после этого отдаёт клиенту. Это даёт:
+		//   - корректную блокировку вредоносных ответов (never leak)
+		//   - sanitization секретов в response
+		//   - post-call budget accounting по ParseResponse
+		// Ценой является отсутствие real-time chunk delivery. Для low-latency UX
+		// потребуется incremental scanning (см. roadmap).
 		respBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
 			http.Error(w, `{"error":"read upstream"}`, http.StatusBadGateway)
@@ -449,6 +457,15 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		}
 		policyAction = responsePolicyAction
 
+		// Post-call budget accounting для streaming. ParseResponse может вернуть
+		// 0 для SSE-потоков без usage — это known limitation (требует SSE parser).
+		// Но даже в этом случае вызываем учёт, чтобы предотвратить полный обход
+		// бюджетной системы через stream=true.
+		promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
+		if cost > 0 {
+			_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+		}
+
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		h.auditSvc.Log(&domain.AuditLog{
@@ -457,6 +474,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
 			Model:        model, Provider: providerName, Endpoint: endpoint,
 			StatusCode:   resp.StatusCode,
+			PromptTokens: promptTokens, CompletionTokens: completionTokens,
+			TotalTokens: totalTokens, CostUSD: cost,
 			PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
 			PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
 		})
@@ -1376,11 +1395,21 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 			policyAction = responsePolicyAction
 
+			// Post-call budget accounting для UnifiedChat streaming.
+			// См. комментарий в ProxyChat streaming: SSE без usage вернёт 0,
+			// но вызов обязателен, чтобы не было полного обхода бюджета.
+			promptTokens, completionTokens, totalTokens, cost, _ := provider.ParseResponse(respBytes)
+			if cost > 0 {
+				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+			}
+
 			h.auditSvc.Log(&domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
 				Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
 				StatusCode:   resp.StatusCode,
+				PromptTokens: promptTokens, CompletionTokens: completionTokens,
+				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
 				PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
 			})
@@ -1768,11 +1797,15 @@ func copyHeadersWithoutContentLength(dst, src http.Header) {
 	}
 }
 
-func (h *Handler) auditPayload(payload []byte, piiFindings []pii.Finding, decision dlp.Decision) string {
+func (h *Handler) auditPayload(payload []byte, _ []pii.Finding, _ dlp.Decision) string {
+	// ВАЖНО: piiFindings из вызова считаны по allText (конкатенации
+	// message.content), а payload здесь — сырой JSON. Использовать те offsets
+	// для Sanitize() привело бы к структурному повреждению JSON.
+	// Пересчитываем findings по фактическому payload для корректной санитизации.
 	sanitized := string(payload)
-	// Always sanitize via DLP if service available (not just on Sanitize action)
 	if h != nil && h.dlpSvc != nil {
-		sanitized = h.dlpSvc.Sanitize(sanitized, piiFindings)
+		bodyFindings := pii.Scan(sanitized)
+		sanitized = h.dlpSvc.Sanitize(sanitized, bodyFindings)
 	}
 	// Also apply PII redaction
 	for _, p := range pii.Patterns {
