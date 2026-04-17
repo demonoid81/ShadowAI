@@ -113,11 +113,29 @@ func (r *Repository) List(ctx context.Context, limit, offset int, userID, model,
 	var logs []domain.AuditLog
 	for rows.Next() {
 		var l domain.AuditLog
-		var shadowJSON sql.NullString
-		if err := rows.Scan(&l.ID, &l.UserID, &l.RequestBody, &l.ResponseBody, &l.Model, &l.Provider, &l.Endpoint,
+		// PR-B: после erasure user_id, request_body, response_body,
+		// shadow_decisions_json могут быть NULL. Сканируем через
+		// sql.NullString и преобразуем в пустую string (domain-тип
+		// не меняем, чтобы не ломать downstream JSON-shape).
+		var (
+			userID      sql.NullString
+			requestBody sql.NullString
+			respBody    sql.NullString
+			shadowJSON  sql.NullString
+		)
+		if err := rows.Scan(&l.ID, &userID, &requestBody, &respBody, &l.Model, &l.Provider, &l.Endpoint,
 			&l.StatusCode, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.CostUSD,
 			&l.PIIDetected, pq.Array(&l.PIITypes), &l.PolicyAction, &shadowJSON, &l.DurationMs, &l.CreatedAt); err != nil {
 			return nil, 0, err
+		}
+		if userID.Valid {
+			l.UserID = userID.String
+		}
+		if requestBody.Valid {
+			l.RequestBody = requestBody.String
+		}
+		if respBody.Valid {
+			l.ResponseBody = respBody.String
 		}
 		if shadowJSON.Valid {
 			l.ShadowDecisionsJSON = shadowJSON.String
