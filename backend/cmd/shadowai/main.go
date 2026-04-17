@@ -7,11 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"time"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 
+	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/budget"
@@ -31,7 +32,10 @@ import (
 
 func main() {
 	cfg := config.Load()
-	if len(cfg.JWTSecret) < 32 {
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		log.Fatalf("config validation failed: %v", err)
+	}
+	if !cfg.IsProduction() && len(cfg.JWTSecret) < 32 {
 		log.Printf("warning: JWT_SECRET is shorter than 32 chars; set a strong secret in production")
 	}
 	mw.ConfigureTrustedProxies(cfg.TrustedProxyCIDRs)
@@ -258,21 +262,30 @@ func main() {
 	if auditPayloadMode == audit.PayloadModeFull {
 		log.Printf("WARN: AUDIT_PAYLOAD_MODE=full — request/response bodies stored verbatim; privacy implications")
 	}
+	if cfg.IsProduction() && cfg.AuditAllowNoRetentionInProd && cfg.AuditRetentionDays == 0 {
+		log.Printf("WARN: prod started with AUDIT_RETENTION_DAYS=0 under explicit override; audit rows will not expire automatically")
+	}
 
 	// Handlers
+	// PR-D: admin access audit (отдельная таблица admin_event_logs).
+	// Создаётся до handler'ов, потому что они принимают adminAuditSvc в DI.
+	adminAuditRepo := adminaudit.NewRepository(db)
+	adminAuditSvc := adminaudit.NewService(adminAuditRepo)
+	adminAuditHandler := adminaudit.NewHandler(adminAuditRepo)
+
 	// PR-B: DSAR/erasure wiring. auditRepo + budgetRepo используются
 	// как AuditScrubber + BudgetDeleter через interface intersection.
 	erasureSvc := auth.NewErasureService(db, auditRepo, budgetRepo)
-	authHandler := auth.NewHandler(authSvc, erasureSvc)
+	authHandler := auth.NewHandler(authSvc, erasureSvc, adminAuditSvc)
 	// schedulerEnabled ровно повторяет условие запуска goroutine ниже
 	// (cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0). Без
 	// этой согласованности /audit/status врал бы оператору.
 	auditSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0
-	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled)
+	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled, adminAuditSvc)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
-	dashHandler := dashboard.NewHandler(db)
-	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc)
+	dashHandler := dashboard.NewHandler(db, adminAuditSvc)
+	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, adminAuditSvc)
 	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode)
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
@@ -322,12 +335,29 @@ func main() {
 				deleted, err := repo.PurgeOlderThan(ctx, cutoff, cfg.AuditPurgeChunkSize)
 				if err != nil {
 					log.Printf("audit-purge scheduler: err: %v", err)
+					// PR-D: фиксируем failed purge в admin-event-logs.
+					adminAuditSvc.Record(ctx, adminaudit.Event{
+						ActorUserID: nil, Action: "purge", Resource: "audit_logs",
+						Path: "scheduler", Method: "INTERNAL", Success: false,
+						Metadata: map[string]any{
+							"mode": "scheduler", "cutoff": cutoff.Format(time.RFC3339),
+							"error": err.Error(),
+						},
+					})
 					return
 				}
 				if err := repo.RecordPurgeRun(ctx, cutoff, deleted); err != nil {
 					log.Printf("audit-purge scheduler: record run failed: %v", err)
 				}
 				log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
+				adminAuditSvc.Record(ctx, adminaudit.Event{
+					ActorUserID: nil, Action: "purge", Resource: "audit_logs",
+					Path: "scheduler", Method: "INTERNAL", Success: true,
+					Metadata: map[string]any{
+						"mode": "scheduler", "cutoff": cutoff.Format(time.RFC3339),
+						"rows_deleted": deleted,
+					},
+				})
 			}
 			for {
 				select {
@@ -376,6 +406,8 @@ func main() {
 	// Audit logs
 	admin.HandleFunc("/audit/logs", auditHandler.List).Methods("GET")
 	admin.HandleFunc("/audit/status", auditHandler.Status).Methods("GET")
+	// PR-D: admin access audit.
+	admin.HandleFunc("/admin-events", adminAuditHandler.List).Methods("GET")
 
 	// Policies (admin)
 	admin.HandleFunc("/policies", policyHandler.List).Methods("GET")

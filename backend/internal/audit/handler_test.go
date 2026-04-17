@@ -10,8 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/domain"
 )
+
+// captureRecorder — stub adminaudit.Recorder для verification.
+type captureRecorder struct {
+	events []adminaudit.Event
+}
+
+func (c *captureRecorder) Record(_ context.Context, ev adminaudit.Event) {
+	c.events = append(c.events, ev)
+}
 
 // recordingRepo захватывает параметры вызова .List для проверки, что
 // handler корректно прокидывает has_shadow в repository-слой.
@@ -70,7 +80,7 @@ func TestAuditHandler_HasShadow_Whitelist(t *testing.T) {
 	for _, tc := range cases {
 		repo := &recordingRepo{}
 		svc := &Service{repo: repo}
-		h := NewHandler(svc, PayloadModeRedacted, 30, true)
+		h := NewHandler(svc, PayloadModeRedacted, 30, true, nil)
 
 		req := httptest.NewRequest("GET", "/audit/logs?has_shadow="+tc.query, nil)
 		rec := httptest.NewRecorder()
@@ -92,7 +102,7 @@ func TestAuditHandler_HasShadow_Whitelist(t *testing.T) {
 func TestAuditHandler_Status_ExposesConfig(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
-	h := NewHandler(svc, PayloadModeRedacted, 30, true)
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, nil)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	rec := httptest.NewRecorder()
@@ -122,6 +132,51 @@ func TestAuditHandler_Status_ExposesConfig(t *testing.T) {
 	}
 }
 
+// TestAuditHandler_List_RecordsAdminEvent — PR-D: GET /audit/logs
+// должен писать один admin-event с action=read, resource=audit_logs.
+func TestAuditHandler_List_RecordsAdminEvent(t *testing.T) {
+	repo := &recordingRepo{}
+	svc := &Service{repo: repo}
+	rec := &captureRecorder{}
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, rec)
+
+	req := httptest.NewRequest("GET", "/audit/logs?limit=10&policy_action=blocked", nil)
+	w := httptest.NewRecorder()
+	h.List(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("captured %d events, want 1", len(rec.events))
+	}
+	ev := rec.events[0]
+	if ev.Action != "read" || ev.Resource != "audit_logs" {
+		t.Errorf("event action/resource = %q/%q", ev.Action, ev.Resource)
+	}
+	meta, _ := ev.Metadata.(map[string]any)
+	if meta["policy_action"] != "blocked" || meta["limit"] != 10 {
+		t.Errorf("metadata = %+v", meta)
+	}
+}
+
+// TestAuditHandler_Status_RecordsAdminEvent — GET /audit/status тоже
+// пишет event с resource=audit_status.
+func TestAuditHandler_Status_RecordsAdminEvent(t *testing.T) {
+	repo := &recordingRepo{}
+	svc := &Service{repo: repo}
+	rec := &captureRecorder{}
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, rec)
+
+	req := httptest.NewRequest("GET", "/audit/status", nil)
+	w := httptest.NewRecorder()
+	h.Status(w, req)
+
+	if len(rec.events) != 1 || rec.events[0].Resource != "audit_status" {
+		t.Errorf("events = %+v", rec.events)
+	}
+}
+
 // TestAuditHandler_Status_SchedulerDisabled_WithRetention — регресс-guard
 // для первой версии PR-A: раньше scheduler_enabled выводился по
 // retention_days > 0 (derivation), но фактический scheduler требует
@@ -130,7 +185,7 @@ func TestAuditHandler_Status_SchedulerDisabled_WithRetention(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
 	// retention=30, но schedulerEnabled=false (interval=0 в main.go).
-	h := NewHandler(svc, PayloadModeRedacted, 30, false)
+	h := NewHandler(svc, PayloadModeRedacted, 30, false, nil)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	rec := httptest.NewRecorder()
@@ -151,7 +206,7 @@ func TestAuditHandler_Status_SchedulerDisabled_WithRetention(t *testing.T) {
 func TestAuditHandler_Status_NoPIILeak(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
-	h := NewHandler(svc, PayloadModeFull, 90, false)
+	h := NewHandler(svc, PayloadModeFull, 90, false, nil)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	rec := httptest.NewRecorder()
@@ -174,7 +229,7 @@ func TestAuditHandler_HasShadow_ReachesRepo_EndToEnd(t *testing.T) {
 		},
 	}
 	svc := &Service{repo: repo}
-	h := NewHandler(svc, PayloadModeRedacted, 30, true)
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, nil)
 
 	req := httptest.NewRequest("GET", "/audit/logs?has_shadow=yes", nil)
 	rec := httptest.NewRecorder()

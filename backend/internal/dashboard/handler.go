@@ -1,17 +1,45 @@
 package dashboard
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
+
+	"github.com/shadowai/backend/internal/adminaudit"
+	"github.com/shadowai/backend/internal/auth"
 )
 
 type Handler struct {
-	db *sql.DB
+	db         *sql.DB
+	adminAudit adminaudit.Recorder
 }
 
-func NewHandler(db *sql.DB) *Handler {
-	return &Handler{db: db}
+// NewHandler принимает optional adminaudit.Recorder (nil → no-op).
+// Dashboard-endpoints — admin-only-reads, логируются как resource="dashboard".
+func NewHandler(db *sql.DB, adminAudit adminaudit.Recorder) *Handler {
+	return &Handler{db: db, adminAudit: adminAudit}
+}
+
+func (h *Handler) recordRead(ctx context.Context, path, method string, status int, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if c := auth.GetClaims(ctx); c != nil {
+		id := c.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(ctx, adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "read",
+		Resource:    "dashboard",
+		Path:        path,
+		Method:      method,
+		StatusCode:  status,
+		Success:     status < 400,
+		Metadata:    metadata,
+	})
 }
 
 type Stats struct {
@@ -39,6 +67,9 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s)
+	h.recordRead(r.Context(), r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"endpoint": "stats",
+	})
 }
 
 type UsagePoint struct {
@@ -76,6 +107,10 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(points)
+	h.recordRead(r.Context(), r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"endpoint":     "usage",
+		"points_count": len(points),
+	})
 }
 
 type TopUser struct {
@@ -113,4 +148,8 @@ func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
+	h.recordRead(r.Context(), r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"endpoint":    "top_users",
+		"users_count": len(users),
+	})
 }

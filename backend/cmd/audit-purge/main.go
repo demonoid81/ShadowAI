@@ -26,6 +26,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/audit"
 )
 
@@ -103,12 +104,42 @@ func run(args []string, stdout, stderr io.Writer) int {
 	deleted, err := repo.PurgeOlderThan(ctx, cutoff, *chunkSize)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: purge: %v\n", err)
+		// PR-D: admin-event даже на fail (оператор видит попытку).
+		recordPurgeAdminEvent(ctx, db, cutoff, 0, "cli", err.Error())
 		return exitRuntime
 	}
 	if err := repo.RecordPurgeRun(ctx, cutoff, deleted); err != nil {
 		// Purge уже выполнен — не отменяем, но сообщаем оператору.
 		fmt.Fprintf(stderr, "warning: purge succeeded (%d rows deleted) but failed to record run: %v\n", deleted, err)
 	}
+	recordPurgeAdminEvent(ctx, db, cutoff, deleted, "cli", "")
 	fmt.Fprintf(stdout, "deleted %d rows\n", deleted)
 	return exitOK
+}
+
+// recordPurgeAdminEvent — PR-D: логирует успешный/неудачный purge в
+// admin_event_logs. actor_user_id = NULL (системная CLI-операция).
+// Метаданные включают mode=cli|scheduler и cutoff RFC3339.
+func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, rowsDeleted int, mode, errMsg string) {
+	repo := adminaudit.NewRepository(db)
+	svc := adminaudit.NewService(repo)
+	success := errMsg == ""
+	metadata := map[string]any{
+		"mode":         mode,
+		"cutoff":       cutoff.Format(time.RFC3339),
+		"rows_deleted": rowsDeleted,
+	}
+	if !success {
+		metadata["error"] = errMsg
+	}
+	svc.Record(ctx, adminaudit.Event{
+		ActorUserID: nil,
+		Action:      "purge",
+		Resource:    "audit_logs",
+		Path:        "cmd/audit-purge",
+		Method:      "CLI",
+		StatusCode:  0,
+		Success:     success,
+		Metadata:    metadata,
+	})
 }

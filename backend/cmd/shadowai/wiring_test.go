@@ -30,4 +30,8 @@ func TestMainRegistersMetricsRoute(t *testing.T) {
 	if !strings.Contains(src, `"github.com/shadowai/backend/internal/metrics"`) {
 		t.Error("main.go не импортирует internal/metrics — metrics.RegisterRoute не может быть вызван.")
 	}
+
+	if !strings.Contains(src, "cfg.ValidateStartupConfig()") {
+		t.Error("main.go не валидирует startup config — небезопасные prod defaults смогут стартовать.")
+	}
 }

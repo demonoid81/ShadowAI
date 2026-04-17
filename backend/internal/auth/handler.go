@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+
+	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/domain"
 )
 
@@ -16,15 +18,15 @@ type Eraser interface {
 }
 
 type Handler struct {
-	service *Service
-	eraser  Eraser
+	service    *Service
+	eraser     Eraser
+	adminAudit adminaudit.Recorder
 }
 
 // NewHandler. Если eraser=nil, endpoint /users/{id}/erase вернёт
-// 503 (feature не сконфигурирована). Это не breaking: тестовые
-// инстансы без erasure по-прежнему работают.
-func NewHandler(service *Service, eraser Eraser) *Handler {
-	return &Handler{service: service, eraser: eraser}
+// 503. adminAudit nil → admin-событие для erase не пишется (dev/tests).
+func NewHandler(service *Service, eraser Eraser, adminAudit adminaudit.Recorder) *Handler {
+	return &Handler{service: service, eraser: eraser, adminAudit: adminAudit}
 }
 
 type loginRequest struct {
@@ -282,6 +284,9 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 	result, err := h.eraser.EraseUser(r.Context(), claims.UserID, targetID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "erasure failed"})
+		h.recordErase(r, claims.UserID, targetID, http.StatusInternalServerError, false, map[string]any{
+			"error": "erasure failed",
+		})
 		return
 	}
 
@@ -292,6 +297,32 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusNotFound
 	}
 	writeJSON(w, status, result)
+	h.recordErase(r, claims.UserID, targetID, status, result.Status == ErasureCompleted, map[string]any{
+		"status":              string(result.Status),
+		"audit_rows_scrubbed": result.AuditRowsScrubbed,
+		"budgets_deleted":     result.BudgetsDeleted,
+	})
+}
+
+// recordErase пишет admin-event о erasure (action=erase, resource=user).
+// Nil-safe если adminAudit не сконфигурирован. Metadata включает итоговый
+// status + counters; НЕ содержит bodies (их и так уже scrubbed).
+func (h *Handler) recordErase(r *http.Request, actorID, targetID string, status int, success bool, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	actor := &actorID
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "erase",
+		Resource:    "user",
+		TargetID:    targetID,
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  status,
+		Success:     success,
+		Metadata:    metadata,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

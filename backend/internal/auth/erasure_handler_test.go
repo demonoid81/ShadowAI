@@ -45,7 +45,7 @@ func TestEraseUser_Completed(t *testing.T) {
 		UserID: "u-target", Status: ErasureCompleted,
 		AuditRowsScrubbed: 42, BudgetsDeleted: 1,
 	}}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
 	rec := httptest.NewRecorder()
@@ -75,7 +75,7 @@ func TestEraseUser_AlreadyErased(t *testing.T) {
 	eraser := &stubEraser{result: &ErasureResult{
 		UserID: "u-target", Status: ErasureAlreadyErased,
 	}}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
 	rec := httptest.NewRecorder()
@@ -94,7 +94,7 @@ func TestEraseUser_NotFound(t *testing.T) {
 	eraser := &stubEraser{result: &ErasureResult{
 		UserID: "u-unknown", Status: ErasureNotFound,
 	}}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	req := requestWithClaims("u-unknown", &Claims{UserID: "u-admin", Role: RoleAdmin})
 	rec := httptest.NewRecorder()
@@ -108,7 +108,7 @@ func TestEraseUser_NotFound(t *testing.T) {
 // TestEraseUser_NonAdmin_403 — не-admin получает 403, eraser НЕ вызван.
 func TestEraseUser_NonAdmin_403(t *testing.T) {
 	eraser := &stubEraser{}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	req := requestWithClaims("u-target", &Claims{UserID: "u-user", Role: RoleUser})
 	rec := httptest.NewRecorder()
@@ -125,7 +125,7 @@ func TestEraseUser_NonAdmin_403(t *testing.T) {
 // TestEraseUser_Unauthenticated_401 — без claims → 401.
 func TestEraseUser_Unauthenticated_401(t *testing.T) {
 	eraser := &stubEraser{}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	req := requestWithClaims("u-target", nil)
 	rec := httptest.NewRecorder()
@@ -139,7 +139,7 @@ func TestEraseUser_Unauthenticated_401(t *testing.T) {
 // TestEraseUser_EraserUnconfigured_503 — если eraser=nil, endpoint
 // возвращает 503 (feature не включена), не 500 (runtime error).
 func TestEraseUser_EraserUnconfigured_503(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 
 	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
 	rec := httptest.NewRecorder()
@@ -154,7 +154,7 @@ func TestEraseUser_EraserUnconfigured_503(t *testing.T) {
 // Detail не утекает (общий message "erasure failed").
 func TestEraseUser_EraserReturnsError_500(t *testing.T) {
 	eraser := &stubEraser{err: errors.New("database on fire")}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
 	rec := httptest.NewRecorder()
@@ -171,7 +171,7 @@ func TestEraseUser_EraserReturnsError_500(t *testing.T) {
 // TestEraseUser_MissingID_400 — пустой {id} в URL → 400.
 func TestEraseUser_MissingID_400(t *testing.T) {
 	eraser := &stubEraser{}
-	h := NewHandler(nil, eraser)
+	h := NewHandler(nil, eraser, nil)
 
 	// mux.Vars не проставлены — handler получит пустой id.
 	req := httptest.NewRequest(http.MethodPost, "/users//erase", nil)

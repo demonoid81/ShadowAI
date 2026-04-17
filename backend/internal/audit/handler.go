@@ -1,10 +1,14 @@
 package audit
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/shadowai/backend/internal/adminaudit"
+	"github.com/shadowai/backend/internal/auth"
 )
 
 type Handler struct {
@@ -12,23 +16,48 @@ type Handler struct {
 	payloadMode      PayloadMode
 	retentionDays    int
 	schedulerEnabled bool
+	// PR-D: admin-access audit. Nil — no-op (dev scenarios без БД).
+	adminAudit adminaudit.Recorder
 }
 
-// NewHandler принимает также privacy-config. Если mode="" и
-// retentionDays=0 — Status endpoint показывает их как есть (не
-// ошибка, оператор видит "not configured").
+// NewHandler принимает также privacy-config и adminaudit.Recorder.
+// Если mode="" и retentionDays=0 — Status endpoint показывает их как
+// есть (не ошибка, оператор видит "not configured").
 //
 // schedulerEnabled — фактическое состояние embedded purge scheduler
-// (caller считает `interval>0 && retention>0`). Если только retention
-// задан, а interval=0 — scheduler не стартует и этот флаг=false,
-// оператор должен запускать cmd/audit-purge самостоятельно.
-func NewHandler(svc *Service, payloadMode PayloadMode, retentionDays int, schedulerEnabled bool) *Handler {
+// (caller считает `interval>0 && retention>0`).
+func NewHandler(svc *Service, payloadMode PayloadMode, retentionDays int, schedulerEnabled bool, adminAudit adminaudit.Recorder) *Handler {
 	return &Handler{
 		svc:              svc,
 		payloadMode:      payloadMode,
 		retentionDays:    retentionDays,
 		schedulerEnabled: schedulerEnabled,
+		adminAudit:       adminAudit,
 	}
+}
+
+// recordAdminRead — helper для унифицированной записи admin-read event'а
+// из любого handler'а в этом пакете. claims может быть nil (в этом
+// случае actor_user_id = NULL).
+func (h *Handler) recordAdminRead(ctx context.Context, resource, path, method string, status int, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if c := auth.GetClaims(ctx); c != nil {
+		id := c.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(ctx, adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "read",
+		Resource:    resource,
+		Path:        path,
+		Method:      method,
+		StatusCode:  status,
+		Success:     status < 400,
+		Metadata:    metadata,
+	})
 }
 
 type listResponse struct {
@@ -79,6 +108,18 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Limit:  limit,
 		Offset: offset,
 	})
+
+	// PR-D: admin читает audit_logs — записываем факт чтения +
+	// активные фильтры (без raw bodies — они и так не в filters).
+	h.recordAdminRead(r.Context(), "audit_logs", r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"user_id":       userID,
+		"model":         model,
+		"policy_action": policyAction,
+		"has_shadow":    hasShadow,
+		"limit":         limit,
+		"offset":        offset,
+		"total":         total,
+	})
 }
 
 // statusResponse — read-only view privacy/retention настроек + purge
@@ -111,4 +152,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+
+	// PR-D: admin читает audit config/status — фиксируем.
+	h.recordAdminRead(r.Context(), "audit_status", r.URL.Path, r.Method, http.StatusOK, nil)
 }
