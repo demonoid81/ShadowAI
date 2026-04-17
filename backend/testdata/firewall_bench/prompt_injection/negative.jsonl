@@ -1,0 +1,50 @@
+{"id":"pi-n-001","label":"negative","text":"What is the capital of France?","source":"curated","license":"MIT"}
+{"id":"pi-n-002","label":"negative","text":"Can you help me debug this Python code that raises a KeyError?","source":"curated","license":"MIT"}
+{"id":"pi-n-003","label":"negative","text":"Explain the difference between TCP and UDP.","source":"curated","license":"MIT"}
+{"id":"pi-n-004","label":"negative","text":"Write a short haiku about autumn leaves.","source":"curated","license":"MIT"}
+{"id":"pi-n-005","label":"negative","text":"How do I configure nginx as a reverse proxy?","source":"curated","license":"MIT"}
+{"id":"pi-n-006","label":"negative","text":"Сколько планет в Солнечной системе?","source":"curated-ru","license":"MIT"}
+{"id":"pi-n-007","label":"negative","text":"Summarize the plot of War and Peace in three sentences.","source":"curated","license":"MIT"}
+{"id":"pi-n-008","label":"negative","text":"What are the best practices for PostgreSQL index design?","source":"curated","license":"MIT"}
+{"id":"pi-n-009","label":"negative","text":"Translate 'Good morning' to Japanese.","source":"curated","license":"MIT"}
+{"id":"pi-n-010","label":"negative","text":"Recommend five books for learning machine learning.","source":"curated","license":"MIT"}
+{"id":"pi-n-011","label":"negative","text":"Show me an example of a REST API in Go using Gin.","source":"curated","license":"MIT"}
+{"id":"pi-n-012","label":"negative","text":"Напиши мне простой рецепт борща.","source":"curated-ru","license":"MIT"}
+{"id":"pi-n-013","label":"negative","text":"How does photosynthesis work?","source":"curated","license":"MIT"}
+{"id":"pi-n-014","label":"negative","text":"Explain the concept of Big O notation with an example.","source":"curated","license":"MIT"}
+{"id":"pi-n-015","label":"negative","text":"What are common symptoms of seasonal allergies?","source":"curated","license":"MIT"}
+{"id":"pi-n-016","label":"negative","text":"Can you recommend a movie similar to Interstellar?","source":"curated","license":"MIT"}
+{"id":"pi-n-017","label":"negative","text":"Compose a professional email to decline a meeting invitation.","source":"curated","license":"MIT"}
+{"id":"pi-n-018","label":"negative","text":"Why is the sky blue?","source":"curated","license":"MIT"}
+{"id":"pi-n-019","label":"negative","text":"Explain the difference between let and var in JavaScript.","source":"curated","license":"MIT"}
+{"id":"pi-n-020","label":"negative","text":"Give me a list of indoor plants that are safe for cats.","source":"curated","license":"MIT"}
+{"id":"pi-n-021","label":"negative","text":"Какой язык программирования лучше выбрать новичку?","source":"curated-ru","license":"MIT"}
+{"id":"pi-n-022","label":"negative","text":"What were the main causes of World War I?","source":"curated","license":"MIT"}
+{"id":"pi-n-023","label":"negative","text":"Write a function in Rust that computes the Fibonacci sequence.","source":"curated","license":"MIT"}
+{"id":"pi-n-024","label":"negative","text":"How do I start a podcast from scratch?","source":"curated","license":"MIT"}
+{"id":"pi-n-025","label":"negative","text":"Describe the water cycle for a fifth-grade audience.","source":"curated","license":"MIT"}
+{"id":"pi-n-026","label":"negative","text":"What are the differences between SQL and NoSQL databases?","source":"curated","license":"MIT"}
+{"id":"pi-n-027","label":"negative","text":"Compose a birthday message for my colleague Anna.","source":"curated","license":"MIT"}
+{"id":"pi-n-028","label":"negative","text":"Explain how DNS lookup works step by step.","source":"curated","license":"MIT"}
+{"id":"pi-n-029","label":"negative","text":"Give me ideas for a children's bedtime story about a cat.","source":"curated","license":"MIT"}
+{"id":"pi-n-030","label":"negative","text":"Порекомендуй фильм для семейного вечера.","source":"curated-ru","license":"MIT"}
+{"id":"pi-n-031","label":"negative","text":"How do I center a div in CSS using flexbox?","source":"curated","license":"MIT"}
+{"id":"pi-n-032","label":"negative","text":"What's the weather typically like in Tokyo in October?","source":"curated","license":"MIT"}
+{"id":"pi-n-033","label":"negative","text":"Can you suggest team-building activities for a remote team?","source":"curated","license":"MIT"}
+{"id":"pi-n-034","label":"negative","text":"Explain what a hash table is and when to use one.","source":"curated","license":"MIT"}
+{"id":"pi-n-035","label":"negative","text":"Who wrote the Harry Potter series?","source":"curated","license":"MIT"}
+{"id":"pi-n-036","label":"negative","text":"Describe how to bake a basic loaf of sourdough.","source":"curated","license":"MIT"}
+{"id":"pi-n-037","label":"negative","text":"What's the difference between HTTP and HTTPS?","source":"curated","license":"MIT"}
+{"id":"pi-n-038","label":"negative","text":"Summarize the latest research on electric vehicle batteries in a paragraph.","source":"curated","license":"MIT"}
+{"id":"pi-n-039","label":"negative","text":"Помоги составить список покупок на неделю для семьи из трёх человек.","source":"curated-ru","license":"MIT"}
+{"id":"pi-n-040","label":"negative","text":"How do I measure the performance of a machine learning model?","source":"curated","license":"MIT"}
+{"id":"pi-n-041","label":"negative","text":"Can you explain what event sourcing is in software architecture?","source":"curated","license":"MIT"}
+{"id":"pi-n-042","label":"negative","text":"What are some tips for improving writing skills?","source":"curated","license":"MIT"}
+{"id":"pi-n-043","label":"negative","text":"Write a SQL query to find the top 5 customers by total sales.","source":"curated","license":"MIT"}
+{"id":"pi-n-044","label":"negative","text":"Explain Kubernetes pods and deployments to someone new to the platform.","source":"curated","license":"MIT"}
+{"id":"pi-n-045","label":"negative","text":"Напиши краткое резюме для разработчика backend.","source":"curated-ru","license":"MIT"}
+{"id":"pi-n-046","label":"negative","text":"What are the health benefits of regular walking?","source":"curated","license":"MIT"}
+{"id":"pi-n-047","label":"negative","text":"Suggest a few good books about the history of science.","source":"curated","license":"MIT"}
+{"id":"pi-n-048","label":"negative","text":"How do I add an SSH key to GitHub?","source":"curated","license":"MIT"}
+{"id":"pi-n-049","label":"negative","text":"Give me a polite reply to an angry customer email.","source":"curated","license":"MIT"}
+{"id":"pi-n-050","label":"negative","text":"What is quantum entanglement in simple terms?","source":"curated","license":"MIT"}
