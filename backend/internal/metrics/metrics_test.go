@@ -31,6 +31,12 @@ func TestMetricsEndpoint(t *testing.T) {
 	RecordJudgeFallback("openai", "content_moderation")
 	ObserveJudgeLatency("openai", "prompt_injection", 0.5)
 
+	// PR-6: embedding метрики.
+	RecordEmbeddingRequest("ollama", "nomic-embed-text")
+	RecordEmbeddingFail("ollama", "nomic-embed-text")
+	RecordEmbeddingTimeout("openai", "text-embedding-3-small")
+	ObserveEmbeddingLatency("ollama", "nomic-embed-text", 0.1)
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	promhttp.Handler().ServeHTTP(rec, req)
@@ -57,6 +63,11 @@ func TestMetricsEndpoint(t *testing.T) {
 		"shadowai_judge_malformed_total",
 		"shadowai_judge_fallback_total",
 		"shadowai_judge_latency_seconds",
+		// PR-6: embedding observability
+		"shadowai_embedding_requests_total",
+		"shadowai_embedding_fail_total",
+		"shadowai_embedding_timeout_total",
+		"shadowai_embedding_latency_seconds",
 	}
 	for _, name := range expected {
 		if !strings.Contains(body, name) {

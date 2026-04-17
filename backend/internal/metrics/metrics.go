@@ -129,6 +129,49 @@ var (
 		Help:    "LLM-as-Judge call latency in seconds (from request start to response parsed).",
 		Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0},
 	}, []string{"provider", "threat_type"})
+
+	// --- Embedding observability (PR-6) ---
+	//
+	// Semantic V2 inspector делает HTTP-call к embedding provider
+	// (Ollama/OpenAI) на каждый inspect. Деградация embedding layer
+	// превращает inspector в soft-allow (fail-open), поэтому нужны
+	// отдельные counters для различения "провайдер здоров" vs
+	// "инспектор молча пропускает всё из-за timeout'ов". Если
+	// обобщать в firewall_decisions_total, эта деградация скроется.
+	//
+	// Cardinality constraint: provider × model. Для MVP = 2 × ≤3 = 6.
+	// НЕ добавлять user/tenant/text-hash — cardinality взорвётся.
+
+	// EmbeddingRequestsTotal — все вызовы client.Embed.
+	// Знаменатель для fail-rate: rate(fail+timeout) / rate(requests).
+	EmbeddingRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_embedding_requests_total",
+		Help: "Total embedding calls to external embedding provider.",
+	}, []string{"provider", "model"})
+
+	// EmbeddingFailTotal — transport/HTTP/JSON/shape ошибки.
+	// НЕ перекрывается с timeout — timeout идёт в отдельный counter.
+	EmbeddingFailTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_embedding_fail_total",
+		Help: "Embedding transport/HTTP/parse errors (non-overlapping with timeout).",
+	}, []string{"provider", "model"})
+
+	// EmbeddingTimeoutTotal — client.Timeout exceeded.
+	// Отдельный counter для alerting (обычно другой response runbook).
+	EmbeddingTimeoutTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_embedding_timeout_total",
+		Help: "Embedding request timeouts (context or client deadline exceeded).",
+	}, []string{"provider", "model"})
+
+	// EmbeddingLatencySeconds — latency distribution для success'ных
+	// вызовов. Timeout'ы и transport-errors в эту гистограмму НЕ
+	// попадают (у них нет смысловой latency). Buckets для embedding
+	// API: 50ms .. 10s (embedding обычно быстрее чем LLM completion).
+	EmbeddingLatencySeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "shadowai_embedding_latency_seconds",
+		Help:    "Embedding API call latency (success only).",
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0},
+	}, []string{"provider", "model"})
 )
 
 // RecordAuditQueue обновляет gauge очереди. Вызывать из периодического
@@ -185,4 +228,24 @@ func RecordJudgeFallback(provider, threatType string) {
 // ObserveJudgeLatency записывает latency в histogram.
 func ObserveJudgeLatency(provider, threatType string, seconds float64) {
 	JudgeLatencySeconds.WithLabelValues(provider, threatType).Observe(seconds)
+}
+
+// RecordEmbeddingRequest — каждый embed-call (до resolution статуса).
+func RecordEmbeddingRequest(provider, model string) {
+	EmbeddingRequestsTotal.WithLabelValues(provider, model).Inc()
+}
+
+// RecordEmbeddingFail — transport/HTTP/parse ошибка (не timeout).
+func RecordEmbeddingFail(provider, model string) {
+	EmbeddingFailTotal.WithLabelValues(provider, model).Inc()
+}
+
+// RecordEmbeddingTimeout — client.Timeout / context.DeadlineExceeded.
+func RecordEmbeddingTimeout(provider, model string) {
+	EmbeddingTimeoutTotal.WithLabelValues(provider, model).Inc()
+}
+
+// ObserveEmbeddingLatency — только для успешных вызовов.
+func ObserveEmbeddingLatency(provider, model string, seconds float64) {
+	EmbeddingLatencySeconds.WithLabelValues(provider, model).Observe(seconds)
 }

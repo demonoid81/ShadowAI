@@ -18,6 +18,7 @@ import (
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/dashboard"
 	"github.com/shadowai/backend/internal/dlp"
+	"github.com/shadowai/backend/internal/embedding"
 	"github.com/shadowai/backend/internal/firewall"
 	"github.com/shadowai/backend/internal/internaldb"
 	"github.com/shadowai/backend/internal/metrics"
@@ -149,8 +150,45 @@ func main() {
 			BlockThreshold: cfg.FirewallSABlockThreshold,
 		}))
 
-		log.Printf("firewall pipeline: enabled with 10 inspectors (judge=%v, mode_default=%s, mode_overrides=%d)",
-			cfg.FirewallJudgeEnabled, inspectorModes.Default, len(inspectorModes.Overrides))
+		// PR-6: Semantic V2 (embedding-based). Регистрируется только если
+		// ENABLED и все три компонента валидны: client, corpus, matching
+		// provider/model/dim. Любая init-ошибка логируется, но не останавливает
+		// сервер — V2 inspector просто не регистрируется, pipeline работает
+		// без него.
+		if cfg.FirewallSAV2Enabled {
+			embClient, err := embedding.NewClient(embedding.Config{
+				Provider:  cfg.FirewallEmbeddingProvider,
+				Endpoint:  cfg.FirewallEmbeddingEndpoint,
+				Model:     cfg.FirewallEmbeddingModel,
+				APIKey:    cfg.FirewallEmbeddingAPIKey,
+				Dimension: cfg.FirewallEmbeddingDimension,
+				Timeout:   cfg.FirewallEmbeddingTimeout,
+			})
+			if err != nil {
+				log.Printf("semantic_v2: embedding client init failed (skipping inspector): %v", err)
+			} else {
+				corpus, err := embedding.LoadCorpus(cfg.FirewallSAV2CorpusPath)
+				if err != nil {
+					log.Printf("semantic_v2: corpus load failed (skipping inspector): %v", err)
+				} else {
+					sv2, err := firewall.NewSemanticV2Inspector(firewall.SemanticV2Config{
+						Enabled:        true,
+						Threshold:      cfg.FirewallSAV2Threshold,
+						BlockThreshold: cfg.FirewallSAV2BlockThreshold,
+					}, embClient, corpus)
+					if err != nil {
+						log.Printf("semantic_v2: init failed (skipping inspector): %v", err)
+					} else {
+						firewallPipeline.Register(sv2)
+						log.Printf("semantic_v2: registered (provider=%s model=%s dim=%d corpus_items=%d)",
+							embClient.Provider(), embClient.Model(), embClient.Dimension(), len(corpus.Items))
+					}
+				}
+			}
+		}
+
+		log.Printf("firewall pipeline: enabled (judge=%v, mode_default=%s, mode_overrides=%d, semantic_v2=%v)",
+			cfg.FirewallJudgeEnabled, inspectorModes.Default, len(inspectorModes.Overrides), cfg.FirewallSAV2Enabled)
 	}
 
 	// Provider Registry — skip providers without API keys

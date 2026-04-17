@@ -65,6 +65,17 @@ type Config struct {
 	FirewallSAEnabled            bool
 	FirewallSAThreshold          float64
 	FirewallSABlockThreshold     float64
+	// Semantic V2 (embedding-based) — PR-6.
+	FirewallSAV2Enabled          bool
+	FirewallSAV2Threshold        float64
+	FirewallSAV2BlockThreshold   float64
+	FirewallSAV2CorpusPath       string
+	FirewallEmbeddingProvider    string
+	FirewallEmbeddingEndpoint    string
+	FirewallEmbeddingModel       string
+	FirewallEmbeddingAPIKey      string
+	FirewallEmbeddingDimension   int
+	FirewallEmbeddingTimeout     time.Duration
 }
 
 func Load() *Config {
@@ -136,6 +147,19 @@ func Load() *Config {
 		FirewallSAEnabled:            getEnv("FIREWALL_SA_ENABLED", "true") == "true",
 		FirewallSAThreshold:          getEnvFloat("FIREWALL_SA_THRESHOLD", 0.5),
 		FirewallSABlockThreshold:     getEnvFloat("FIREWALL_SA_BLOCK_THRESHOLD", 0.75),
+		// PR-6: Semantic V2 (embedding-based). По-умолчанию отключен,
+		// потому что требует: (1) external embedding provider; (2) corpus
+		// manifest; (3) provider/model/dimension match с corpus.
+		FirewallSAV2Enabled:          getEnv("FIREWALL_SA_V2_ENABLED", "false") == "true",
+		FirewallSAV2Threshold:        getEnvFloat("FIREWALL_SA_V2_THRESHOLD", 0.75),
+		FirewallSAV2BlockThreshold:   getEnvFloat("FIREWALL_SA_V2_BLOCK_THRESHOLD", 0.88),
+		FirewallSAV2CorpusPath:       getEnv("FIREWALL_SA_V2_CORPUS_PATH", "firewall_corpus/semantic_v2.json"),
+		FirewallEmbeddingProvider:    getEnv("FIREWALL_EMBEDDING_PROVIDER", "ollama"),
+		FirewallEmbeddingEndpoint:    getEnv("FIREWALL_EMBEDDING_ENDPOINT", "http://localhost:11434"),
+		FirewallEmbeddingModel:       getEnv("FIREWALL_EMBEDDING_MODEL", "nomic-embed-text"),
+		FirewallEmbeddingAPIKey:      getEnv("FIREWALL_EMBEDDING_API_KEY", ""),
+		FirewallEmbeddingDimension:   getEnvInt("FIREWALL_EMBEDDING_DIMENSION", 768),
+		FirewallEmbeddingTimeout:     getDuration("FIREWALL_EMBEDDING_TIMEOUT", 10*time.Second),
 	}
 }
 
