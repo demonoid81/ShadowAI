@@ -297,7 +297,9 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusNotFound
 	}
 	writeJSON(w, status, result)
-	h.recordErase(r, claims.UserID, targetID, status, result.Status == ErasureCompleted, map[string]any{
+	// success = HTTP 2xx. Идемпотентный повтор already_erased — штатная
+	// 200-операция, не failed erase.
+	h.recordErase(r, claims.UserID, targetID, status, status < 400, map[string]any{
 		"status":              string(result.Status),
 		"audit_rows_scrubbed": result.AuditRowsScrubbed,
 		"budgets_deleted":     result.BudgetsDeleted,

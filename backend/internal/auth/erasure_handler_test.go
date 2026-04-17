@@ -9,7 +9,18 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+
+	"github.com/shadowai/backend/internal/adminaudit"
 )
+
+// captureRecorder — stub adminaudit.Recorder для verification.
+type captureRecorder struct {
+	events []adminaudit.Event
+}
+
+func (c *captureRecorder) Record(_ context.Context, ev adminaudit.Event) {
+	c.events = append(c.events, ev)
+}
 
 // stubEraser — фейковая реализация Eraser-интерфейса.
 // Принимает заданный результат/ошибку и запоминает полученные args.
@@ -86,6 +97,73 @@ func TestEraseUser_AlreadyErased(t *testing.T) {
 	}
 	if !contains(rec.Body.String(), `"status":"already_erased"`) {
 		t.Errorf("body doesn't contain already_erased: %s", rec.Body.String())
+	}
+}
+
+// TestEraseUser_AlreadyErased_RecordsSuccessTrue — regression-guard:
+// идемпотентный повтор — это штатная 200-операция, admin event должен
+// иметь success=true. До fix'а SIEM видел бы success=false для каждого
+// второго DSAR-call, что размывало бы alerting.
+func TestEraseUser_AlreadyErased_RecordsSuccessTrue(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{
+		UserID: "u-target", Status: ErasureAlreadyErased,
+	}}
+	rec := &captureRecorder{}
+	h := NewHandler(nil, eraser, rec)
+
+	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
+	w := httptest.NewRecorder()
+	h.EraseUser(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", w.Code)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(rec.events))
+	}
+	ev := rec.events[0]
+	if !ev.Success {
+		t.Error("already_erased должен быть success=true (штатная идемпотентная 200)")
+	}
+	if ev.StatusCode != http.StatusOK {
+		t.Errorf("status_code=%d, want 200", ev.StatusCode)
+	}
+}
+
+// TestEraseUser_Completed_RecordsSuccessTrue — для полноты: успешный
+// first-time erase тоже success=true.
+func TestEraseUser_Completed_RecordsSuccessTrue(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{
+		UserID: "u-target", Status: ErasureCompleted,
+		AuditRowsScrubbed: 5, BudgetsDeleted: 1,
+	}}
+	rec := &captureRecorder{}
+	h := NewHandler(nil, eraser, rec)
+
+	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
+	w := httptest.NewRecorder()
+	h.EraseUser(w, req)
+
+	if len(rec.events) != 1 || !rec.events[0].Success {
+		t.Errorf("completed должен быть success=true, events=%+v", rec.events)
+	}
+}
+
+// TestEraseUser_NotFound_RecordsSuccessFalse — 404 — это НЕ успешный
+// исход (target не найден). Должен писаться success=false.
+func TestEraseUser_NotFound_RecordsSuccessFalse(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{
+		UserID: "u-unknown", Status: ErasureNotFound,
+	}}
+	rec := &captureRecorder{}
+	h := NewHandler(nil, eraser, rec)
+
+	req := requestWithClaims("u-unknown", &Claims{UserID: "u-admin", Role: RoleAdmin})
+	w := httptest.NewRecorder()
+	h.EraseUser(w, req)
+
+	if len(rec.events) != 1 || rec.events[0].Success {
+		t.Errorf("not_found (404) должен быть success=false, events=%+v", rec.events)
 	}
 }
 
