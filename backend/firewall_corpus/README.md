@@ -118,6 +118,20 @@ dot-product, который равен cosine только для unit-length в
 Пустые строки игнорируются. `id` генерируется автоматически как
 `<category>-<3-значный-индекс>`.
 
+Текущий committed corpus patterns (expanded для pre-real-run baseline):
+- `prompt_injection.txt` — ~60 паттернов: классика
+  (`ignore previous instructions`), token-smuggling (`<|im_start|>`,
+  `</system>`), base64-encoded payloads, context poisoning, prompt
+  leaking, admin-claim injection, RU-варианты.
+- `jailbreak.txt` — ~60 паттернов: DAN variants (6.0/11/13.5),
+  dual-response format, fictional/hypothetical framing, persona
+  exploits (grandma/abusive-parent), developer/beta claims,
+  RogueAI/BadGPT-style, RU-варианты.
+
+Каждая новая строка в `.txt` = +1 embedding call при regenerate.
+60+60 = ~120 calls. Для Ollama (local) это секунды; для OpenAI —
+десятки центов (см. текущий rate для `text-embedding-3-small`).
+
 ## Observability
 
 - `shadowai_firewall_decisions_total{inspector="semantic_v2", ...}`
