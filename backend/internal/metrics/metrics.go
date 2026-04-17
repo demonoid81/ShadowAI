@@ -44,12 +44,17 @@ var (
 	})
 
 	// FirewallDecisionsTotal — распределение решений firewall по
-	// фазе (request/response), инспектору (pii, dlp, policy, jailbreak, ...)
-	// и action (allow/flag/sanitize/block).
+	// фазе (request/response), инспектору (pii, dlp, policy, jailbreak, ...),
+	// action (allow/flag/sanitize/block) и mode (enforce/shadow).
+	//
+	// PR-4: label `mode` добавлен, чтобы отделить shadow-наблюдения от
+	// enforce-действий в dashboards. disabled-инспекторы метрику не пишут.
+	// Cardinality: ≤ 2 phase × ≤ 10 inspector × 4 action × 2 mode = 160,
+	// что в пределах бюджета Prometheus.
 	FirewallDecisionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadowai_firewall_decisions_total",
-		Help: "Total firewall inspector decisions grouped by phase, inspector, action.",
-	}, []string{"phase", "inspector", "action"})
+		Help: "Total firewall inspector decisions grouped by phase, inspector, action, mode.",
+	}, []string{"phase", "inspector", "action", "mode"})
 
 	// ProxyBudgetBlocksTotal — счётчик 402 блокировок по бюджету.
 	// Label `streaming` = "true"/"false".
@@ -133,8 +138,9 @@ func RecordAuditQueue(depth int) {
 }
 
 // RecordFirewallDecision инкрементирует счётчик решений.
-func RecordFirewallDecision(phase, inspector, action string) {
-	FirewallDecisionsTotal.WithLabelValues(phase, inspector, action).Inc()
+// mode — "enforce" | "shadow" (disabled не пишет, не доходит сюда).
+func RecordFirewallDecision(phase, inspector, action, mode string) {
+	FirewallDecisionsTotal.WithLabelValues(phase, inspector, action, mode).Inc()
 }
 
 // RecordBudgetBlock инкрементирует budget-block счётчик.

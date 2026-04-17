@@ -6,6 +6,11 @@ type InspectorStatus struct {
 	Enabled   bool         `json:"enabled"`
 	Phase     string       `json:"phase"` // "request", "response", "both"
 	JudgeInfo *JudgeStatus `json:"judge,omitempty"`
+	// Mode — runtime-режим инспектора в pipeline (PR-4).
+	// "enforce" (по умолчанию), "shadow" или "disabled".
+	// Оператор видит его в /proxy/firewall/status и может сопоставить
+	// с ожидаемой конфигурацией FIREWALL_MODE_<NAME>.
+	Mode string `json:"mode"`
 }
 
 // JudgeStatus — read-only view конфигурации judge в рамках inspector'а.
@@ -25,13 +30,14 @@ func (p *Pipeline) Status() []InspectorStatus {
 		return nil
 	}
 	var statuses []InspectorStatus
-	for _, i := range p.inspectors {
+	for _, entry := range p.entries {
 		status := InspectorStatus{
-			Name:    i.Name(),
+			Name:    entry.inspector.Name(),
 			Enabled: true,
 			Phase:   "both",
+			Mode:    string(entry.mode),
 		}
-		switch v := i.(type) {
+		switch v := entry.inspector.(type) {
 		case *PromptInjectionInspector:
 			status.Enabled = v.config.Enabled
 			status.Phase = "request"

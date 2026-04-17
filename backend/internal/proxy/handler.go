@@ -146,6 +146,12 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PR-4: request-scoped накопитель shadow-решений. Заполняется после
+	// каждого firewall.Inspect* через appendShadowDecisions(r.Context(), ...)
+	// и автоматически сериализуется в audit_logs.shadow_decisions_json
+	// через h.auditLog(r.Context(), ...).
+	r = r.WithContext(withShadowSlot(r.Context()))
+
 	// 1. Resolve provider
 	vars := mux.Vars(r)
 	providerName := vars["provider"]
@@ -226,9 +232,10 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"firewall error"}`, http.StatusInternalServerError)
 			return
 		}
+		appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
 		if fwDecision.Action == firewall.ActionBlock {
 			if h.auditSvc != nil {
-				h.auditSvc.Log(&domain.AuditLog{
+				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  sanitizePayload(bodyBytes),
 					Model:        model, Provider: providerName,
@@ -278,7 +285,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	requestPIITypes := appendUniqueTypes(piiTypes, h.dlpTypes(requestDecision.Findings))
 
 	if requestDecision.Action == dlp.DLPActionBlock {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(bodyBytes, findings, requestDecision),
 			Model:       model, Provider: providerName,
@@ -314,7 +321,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 	policyAction := applyFlagCorrelation(h.mergePolicyAction(string(evalResult.Action), requestDecision.Action), firewallFlagged)
 	if evalResult.Action == policy.ActionBlocked {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(bodyBytes, findings, requestDecision),
 			Model:       model, Provider: providerName,
@@ -331,7 +338,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	// 6. Budget Check
 	allowed, err := h.budgetSvc.CheckBudget(r.Context(), claims.UserID, estimatedTotalTokens)
 	if err == nil && !allowed {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(bodyBytes, findings, requestDecision),
 			Model:       model, Provider: providerName,
@@ -400,9 +407,12 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				UserID: claims.UserID, Phase: firewall.PhaseResponse,
 			}
 			fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+			if fwErr == nil {
+				appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
+			}
 			if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
 				if h.auditSvc != nil {
-					h.auditSvc.Log(&domain.AuditLog{
+					h.auditLog(r.Context(), &domain.AuditLog{
 						ID: uuid.New().String(), UserID: claims.UserID,
 						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
 						Model: model, Provider: providerName, Endpoint: endpoint,
@@ -439,7 +449,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
 
 		if responseDecision.Action == dlp.DLPActionBlock {
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 				ResponseBody: h.auditPayload(respBytes, responseFindings, responseDecision),
@@ -486,7 +496,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		if err == nil && !allowedAfter {
 			recordUsage()
 			metrics.RecordBudgetBlock(true)
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 				ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -506,7 +516,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 			ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -535,9 +545,12 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			UserID: claims.UserID, Phase: firewall.PhaseResponse,
 		}
 		fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+		if fwErr == nil {
+			appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
+		}
 		if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
 			if h.auditSvc != nil {
-				h.auditSvc.Log(&domain.AuditLog{
+				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
 					Model: model, Provider: providerName, Endpoint: endpoint,
@@ -573,7 +586,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	if err == nil && !allowedAfter {
 		recordUsage()
 		metrics.RecordBudgetBlock(false)
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 			ResponseBody: h.auditPayload(respBody, nil, dlp.Decision{}),
@@ -604,7 +617,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 	if responseDecision.Action == dlp.DLPActionBlock {
 		recordUsage()
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 			ResponseBody: h.auditPayload(respBody, responseFindings, responseDecision),
@@ -629,7 +642,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	recordUsage()
 
 	// 11. Audit log
-	h.auditSvc.Log(&domain.AuditLog{
+	h.auditLog(r.Context(), &domain.AuditLog{
 		ID: uuid.New().String(), UserID: claims.UserID,
 		RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 		ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -718,7 +731,7 @@ func (h *Handler) TestAllProviders(w http.ResponseWriter, r *http.Request) {
 				responseStatus = http.StatusOK
 				policyAction = "allowed"
 			}
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID:           uuid.New().String(),
 				UserID:       claims.UserID,
 				RequestBody:  `{"provider":"` + provider.Name() + `"}`,
@@ -900,7 +913,7 @@ func (h *Handler) TestProvider(w http.ResponseWriter, r *http.Request) {
 	h.saveConnectivitySnapshot(r.Context(), response)
 	if response.EgressBlocked {
 		if h.auditSvc != nil {
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID:           uuid.New().String(),
 				UserID:       claims.UserID,
 				RequestBody:  `{"provider":"` + providerName + `"}`,
@@ -920,7 +933,7 @@ func (h *Handler) TestProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if response.Reachable {
 		if h.auditSvc != nil {
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID:           uuid.New().String(),
 				UserID:       claims.UserID,
 				RequestBody:  `{"provider":"` + providerName + `"}`,
@@ -938,7 +951,7 @@ func (h *Handler) TestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.auditSvc != nil {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID:           uuid.New().String(),
 			UserID:       claims.UserID,
 			RequestBody:  `{"provider":"` + providerName + `"}`,
@@ -1120,6 +1133,9 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PR-4: request-scoped shadow-accumulator. См. ProxyChat для деталей.
+	r = r.WithContext(withShadowSlot(r.Context()))
+
 	// 1. Buffer body
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, int64(maxBodySize)+1))
 	if err != nil {
@@ -1175,9 +1191,10 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"firewall error"}`, http.StatusInternalServerError)
 			return
 		}
+		appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
 		if fwDecision.Action == firewall.ActionBlock {
 			if h.auditSvc != nil {
-				h.auditSvc.Log(&domain.AuditLog{
+				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  sanitizePayload(bodyBytes),
 					Model:        model, Provider: "unified",
@@ -1235,7 +1252,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 	requestPIITypes := appendUniqueTypes(piiTypes, h.dlpTypes(requestDecision.Findings))
 
 	if requestDecision.Action == dlp.DLPActionBlock {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(bodyBytes, findings, requestDecision),
 			Model:       model, Provider: "unified", Endpoint: "/proxy/chat",
@@ -1257,7 +1274,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 
 	policyAction := applyFlagCorrelation(h.mergePolicyAction(string(evalResult.Action), requestDecision.Action), firewallFlagged)
 	if evalResult.Action == policy.ActionBlocked {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(bodyBytes, findings, requestDecision),
 			Model:       model, Provider: "unified", Endpoint: "/proxy/chat",
@@ -1273,7 +1290,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 	// 6. Budget Check (estimated: prompt + planned completion)
 	allowed, err := h.budgetSvc.CheckBudget(r.Context(), claims.UserID, estimatedTotalTokens)
 	if err == nil && !allowed {
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(bodyBytes, findings, requestDecision),
 			Model:       model, Provider: "unified", Endpoint: "/proxy/chat",
@@ -1376,9 +1393,12 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					UserID: claims.UserID, Phase: firewall.PhaseResponse,
 				}
 				fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+				if fwErr == nil {
+					appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
+				}
 				if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
 					if h.auditSvc != nil {
-						h.auditSvc.Log(&domain.AuditLog{
+						h.auditLog(r.Context(), &domain.AuditLog{
 							ID: uuid.New().String(), UserID: claims.UserID,
 							RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
 							Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
@@ -1414,7 +1434,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
 
 			if responseDecision.Action == dlp.DLPActionBlock {
-				h.auditSvc.Log(&domain.AuditLog{
+				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(respBytes, responseFindings, responseDecision),
 					Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
@@ -1455,7 +1475,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			if err == nil && !allowedAfter {
 				recordStreamUsage()
 				metrics.RecordBudgetBlock(true)
-				h.auditSvc.Log(&domain.AuditLog{
+				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
 					ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -1473,7 +1493,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 			recordStreamUsage()
 
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
 				Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
@@ -1510,7 +1530,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		if err == nil && !allowedAfter {
 			recordUsage()
 			metrics.RecordBudgetBlock(false)
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
 				ResponseBody: h.auditPayload(respBody, nil, dlp.Decision{}),
@@ -1534,9 +1554,12 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				UserID: claims.UserID, Phase: firewall.PhaseResponse,
 			}
 			fwDecision, fwErr := h.firewallPipeline.InspectResponse(r.Context(), fwPayload)
+			if fwErr == nil {
+				appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
+			}
 			if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
 				if h.auditSvc != nil {
-					h.auditSvc.Log(&domain.AuditLog{
+					h.auditLog(r.Context(), &domain.AuditLog{
 						ID: uuid.New().String(), UserID: claims.UserID,
 						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBody),
 						Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
@@ -1572,7 +1595,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 
 		if responseDecision.Action == dlp.DLPActionBlock {
 			recordUsage()
-			h.auditSvc.Log(&domain.AuditLog{
+			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(respBody, responseFindings, responseDecision),
 				Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
@@ -1595,7 +1618,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		policyAction = responsePolicyAction
 		recordUsage()
 
-		h.auditSvc.Log(&domain.AuditLog{
+		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
 			Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",

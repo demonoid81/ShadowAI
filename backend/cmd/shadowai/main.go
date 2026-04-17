@@ -93,7 +93,11 @@ func main() {
 	// Firewall Pipeline
 	var firewallPipeline *firewall.Pipeline
 	if cfg.FirewallEnabled {
-		firewallPipeline = firewall.NewPipeline()
+		// PR-4: inspector modes. Читаем FIREWALL_MODE_DEFAULT и
+		// FIREWALL_MODE_<NAME> из env; каждый Register ниже резолвит
+		// свой mode по Inspector.Name().
+		inspectorModes := firewall.LoadInspectorModesFromEnv()
+		firewallPipeline = firewall.NewPipelineWithModes(inspectorModes)
 		firewallPipeline.Register(firewall.NewPIIInspector())
 		firewallPipeline.Register(firewall.NewDLPInspector(dlpSvc))
 		firewallPipeline.Register(firewall.NewPolicyInspector(policySvc.Engine))
@@ -145,7 +149,8 @@ func main() {
 			BlockThreshold: cfg.FirewallSABlockThreshold,
 		}))
 
-		log.Printf("firewall pipeline: enabled with 10 inspectors (judge=%v)", cfg.FirewallJudgeEnabled)
+		log.Printf("firewall pipeline: enabled with 10 inspectors (judge=%v, mode_default=%s, mode_overrides=%d)",
+			cfg.FirewallJudgeEnabled, inspectorModes.Default, len(inspectorModes.Overrides))
 	}
 
 	// Provider Registry — skip providers without API keys

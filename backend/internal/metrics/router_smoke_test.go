@@ -19,7 +19,7 @@ import (
 //   - изменении accepted methods или Content-Type handler'а
 func TestMetricsRouterSmoke(t *testing.T) {
 	// Инициализируем хоть одну метрику, чтобы выдача была ненулевой.
-	metrics.RecordFirewallDecision("request", "smoke_test", "allow")
+	metrics.RecordFirewallDecision("request", "smoke_test", "allow", "enforce")
 
 	// Используем production-функцию регистрации маршрута.
 	r := mux.NewRouter()

@@ -17,7 +17,8 @@ func TestMetricsEndpoint(t *testing.T) {
 	AuditDroppedTotal.Inc()
 	AuditInsertedTotal.Add(3)
 	AuditFailedTotal.Inc()
-	RecordFirewallDecision("request", "test_inspector", "flag")
+	RecordFirewallDecision("request", "test_inspector", "flag", "enforce")
+	RecordFirewallDecision("request", "shadow_inspector", "block", "shadow")
 	RecordBudgetBlock(true)
 	RecordBudgetBlock(false)
 	RecordStreamUsageParseFail("openai")
@@ -75,6 +76,9 @@ func TestMetricsEndpoint(t *testing.T) {
 		`threat_type="prompt_injection"`,
 		`threat_type="jailbreak"`,
 		`threat_type="content_moderation"`,
+		// PR-4: mode label
+		`mode="enforce"`,
+		`mode="shadow"`,
 	}
 	for _, label := range expectedLabels {
 		if !strings.Contains(body, label) {

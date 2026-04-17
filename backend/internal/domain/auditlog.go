@@ -18,6 +18,11 @@ type AuditLog struct {
 	PIIDetected      bool      `json:"pii_detected"`
 	PIITypes         []string  `json:"pii_types"`
 	PolicyAction     string    `json:"policy_action"`
-	DurationMs       int       `json:"duration_ms"`
-	CreatedAt        time.Time `json:"created_at"`
+	// ShadowDecisionsJSON — сериализованный JSONB массив решений shadow-
+	// инспекторов (PR-4). policy_action НЕ перегружается shadow-смыслом:
+	// shadow-наблюдения живут в отдельном поле, чтобы не терять фактический
+	// enforce-итог запроса. Пустая строка означает "не было shadow-решений".
+	ShadowDecisionsJSON string    `json:"shadow_decisions_json,omitempty"`
+	DurationMs          int       `json:"duration_ms"`
+	CreatedAt           time.Time `json:"created_at"`
 }

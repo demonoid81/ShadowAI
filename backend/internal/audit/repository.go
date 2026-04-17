@@ -19,12 +19,19 @@ func NewRepository(db *sql.DB) *Repository {
 }
 
 func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
+	// shadow_decisions_json — JSONB NULL: пустую строку передаём как NULL,
+	// иначе Postgres отбросит INSERT c error "invalid input syntax for type json".
+	var shadowJSON any
+	if log.ShadowDecisionsJSON != "" {
+		shadowJSON = log.ShadowDecisionsJSON
+	}
+
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, duration_ms)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
-		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, log.DurationMs)
+		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs)
 	return err
 }
 
@@ -56,7 +63,7 @@ func (r *Repository) List(ctx context.Context, limit, offset int, userID, model,
 	r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
 
 	query := fmt.Sprintf(`SELECT id, user_id, request_body, response_body, model, provider, endpoint, status_code,
-		prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, duration_ms, created_at
+		prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, created_at
 		FROM audit_logs WHERE %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, whereClause, argIdx, argIdx+1)
 	args = append(args, limit, offset)
 
@@ -69,10 +76,14 @@ func (r *Repository) List(ctx context.Context, limit, offset int, userID, model,
 	var logs []domain.AuditLog
 	for rows.Next() {
 		var l domain.AuditLog
+		var shadowJSON sql.NullString
 		if err := rows.Scan(&l.ID, &l.UserID, &l.RequestBody, &l.ResponseBody, &l.Model, &l.Provider, &l.Endpoint,
 			&l.StatusCode, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.CostUSD,
-			&l.PIIDetected, pq.Array(&l.PIITypes), &l.PolicyAction, &l.DurationMs, &l.CreatedAt); err != nil {
+			&l.PIIDetected, pq.Array(&l.PIITypes), &l.PolicyAction, &shadowJSON, &l.DurationMs, &l.CreatedAt); err != nil {
 			return nil, 0, err
+		}
+		if shadowJSON.Valid {
+			l.ShadowDecisionsJSON = shadowJSON.String
 		}
 		logs = append(logs, l)
 	}
