@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -8,12 +9,22 @@ import (
 	"github.com/shadowai/backend/internal/domain"
 )
 
-type Handler struct {
-	service *Service
+// Eraser — подмножество ErasureService, нужное для handler'а.
+// Интерфейс для mock'ов в тестах.
+type Eraser interface {
+	EraseUser(ctx context.Context, actorUserID, targetUserID string) (*ErasureResult, error)
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+type Handler struct {
+	service *Service
+	eraser  Eraser
+}
+
+// NewHandler. Если eraser=nil, endpoint /users/{id}/erase вернёт
+// 503 (feature не сконфигурирована). Это не breaking: тестовые
+// инстансы без erasure по-прежнему работают.
+func NewHandler(service *Service, eraser Eraser) *Handler {
+	return &Handler{service: service, eraser: eraser}
 }
 
 type loginRequest struct {
@@ -235,6 +246,52 @@ func (h *Handler) RotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, apiKeyResponse{APIKey: newKey})
+}
+
+// EraseUser — admin-only DSAR/erasure endpoint (PR-B).
+// POST /api/users/{id}/erase.
+//
+// Contract:
+//   - 200 { user_id, status: "completed", audit_rows_scrubbed, budgets_deleted }
+//   - 200 { user_id, status: "already_erased" } (идемпотентно)
+//   - 404 { user_id, status: "not_found" }
+//   - 403 (non-admin)
+//   - 503 если ErasureService не сконфигурирован (feature off)
+//   - 500 runtime
+func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
+	claims := GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	if h.eraser == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "erasure not configured"})
+		return
+	}
+
+	targetID := mux.Vars(r)["id"]
+	if targetID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing user id"})
+		return
+	}
+
+	result, err := h.eraser.EraseUser(r.Context(), claims.UserID, targetID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "erasure failed"})
+		return
+	}
+
+	// not_found → 404 (нет user и нет прошлого run'а). Остальные —
+	// 200 с status в body (admin UI читает body).
+	status := http.StatusOK
+	if result.Status == ErasureNotFound {
+		status = http.StatusNotFound
+	}
+	writeJSON(w, status, result)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

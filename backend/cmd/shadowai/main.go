@@ -260,7 +260,10 @@ func main() {
 	}
 
 	// Handlers
-	authHandler := auth.NewHandler(authSvc)
+	// PR-B: DSAR/erasure wiring. auditRepo + budgetRepo используются
+	// как AuditScrubber + BudgetDeleter через interface intersection.
+	erasureSvc := auth.NewErasureService(db, auditRepo, budgetRepo)
+	authHandler := auth.NewHandler(authSvc, erasureSvc)
 	// schedulerEnabled ровно повторяет условие запуска goroutine ниже
 	// (cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0). Без
 	// этой согласованности /audit/status врал бы оператору.
@@ -366,6 +369,9 @@ func main() {
 	admin.HandleFunc("/users", authHandler.ListUsers).Methods("GET")
 	admin.HandleFunc("/users/{id}", authHandler.GetUser).Methods("GET")
 	admin.HandleFunc("/users/{id}", authHandler.UpdateUser).Methods("PUT")
+	// PR-B: DSAR erasure. Admin-only, идемпотентный (повторный вызов
+	// возвращает status=already_erased).
+	admin.HandleFunc("/users/{id}/erase", authHandler.EraseUser).Methods("POST")
 
 	// Audit logs
 	admin.HandleFunc("/audit/logs", auditHandler.List).Methods("GET")

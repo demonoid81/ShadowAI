@@ -10,6 +10,35 @@ import (
 	"github.com/shadowai/backend/internal/domain"
 )
 
+// ScrubUserDataTx обезличивает audit-строки конкретного user'а
+// (PR-B): user_id → NULL, request/response bodies → NULL,
+// shadow_decisions_json → NULL, pii_types → NULL.
+//
+// Остальные колонки (status_code, tokens, cost, policy_action,
+// created_at) сохраняются: это агрегируемая операционная аналитика
+// без привязки к человеку.
+//
+// Принимает *sql.Tx — чтобы scrub + DELETE user были в одной
+// транзакции (atomicity для erasure-workflow).
+func (r *Repository) ScrubUserDataTx(ctx context.Context, tx *sql.Tx, userID string) (int, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE audit_logs
+		 SET user_id = NULL,
+		     request_body = NULL,
+		     response_body = NULL,
+		     shadow_decisions_json = NULL,
+		     pii_types = NULL
+		 WHERE user_id = $1`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("scrub user data: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("scrub user data RowsAffected: %w", err)
+	}
+	return int(n), nil
+}
+
 type Repository struct {
 	db *sql.DB
 }
