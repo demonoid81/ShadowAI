@@ -39,7 +39,7 @@ func (c *captureAuditRepo) Insert(_ context.Context, entry *domain.AuditLog) err
 	return nil
 }
 
-func (c *captureAuditRepo) List(_ context.Context, _, _ int, _, _, _ string) ([]domain.AuditLog, int, error) {
+func (c *captureAuditRepo) List(_ context.Context, _, _ int, _, _, _, _ string) ([]domain.AuditLog, int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]domain.AuditLog, len(c.entries))

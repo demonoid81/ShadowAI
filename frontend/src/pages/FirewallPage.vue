@@ -14,8 +14,12 @@
             <span class="w-6 h-6 rounded-full bg-primary-600/30 text-primary-400 flex items-center justify-center text-xs font-bold">{{ i + 1 }}</span>
             <span class="font-medium">{{ inspectorLabel(inspector.name) }}</span>
           </div>
-          <div class="flex items-center gap-4 text-sm">
+          <div class="flex items-center gap-3 text-sm">
             <span class="text-gray-500">{{ $t('firewall.' + inspector.phase) }}</span>
+            <span class="px-2 py-0.5 rounded text-xs font-mono" :class="modeClass(inspector.mode)"
+              :title="$t('firewall.mode')">
+              {{ modeLabel(inspector.mode) }}
+            </span>
             <span class="px-2 py-0.5 rounded text-xs"
               :class="inspector.enabled ? 'bg-green-900/40 text-green-400' : 'bg-dark-700 text-gray-500'">
               {{ inspector.enabled ? $t('firewall.enabled') : $t('firewall.disabled') }}
@@ -66,6 +70,10 @@ interface InspectorInfo {
   name: string
   enabled: boolean
   phase: string
+  // PR-4: runtime-режим инспектора. backend возвращает `mode` в
+  // /proxy/firewall/status (см. backend/internal/firewall/status.go).
+  // Отсутствует только у старых бэкендов → fallback на "enforce" в modeLabel.
+  mode?: string
 }
 
 const nameToLabelKey: Record<string, string> = {
@@ -84,6 +92,35 @@ const nameToLabelKey: Record<string, string> = {
 function inspectorLabel(name: string): string {
   const key = nameToLabelKey[name]
   return key ? t(key) : name
+}
+
+// modeClass — цветовая схема для mode badge.
+// enforce — нейтрально серый (стандартный режим, не должен визуально шуметь).
+// shadow — жёлтый (сигнал: инспектор наблюдает, но не блокирует).
+// disabled — тёмно-серый с приглушённым текстом (отключён оператором).
+// fallback — нейтральный серый для неизвестных значений с бэкенда.
+function modeClass(mode: string | undefined): string {
+  switch (mode) {
+    case 'shadow':
+      return 'bg-yellow-900/40 text-yellow-400'
+    case 'disabled':
+      return 'bg-dark-700 text-gray-500'
+    case 'enforce':
+    default:
+      return 'bg-dark-700 text-gray-300'
+  }
+}
+
+function modeLabel(mode: string | undefined): string {
+  switch (mode) {
+    case 'shadow':
+      return t('firewall.modeShadow')
+    case 'disabled':
+      return t('firewall.modeDisabled')
+    case 'enforce':
+    default:
+      return t('firewall.modeEnforce')
+  }
 }
 
 const loading = ref(true)

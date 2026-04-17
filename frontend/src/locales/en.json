@@ -66,7 +66,15 @@
     "tokens": "Tokens",
     "pii": "PII",
     "action": "Action",
-    "status": "Status"
+    "status": "Status",
+    "shadow": "Shadow",
+    "shadowAny": "Any shadow",
+    "shadowYes": "With shadow",
+    "shadowNo": "No shadow",
+    "shadowCount": "shadow ({n})",
+    "shadowInvalid": "invalid shadow payload",
+    "shadowModalTitle": "Shadow decisions",
+    "shadowModalEmpty": "No shadow decisions"
   },
   "policies": {
     "title": "Policies",
@@ -160,7 +168,11 @@
     "notEnabled": "Firewall is not enabled",
     "endpoint": "Endpoint",
     "provider": "Provider",
-    "statusCode": "Status"
+    "statusCode": "Status",
+    "mode": "Mode",
+    "modeEnforce": "enforce",
+    "modeShadow": "shadow",
+    "modeDisabled": "disabled"
   },
   "internalDb": {
     "title": "Internal Databases",
@@ -193,6 +205,7 @@
     "success": "Success",
     "confirm": "Confirm",
     "close": "Close",
-    "language": "Language"
+    "language": "Language",
+    "details": "Details"
   }
 }

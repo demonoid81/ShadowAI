@@ -66,7 +66,15 @@
     "tokens": "Токены",
     "pii": "PII",
     "action": "Действие",
-    "status": "Статус"
+    "status": "Статус",
+    "shadow": "Теневые",
+    "shadowAny": "Любые",
+    "shadowYes": "Только теневые",
+    "shadowNo": "Без теневых",
+    "shadowCount": "shadow ({n})",
+    "shadowInvalid": "некорректные shadow-данные",
+    "shadowModalTitle": "Теневые решения",
+    "shadowModalEmpty": "Теневых решений нет"
   },
   "policies": {
     "title": "Политики",
@@ -160,7 +168,11 @@
     "notEnabled": "Файрвол не включён",
     "endpoint": "Эндпоинт",
     "provider": "Провайдер",
-    "statusCode": "Статус"
+    "statusCode": "Статус",
+    "mode": "Режим",
+    "modeEnforce": "enforce",
+    "modeShadow": "shadow",
+    "modeDisabled": "disabled"
   },
   "internalDb": {
     "title": "Внутренние базы данных",
@@ -193,6 +205,7 @@
     "success": "Успешно",
     "confirm": "Подтвердить",
     "close": "Закрыть",
-    "language": "Язык"
+    "language": "Язык",
+    "details": "Подробнее"
   }
 }

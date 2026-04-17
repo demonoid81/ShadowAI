@@ -9,6 +9,11 @@
         <option value="warned">{{ $t('audit.warned') }}</option>
         <option value="sanitized">{{ $t('audit.sanitized') }}</option>
       </select>
+      <select v-model="filters.has_shadow" @change="load" class="px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-gray-100 text-sm">
+        <option value="">{{ $t('audit.shadowAny') }}</option>
+        <option value="yes">{{ $t('audit.shadowYes') }}</option>
+        <option value="no">{{ $t('audit.shadowNo') }}</option>
+      </select>
       <input v-model="filters.model" @input="load" :placeholder="t('audit.filterModel')" class="px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-gray-100 text-sm" />
     </div>
     <RequestTable :logs="store.logs" />
@@ -31,10 +36,18 @@ import RequestTable from '../components/RequestTable.vue'
 const { t } = useI18n()
 const store = useAuditStore()
 const offset = ref(0)
-const filters = reactive({ policy_action: '', model: '' })
+// has_shadow: '' = any (backend игнорирует невалидные значения);
+// 'yes' = только записи с shadow-решениями, 'no' = без. См. backend/internal/audit/handler.go.
+const filters = reactive({ policy_action: '', model: '', has_shadow: '' })
 
 function load() {
-  store.fetchLogs({ ...filters, offset: offset.value, limit: 50 })
+  // Отсекаем пустые параметры, чтобы не засорять query string (и чтобы сервер
+  // воспринимал отсутствие фильтра, а не пустую строку как фильтр).
+  const params: Record<string, any> = { offset: offset.value, limit: 50 }
+  for (const [k, v] of Object.entries(filters)) {
+    if (v) params[k] = v
+  }
+  store.fetchLogs(params)
 }
 function prevPage() { offset.value = Math.max(0, offset.value - 50); load() }
 function nextPage() { offset.value += 50; load() }

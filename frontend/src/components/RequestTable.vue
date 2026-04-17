@@ -10,6 +10,7 @@
             <th class="px-4 py-3">Cost</th>
             <th class="px-4 py-3">PII</th>
             <th class="px-4 py-3">Policy</th>
+            <th class="px-4 py-3">{{ $t('audit.shadow') }}</th>
             <th class="px-4 py-3">Status</th>
           </tr>
         </thead>
@@ -28,16 +29,32 @@
                 {{ log.policy_action }}
               </span>
             </td>
+            <td class="px-4 py-3">
+              <ShadowCell :raw-json="log.shadow_decisions_json" @open="openShadow(log.shadow_decisions_json)" />
+            </td>
             <td class="px-4 py-3">{{ log.status_code }}</td>
           </tr>
         </tbody>
       </table>
     </div>
+    <ShadowDecisionsModal :open="modalOpen" :raw-json="activeJson" @close="modalOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+import ShadowDecisionsModal from './ShadowDecisionsModal.vue'
+import ShadowCell from './ShadowCell.vue'
+
 defineProps<{ logs: any[] }>()
+
+const modalOpen = ref(false)
+const activeJson = ref<string | null>(null)
+
+function openShadow(raw: string | null | undefined) {
+  activeJson.value = raw ?? null
+  modalOpen.value = true
+}
 
 function policyClass(action: string) {
   if (action === 'blocked') return 'bg-red-900/50 text-red-400'

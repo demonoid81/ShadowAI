@@ -35,7 +35,7 @@ func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
 	return err
 }
 
-func (r *Repository) List(ctx context.Context, limit, offset int, userID, model, policyAction string) ([]domain.AuditLog, int, error) {
+func (r *Repository) List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
 	where := []string{"1=1"}
 	args := []any{}
 	argIdx := 1
@@ -54,6 +54,14 @@ func (r *Repository) List(ctx context.Context, limit, offset int, userID, model,
 		where = append(where, fmt.Sprintf("policy_action = $%d", argIdx))
 		args = append(args, policyAction)
 		argIdx++
+	}
+	// PR-4.1: has_shadow filter. Значения валидируются в handler,
+	// здесь trust'им. "" и "any" — no-op.
+	switch hasShadow {
+	case "yes":
+		where = append(where, "shadow_decisions_json IS NOT NULL")
+	case "no":
+		where = append(where, "shadow_decisions_json IS NULL")
 	}
 
 	whereClause := strings.Join(where, " AND ")

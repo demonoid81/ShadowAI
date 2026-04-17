@@ -31,7 +31,17 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	model := r.URL.Query().Get("model")
 	policyAction := r.URL.Query().Get("policy_action")
 
-	logs, total, err := h.svc.GetRepo().List(r.Context(), limit, offset, userID, model, policyAction)
+	// has_shadow: валидируем whitelist'ом — любое другое значение → "any"
+	// (fail-safe: misconfig в UI не должен ломать list, просто даёт default).
+	hasShadow := r.URL.Query().Get("has_shadow")
+	switch hasShadow {
+	case "yes", "no":
+		// OK
+	default:
+		hasShadow = ""
+	}
+
+	logs, total, err := h.svc.GetRepo().List(r.Context(), limit, offset, userID, model, policyAction, hasShadow)
 	if err != nil {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
