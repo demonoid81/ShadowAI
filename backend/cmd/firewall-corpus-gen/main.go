@@ -26,11 +26,30 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/shadowai/backend/internal/embedding"
 )
+
+// resolveGeneratedAt — PR-6.0.1: поддержка SOURCE_DATE_EPOCH для
+// reproducible output. Если env var задан валидным unix-timestamp,
+// используем его; иначе — time.Now().UTC() (текущее behavior).
+// Невалидное значение (мусор) тихо fallback'ится на time.Now() —
+// ломать генерацию из-за misconfig в CI нецелесообразно.
+//
+// SOURCE_DATE_EPOCH — стандартная конвенция reproducible-builds
+// (Debian/NixOS/Go), переиспользуем её вместо изобретения своего
+// CLI-флага.
+func resolveGeneratedAt() time.Time {
+	if v := os.Getenv("SOURCE_DATE_EPOCH"); v != "" {
+		if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return time.Unix(sec, 0).UTC()
+		}
+	}
+	return time.Now().UTC()
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -159,7 +178,7 @@ func Generate(ctx context.Context, patternsDir, outPath string, emb embedding.Em
 		Model:       emb.Model(),
 		Dimension:   emb.Dimension(),
 		Normalized:  true, // client уже L2-нормализует
-		GeneratedAt: time.Now().UTC(),
+		GeneratedAt: resolveGeneratedAt(),
 		Items:       items,
 	}
 

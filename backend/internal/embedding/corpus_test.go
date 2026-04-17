@@ -88,6 +88,27 @@ func TestLoadCorpus_RejectsMismatchDimension(t *testing.T) {
 	}
 }
 
+// TestLoadCorpus_RejectsNormalizedFalse — сам флаг normalized=false
+// отвергается. Hot path (MaxSim) слепо делает dot-product и предполагает
+// unit-length векторы; разрешить "нечестный" манифест с флагом false
+// значит допустить silent wrong similarity и поломку thresholds.
+//
+// Регресс-guard для PR-6.0.1: до этого check'а LoadCorpus проверял
+// только нормализацию items ПРИ флаге true, но не требовал сам флаг.
+func TestLoadCorpus_RejectsNormalizedFalse(t *testing.T) {
+	p := writeJSON(t, t.TempDir(), "c.json", map[string]any{
+		"version": 1, "provider": "ollama", "model": "m",
+		"dimension": 2, "normalized": false, // флаг явно false
+		"items": []map[string]any{
+			{"id": "x", "category": "c", "text": "t", "embedding": []float64{1.0, 0.0}},
+		},
+	})
+	_, err := LoadCorpus(p)
+	if err == nil || !strings.Contains(err.Error(), "normalized") {
+		t.Errorf("want normalized=true requirement error, got %v", err)
+	}
+}
+
 // TestLoadCorpus_RejectsNonNormalized — если manifest.normalized=true,
 // но фактически embedding не единичной длины, load fail'ится. Это защищает
 // hot path от silent wrong results (cosine ≠ dot-product на ненормальных).

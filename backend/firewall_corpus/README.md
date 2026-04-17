@@ -42,6 +42,9 @@ ollama pull nomic-embed-text
 # (сервер на http://localhost:11434)
 
 # 2. Сгенерируйте manifest.
+# (Опционально) Для reproducible output:
+#   export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct HEAD)
+# без этой переменной используется time.Now().UTC().
 go run ./cmd/firewall-corpus-gen \
   --patterns ./firewall_corpus/patterns \
   --output   ./firewall_corpus/semantic_v2.json \
@@ -103,6 +106,11 @@ go run ./cmd/firewall-corpus-gen --patterns ./firewall_corpus/patterns --output 
   ]
 }
 ```
+
+`normalized=true` — **обязательно**. Hot path инспектора делает
+dot-product, который равен cosine только для unit-length векторов.
+`LoadCorpus` отклонит manifest с `normalized=false` (fail-fast,
+чтобы не допустить silent wrong similarity и поломку thresholds).
 
 ### Patterns input
 

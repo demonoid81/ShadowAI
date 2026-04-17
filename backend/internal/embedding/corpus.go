@@ -66,6 +66,13 @@ func LoadCorpus(path string) (*Corpus, error) {
 	if c.Dimension <= 0 {
 		return nil, fmt.Errorf("corpus: dimension must be > 0")
 	}
+	// PR-6.0.1: normalized=true обязательно. Hot path (MaxSim) делает
+	// dot-product, который равен cosine только для unit-length векторов.
+	// Принимать normalized=false значит допустить silent wrong similarity
+	// и поломать thresholds инспектора.
+	if !c.Normalized {
+		return nil, fmt.Errorf("corpus: manifest must declare normalized=true (hot path assumes L2-normalized vectors for dot-product cosine)")
+	}
 	if len(c.Items) == 0 {
 		return nil, fmt.Errorf("corpus: items list is empty (nothing to match against)")
 	}

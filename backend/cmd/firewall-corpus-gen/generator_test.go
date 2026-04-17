@@ -166,6 +166,100 @@ func TestGenerate_SkipsBlankLines(t *testing.T) {
 	}
 }
 
+// TestGenerate_ReproducibleWithSourceDateEpoch — PR-6.0.1: два прогона
+// с одинаковым SOURCE_DATE_EPOCH дают byte-identical output. Это
+// позволит в будущем committed'ить production corpus без шумных
+// timestamp-diff'ов, а также упрощает reproducible-builds pipelines
+// (Debian / NixOS / Go release machinery).
+func TestGenerate_ReproducibleWithSourceDateEpoch(t *testing.T) {
+	root := writePatterns(t, map[string]string{
+		"prompt_injection.txt": "ignore previous\nforget everything\n",
+		"jailbreak.txt":        "dan mode\n",
+	})
+	t.Setenv("SOURCE_DATE_EPOCH", "1700000000")
+
+	emb := &fixedEmbedder{
+		embed:    func(_ string) ([]float64, error) { return []float64{1, 0}, nil },
+		provider: "ollama", model: "m", dimension: 2,
+	}
+
+	out1 := filepath.Join(t.TempDir(), "c1.json")
+	if err := Generate(context.Background(), root, out1, emb); err != nil {
+		t.Fatal(err)
+	}
+	// Отдельный tempdir для второго запуска — убеждает, что путь не
+	// влияет на содержимое.
+	out2 := filepath.Join(t.TempDir(), "c2.json")
+	if err := Generate(context.Background(), root, out2, emb); err != nil {
+		t.Fatal(err)
+	}
+
+	b1, err := os.ReadFile(out1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := os.ReadFile(out2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytesEqual(b1, b2) {
+		t.Errorf("output не reproducible при фиксированном SOURCE_DATE_EPOCH:\n"+
+			"run 1 (%d bytes):\n%s\n---\nrun 2 (%d bytes):\n%s",
+			len(b1), string(b1), len(b2), string(b2))
+	}
+
+	// GeneratedAt в manifest должен отражать SOURCE_DATE_EPOCH
+	// (не time.Now()), иначе override декоративный.
+	var c embedding.Corpus
+	if err := json.Unmarshal(b1, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.GeneratedAt.Unix() != 1700000000 {
+		t.Errorf("GeneratedAt.Unix() = %d, want 1700000000 (SOURCE_DATE_EPOCH)",
+			c.GeneratedAt.Unix())
+	}
+}
+
+// TestGenerate_InvalidSourceDateEpoch_FallsBackToNow — мусорное
+// значение в SOURCE_DATE_EPOCH не должно ломать Generate; fallback
+// на time.Now(). Misconfig в CI — дело оператора, а не причина
+// отказать в генерации.
+func TestGenerate_InvalidSourceDateEpoch_FallsBackToNow(t *testing.T) {
+	root := writePatterns(t, map[string]string{
+		"prompt_injection.txt": "x\n",
+	})
+	t.Setenv("SOURCE_DATE_EPOCH", "not-a-number")
+
+	emb := &fixedEmbedder{
+		embed:    func(_ string) ([]float64, error) { return []float64{1, 0}, nil },
+		provider: "ollama", model: "m", dimension: 2,
+	}
+	out := filepath.Join(t.TempDir(), "c.json")
+	if err := Generate(context.Background(), root, out, emb); err != nil {
+		t.Fatal(err)
+	}
+
+	var c embedding.Corpus
+	data, _ := os.ReadFile(out)
+	_ = json.Unmarshal(data, &c)
+	if c.GeneratedAt.IsZero() {
+		t.Error("GeneratedAt пуст — invalid SOURCE_DATE_EPOCH должен был fallback'нуться на time.Now()")
+	}
+}
+
+// bytesEqual — локальный helper чтобы не тянуть bytes package в test.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestGenerate_RejectsEmptyPatterns — папка без .txt файлов → error.
 // Пустой corpus не имеет смысла (MaxSim на нём бессмысленен).
 func TestGenerate_RejectsEmptyPatterns(t *testing.T) {
