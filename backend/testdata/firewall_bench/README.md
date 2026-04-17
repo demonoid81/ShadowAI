@@ -30,16 +30,26 @@ testdata/firewall_bench/
 
 ```bash
 cd backend
-go run ./cmd/firewall-bench --all                      # table output
-go run ./cmd/firewall-bench --all --format json        # JSON for CI
+go run ./cmd/firewall-bench --all                      # table output (local)
 go run ./cmd/firewall-bench --inspector prompt_injection
+
+# Для CI с точным exit-code контрактом (см. ниже):
+go build -o firewall-bench ./cmd/firewall-bench
+./firewall-bench --all --format json > bench-results.json
 ```
 
 ### Exit codes
 
 - `0` — все метрики ≥ baseline thresholds (pass)
-- `1` — runtime error (bad dataset, unknown inspector, IO)
+- `1` — runtime error (bad dataset, unknown inspector, IO, **missing/invalid baseline без `--allow-missing-baseline`**)
 - `2` — regression: любая метрика хуже baseline
+
+**Важно про `go run`:** когда дочерний процесс завершается с exit 2,
+`go run` сам возвращает 1 и печатает `exit status 2` в stderr. Для
+CI, которая должна различать exit 1 (runtime) и exit 2 (regression),
+используйте **скомпилированный binary**, а не `go run`. Для merge-gate
+"non-zero = fail" достаточно и `go run`, но числовой код будет
+потерян.
 
 ### CLI overrides
 
@@ -47,19 +57,25 @@ go run ./cmd/firewall-bench --inspector prompt_injection
   применяют порог ко ВСЕМ инспекторам (удобно для ad-hoc
   прогонов).
 - `--baseline <path>` — альтернативный baseline.
+- `--allow-missing-baseline` — **только для ad-hoc локальных прогонов**.
+  Если baseline-файл не существует (os.IsNotExist), CLI продолжит с
+  warning. **НЕ** снимает ошибки парсинга: corrupt/invalid JSON всегда
+  даёт exit 1 (broken control plane нельзя тихо обходить).
 
 ## CI integration
 
-Пример для любой CI-системы, которая поддерживает exit codes:
-
-```yaml
-- name: firewall-bench regression
-  run: |
-    cd backend
-    go run ./cmd/firewall-bench --all --format json > bench-results.json
-  # exit 2 → fail; exit 0 → pass. Артефакт bench-results.json
-  # загружается отдельным шагом.
+```bash
+cd backend
+go build -o firewall-bench ./cmd/firewall-bench
+./firewall-bench --all --format json > bench-results.json
+# exit 1 → runtime error (включая missing/invalid baseline) — CI fail
+# exit 2 → regression — CI fail
+# exit 0 → pass
 ```
+
+CI-gate **обязан** требовать наличия `baseline.json` в репо — без него
+любой regression не будет пойман. Это обеспечено fail-hard поведением
+runner'а: missing baseline без `--allow-missing-baseline` → exit 1.
 
 **Важно:** CI не должен модифицировать `baseline.json`. Чтобы обновить
 baseline — создайте PR вручную с новыми thresholds; reviewer увидит
