@@ -61,6 +61,77 @@ CI, которая должна различать exit 1 (runtime) и exit 2 (r
   Если baseline-файл не существует (os.IsNotExist), CLI продолжит с
   warning. **НЕ** снимает ошибки парсинга: corrupt/invalid JSON всегда
   даёт exit 1 (broken control plane нельзя тихо обходить).
+- `--with-embeddings` — **PR-6.1**: добавляет `semantic_v2` inspector
+  в прогон. Требует запущенный embedding provider и валидный corpus.
+  Конфигурация читается из env-vars (см. ниже). Без флага
+  `semantic_v2` НЕ запускается — offline CI не зависит от внешнего
+  сервиса.
+
+### semantic_v2 (`--with-embeddings`)
+
+Env vars (те же имена, что в `cmd/shadowai/main.go`):
+```
+FIREWALL_EMBEDDING_PROVIDER=ollama
+FIREWALL_EMBEDDING_ENDPOINT=http://localhost:11434
+FIREWALL_EMBEDDING_MODEL=nomic-embed-text
+FIREWALL_EMBEDDING_API_KEY=              # openai only
+FIREWALL_EMBEDDING_DIMENSION=768
+FIREWALL_EMBEDDING_TIMEOUT=10s
+FIREWALL_SA_V2_CORPUS_PATH=firewall_corpus/semantic_v2.json
+FIREWALL_SA_V2_THRESHOLD=0.75
+FIREWALL_SA_V2_BLOCK_THRESHOLD=0.88
+```
+
+Baseline для `semantic_v2` **обязан** содержать metadata lock:
+```json
+"semantic_v2": {
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "corpus_version": 1,
+  "min_precision": 0.85,
+  "min_recall": 0.60,
+  "max_fpr": 0.10
+}
+```
+
+Если runtime provider/model/corpus_version не совпадают с baseline,
+CLI завершается **exit 1** (misconfig, не regression) с diff'ом в
+stderr. Это предотвращает сравнение метрик, снятых в разных
+embedding spaces.
+
+## Separate CI slot для semantic_v2
+
+Рекомендуемая структура CI:
+
+```yaml
+# job 1: fast offline baseline (heuristic only)
+firewall-bench-offline:
+  steps:
+    - run: |
+        cd backend
+        go build -o firewall-bench ./cmd/firewall-bench
+        ./firewall-bench --all --format json > bench-offline.json
+
+# job 2: optional, требует Ollama sidecar
+firewall-bench-embeddings:
+  services:
+    ollama:
+      image: ollama/ollama:latest
+      ports: [11434]
+  steps:
+    - run: |
+        curl http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}'
+        cd backend
+        go run ./cmd/firewall-corpus-gen \
+          --patterns ./firewall_corpus/patterns \
+          --output   ./firewall_corpus/semantic_v2.json \
+          --provider ollama --endpoint http://ollama:11434 \
+          --model    nomic-embed-text --dimension 768
+        ./firewall-bench --with-embeddings --format json > bench-emb.json
+```
+
+Offline job — blocking для merge. Embeddings job — optional или
+extended pipeline (медленнее, требует GPU/CPU resources).
 
 ## CI integration
 

@@ -82,6 +82,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		baselinePath         = fs.String("baseline", "", "path to baseline.json (default: <data>/baseline.json)")
 		allowMissingBaseline = fs.Bool("allow-missing-baseline", false,
 			"skip baseline gate if file is missing (ad-hoc local use only; invalid JSON is still fatal)")
+		withEmbeddings = fs.Bool("with-embeddings", false,
+			"include semantic_v2 (embedding-based) inspector; requires FIREWALL_EMBEDDING_* env + FIREWALL_SA_V2_CORPUS_PATH")
 		format       = fs.String("format", "table", "output format: table | json")
 		minPrecision = fs.Float64("min-precision", 0, "override baseline min_precision for all inspectors")
 		minRecall    = fs.Float64("min-recall", 0, "override baseline min_recall for all inspectors")
@@ -92,15 +94,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitRuntime
 	}
 
-	if *inspectorFlag == "" && !*allFlag {
-		fmt.Fprintln(stderr, "error: either --inspector <name> or --all required")
+	if *inspectorFlag == "" && !*allFlag && !*withEmbeddings {
+		fmt.Fprintln(stderr, "error: either --inspector <name>, --all, or --with-embeddings required")
 		fs.Usage()
 		return exitRuntime
 	}
 
 	registry := firewallbench.Registry()
 	selected := selectInspectors(registry, *inspectorFlag, *allFlag)
-	if len(selected) == 0 {
+	// --with-embeddings без --all/--inspector допустим: прогоняем только
+	// semantic_v2. Иначе требуем, чтобы heuristic-сlection был непустым.
+	if len(selected) == 0 && !*withEmbeddings {
 		fmt.Fprintf(stderr, "error: no matching inspectors for %q\n", *inspectorFlag)
 		return exitRuntime
 	}
@@ -148,6 +152,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 			baseline.CheckRegression(f.Name, result.Metrics)...)
 	}
 
+	// PR-6.1: semantic_v2 — отдельный pass, только при --with-embeddings.
+	// Работает на union всех category-datasets (prompt_injection +
+	// jailbreak), потому что corpus содержит паттерны обеих категорий.
+	if *withEmbeddings {
+		code := runSemanticV2(ctx, *dataDir, baseline, &report, stderr)
+		if code != exitOK {
+			// Critical misconfig (metadata mismatch, build fail). В
+			// отличие от regression, здесь нет осмысленного output —
+			// обрывается до Run.
+			if *format == "json" {
+				printJSON(stdout, report)
+			} else {
+				printTable(stdout, report)
+			}
+			return code
+		}
+	}
+
 	if *format == "json" {
 		printJSON(stdout, report)
 	} else {
@@ -157,6 +179,68 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(report.Regressions) > 0 {
 		return exitRegression
 	}
+	return exitOK
+}
+
+// runSemanticV2 — отдельный pass, инкапсулирующий:
+//   - построение client+corpus+inspector из env;
+//   - hard-fail на metadata mismatch против baseline;
+//   - загрузку category-datasets и объединение в один positive/negative
+//     сет (corpus mixed-categoryal, бенчмарк — тоже);
+//   - запись результата и regressions в общий report.
+//
+// Возвращает exitOK при happy path или regression (regression эскалируется
+// в caller через report.Regressions → exitRegression); exitRuntime при
+// init/metadata/dataset ошибках.
+func runSemanticV2(ctx context.Context, dataDir string, baseline *firewallbench.Baseline, report *runReport, stderr io.Writer) int {
+	setup, err := buildSemanticV2FromEnv()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: --with-embeddings: %v\n", err)
+		return exitRuntime
+	}
+
+	// PR-6.1: metadata lock. Baseline thresholds для semantic_v2 имеют
+	// смысл только в своём embedding space. Миссматч provider/model/
+	// corpus_version — это misconfig, не regression, выходим exitRuntime.
+	if mismatches := baseline.CheckInspectorMetadata(
+		"semantic_v2", setup.Provider, setup.Model, setup.CorpusVersion,
+	); len(mismatches) > 0 {
+		bp, bm, bcv := baseline.MetadataFor("semantic_v2")
+		fmt.Fprintln(stderr, "error: semantic_v2 metadata mismatch vs baseline:")
+		fmt.Fprintf(stderr, "  baseline: provider=%q model=%q corpus_version=%d\n", bp, bm, bcv)
+		fmt.Fprintf(stderr, "  runtime:  provider=%q model=%q corpus_version=%d\n",
+			setup.Provider, setup.Model, setup.CorpusVersion)
+		return exitRuntime
+	}
+
+	categories := []string{"prompt_injection", "jailbreak"}
+	var allPos, allNeg []firewallbench.Example
+	for _, cat := range categories {
+		pos, err := firewallbench.LoadDataset(filepath.Join(dataDir, cat, "positive.jsonl"))
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return exitRuntime
+		}
+		neg, err := firewallbench.LoadDataset(filepath.Join(dataDir, cat, "negative.jsonl"))
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return exitRuntime
+		}
+		allPos = append(allPos, pos...)
+		allNeg = append(allNeg, neg...)
+	}
+
+	detector := firewallbench.NewFirewallDetector(setup.Inspector)
+	result := firewallbench.Run(ctx, "semantic_v2", detector, allPos, allNeg)
+	report.Results = append(report.Results, result)
+
+	if !baseline.HasInspector("semantic_v2") {
+		report.Warnings = append(report.Warnings,
+			`no baseline for inspector "semantic_v2" — регрессия не проверяется`)
+		return exitOK
+	}
+	report.Regressions = append(report.Regressions,
+		baseline.CheckRegression("semantic_v2", result.Metrics)...)
 	return exitOK
 }
 

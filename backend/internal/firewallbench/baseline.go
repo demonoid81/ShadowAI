@@ -23,10 +23,19 @@ type Baseline struct {
 // "threshold отсутствует" и соответствующая проверка пропускается, что
 // позволяет частично конфигурировать thresholds при постепенном вводе
 // нового инспектора в бенчмарк.
+//
+// Provider/Model/CorpusVersion (PR-6.1) — optional metadata lock для
+// embedding-based инспекторов. Если заданы, CLI обязан проверить
+// совпадение runtime provider/model/corpus_version перед use,
+// иначе сравнение метрик бессмысленно (metрики на одном provider не
+// переносимы на другой).
 type InspectorBaseline struct {
-	MinPrecision float64 `json:"min_precision"`
-	MinRecall    float64 `json:"min_recall"`
-	MaxFPR       float64 `json:"max_fpr"`
+	MinPrecision  float64 `json:"min_precision"`
+	MinRecall     float64 `json:"min_recall"`
+	MaxFPR        float64 `json:"max_fpr"`
+	Provider      string  `json:"provider,omitempty"`
+	Model         string  `json:"model,omitempty"`
+	CorpusVersion int     `json:"corpus_version,omitempty"`
 }
 
 // Regression — описание одного нарушения threshold'а.
@@ -62,6 +71,59 @@ func (b *Baseline) HasInspector(name string) bool {
 	}
 	_, ok := b.Inspectors[name]
 	return ok
+}
+
+// CheckInspectorMetadata (PR-6.1) сравнивает зафиксированные в baseline
+// provider/model/corpus_version с runtime-значениями. Возвращает список
+// несовпадений; пустой — metadata совпадает ИЛИ baseline не содержит
+// эти поля (backward compat с heuristic инспекторами).
+//
+// CLI должен падать с exit 1 при len(result) > 0. Это не regression
+// (у нас нет метрик для сравнения), а misconfig: baseline thresholds
+// выставлены для другого embedding space, применять их нельзя.
+func (b *Baseline) CheckInspectorMetadata(name, provider, model string, corpusVersion int) []Regression {
+	if b == nil {
+		return nil
+	}
+	rule, ok := b.Inspectors[name]
+	if !ok {
+		return nil
+	}
+	var out []Regression
+	if rule.Provider != "" && rule.Provider != provider {
+		out = append(out, Regression{
+			Inspector: name, Field: "provider",
+			Actual: 0, Threshold: 0,
+		})
+		// Threshold/Actual float бесполезны для строковых полей, но
+		// сохраняем тот же тип для единого отчёта. Метаданные выносим
+		// в Reason через отдельный метод ниже.
+	}
+	if rule.Model != "" && rule.Model != model {
+		out = append(out, Regression{Inspector: name, Field: "model"})
+	}
+	if rule.CorpusVersion != 0 && rule.CorpusVersion != corpusVersion {
+		out = append(out, Regression{
+			Inspector: name, Field: "corpus_version",
+			Threshold: float64(rule.CorpusVersion),
+			Actual:    float64(corpusVersion),
+		})
+	}
+	return out
+}
+
+// MetadataFor возвращает copy зафиксированных metadata для инспектора
+// (provider/model/corpus_version). Пустая строка/0 означает "не задано".
+// Используется CLI для форматирования ошибок metadata-mismatch.
+func (b *Baseline) MetadataFor(name string) (provider, model string, corpusVersion int) {
+	if b == nil {
+		return "", "", 0
+	}
+	rule, ok := b.Inspectors[name]
+	if !ok {
+		return "", "", 0
+	}
+	return rule.Provider, rule.Model, rule.CorpusVersion
 }
 
 // CheckRegression сравнивает m против thresholds инспектора и возвращает
