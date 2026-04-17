@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/firewall"
 )
@@ -58,17 +59,29 @@ func encodeShadowFromCtx(ctx context.Context) string {
 	return string(b)
 }
 
-// auditLog обёртка над auditSvc.Log, которая подтягивает shadow-решения
-// из request-scoped context и присваивает их log.ShadowDecisionsJSON
-// перед Insert. Используется вместо прямого h.auditSvc.Log(log) во всех
-// 20+ call-site'ах handler.go — это единая точка wiring'а shadow → audit.
+// auditLog обёртка над auditSvc.Log. Единая точка для:
+//   - присвоения ShadowDecisionsJSON из request-scoped context (PR-4.1);
+//   - применения AuditPayloadMode к request/response bodies (PR-A).
 //
-// Если context не содержит slot'а (например, в TestProvider flow, где
-// firewall pipeline не запускается), ShadowDecisionsJSON останется "".
+// Caller передаёт raw/sanitized bodies; финальная форма сохранения
+// (none/metadata/redacted/full) определяется h.auditPayloadMode.
+//
+// Если context не содержит shadow-slot'а (например, в TestProvider flow),
+// ShadowDecisionsJSON останется "". Если auditPayloadMode пустой
+// (test без явной настройки) — fallback в PayloadModeFull (backward
+// compat для существующих тестов до PR-A).
 func (h *Handler) auditLog(ctx context.Context, log *domain.AuditLog) {
 	if h.auditSvc == nil {
 		return
 	}
 	log.ShadowDecisionsJSON = encodeShadowFromCtx(ctx)
+	mode := h.auditPayloadMode
+	if mode == "" {
+		// Backward-compat для тестов без явного mode. Production main.go
+		// всегда передаёт явное значение (валидированное из env).
+		mode = audit.PayloadModeFull
+	}
+	log.RequestBody, log.ResponseBody = audit.TransformBodies(
+		mode, log.RequestBody, log.ResponseBody, h.dlpSvc, nil)
 	h.auditSvc.Log(log)
 }

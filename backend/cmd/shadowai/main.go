@@ -247,14 +247,26 @@ func main() {
 		cache = proxy.NewSemanticCache(redisClient, ttl)
 	}
 
+	// PR-A: audit privacy. Parse mode из env, fail-safe редакция в
+	// redacted при invalid values. Делается ДО всех handlers, которым
+	// mode нужен (audit + proxy).
+	auditPayloadMode, modeErr := audit.ParsePayloadMode(cfg.AuditPayloadMode)
+	if modeErr != nil {
+		log.Printf("WARN: invalid AUDIT_PAYLOAD_MODE=%q (%v), fallback to redacted", cfg.AuditPayloadMode, modeErr)
+		auditPayloadMode = audit.PayloadModeRedacted
+	}
+	if auditPayloadMode == audit.PayloadModeFull {
+		log.Printf("WARN: AUDIT_PAYLOAD_MODE=full — request/response bodies stored verbatim; privacy implications")
+	}
+
 	// Handlers
 	authHandler := auth.NewHandler(authSvc)
-	auditHandler := audit.NewHandler(auditSvc)
+	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db)
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc)
-	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline)
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode)
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
 	defer connectivityCancel()
@@ -279,6 +291,41 @@ func main() {
 				select {
 				case <-ticker.C:
 					runConnectivityCheck()
+				case <-connectivityCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// PR-A: audit-purge scheduler. Запускается, если явно задан
+	// AUDIT_PURGE_INTERVAL (>0) И AUDIT_RETENTION_DAYS (>0). Без обоих
+	// значений — scheduler не стартует (CLI остаётся основным путём).
+	if cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0 {
+		go func() {
+			log.Printf("audit-purge scheduler: interval=%s retention=%d days chunk=%d",
+				cfg.AuditPurgeInterval, cfg.AuditRetentionDays, cfg.AuditPurgeChunkSize)
+			ticker := time.NewTicker(cfg.AuditPurgeInterval)
+			defer ticker.Stop()
+			repo := auditSvc.GetRepo()
+			purge := func() {
+				cutoff := time.Now().UTC().Add(-time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour)
+				ctx, cancel := context.WithTimeout(connectivityCtx, 30*time.Minute)
+				defer cancel()
+				deleted, err := repo.PurgeOlderThan(ctx, cutoff, cfg.AuditPurgeChunkSize)
+				if err != nil {
+					log.Printf("audit-purge scheduler: err: %v", err)
+					return
+				}
+				if err := repo.RecordPurgeRun(ctx, cutoff, deleted); err != nil {
+					log.Printf("audit-purge scheduler: record run failed: %v", err)
+				}
+				log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
+			}
+			for {
+				select {
+				case <-ticker.C:
+					purge()
 				case <-connectivityCtx.Done():
 					return
 				}
@@ -318,6 +365,7 @@ func main() {
 
 	// Audit logs
 	admin.HandleFunc("/audit/logs", auditHandler.List).Methods("GET")
+	admin.HandleFunc("/audit/status", auditHandler.Status).Methods("GET")
 
 	// Policies (admin)
 	admin.HandleFunc("/policies", policyHandler.List).Methods("GET")

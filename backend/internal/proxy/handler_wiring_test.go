@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gorilla/mux"
@@ -55,6 +56,20 @@ func (c *captureAuditRepo) snapshot() []*domain.AuditLog {
 	out := make([]*domain.AuditLog, len(c.entries))
 	copy(out, c.entries)
 	return out
+}
+
+// PR-A stubs: captureAuditRepo не тестирует retention, no-op достаточно.
+func (c *captureAuditRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (int, error) {
+	return 0, nil
+}
+func (c *captureAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int) error {
+	return nil
+}
+func (c *captureAuditRepo) LastPurgeRun(_ context.Context) (*domain.PurgeRun, error) {
+	return nil, nil
+}
+func (c *captureAuditRepo) TotalRowsPurged(_ context.Context) (int, error) {
+	return 0, nil
 }
 
 // emptyPolicyRepo: policy engine без правил → всегда allowed.
@@ -152,6 +167,7 @@ func TestProxyChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T) {
 		nil, nil, nil,
 		0,
 		pipeline,
+		audit.PayloadModeFull,
 	)
 
 	// 9. Запрос с email в content — DLP обязан санитизировать
@@ -250,6 +266,7 @@ func TestUnifiedChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T)
 		"", router, nil, nil,
 		0,
 		pipeline,
+		audit.PayloadModeFull,
 	)
 
 	// 10. Request к /proxy/chat
@@ -330,6 +347,7 @@ func TestProxyChat_Streaming_FirewallFlagPlusResponseDLPSanitize(t *testing.T) {
 	h := NewHandler(
 		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
 		"", nil, nil, nil, 0, pipeline,
+		audit.PayloadModeFull,
 	)
 
 	// stream: true активирует streaming branch
@@ -407,6 +425,7 @@ func TestUnifiedChat_Streaming_FirewallFlagPlusResponseDLPSanitize(t *testing.T)
 	h := NewHandler(
 		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
 		"", router, nil, nil, 0, pipeline,
+		audit.PayloadModeFull,
 	)
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hello, need help"}]}`

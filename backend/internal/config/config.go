@@ -37,6 +37,18 @@ type Config struct {
 	ServerReadHeaderTimeout time.Duration
 	ServerMaxHeaderBytes    int
 
+	// PR-A: audit privacy.
+	// AuditPayloadMode: "none" | "metadata" | "redacted" | "full".
+	// Default "redacted" — secure-by-default. "full" требует явного opt-in
+	// и выводит startup warning. Invalid value — fallback "redacted".
+	AuditPayloadMode string
+	// AuditRetentionDays: 0 = no-purge (default). Positive = TTL в днях.
+	AuditRetentionDays int
+	// AuditPurgeInterval: 0 = scheduler disabled (default). Только CLI.
+	AuditPurgeInterval time.Duration
+	// AuditPurgeChunkSize: batch size для chunked DELETE (защита от lock'ов).
+	AuditPurgeChunkSize int
+
 	// Firewall
 	FirewallEnabled              bool
 	FirewallPIEnabled            bool
@@ -118,6 +130,12 @@ func Load() *Config {
 		ServerIdleTimeout:       idleTimeout,
 		ServerReadHeaderTimeout: readHeaderTimeout,
 		ServerMaxHeaderBytes:    getEnvInt("SERVER_MAX_HEADER_BYTES", 1<<20),
+
+		// PR-A: audit privacy. Secure-by-default: redacted.
+		AuditPayloadMode:    getEnv("AUDIT_PAYLOAD_MODE", "redacted"),
+		AuditRetentionDays:  getEnvInt("AUDIT_RETENTION_DAYS", 0),
+		AuditPurgeInterval:  getDuration("AUDIT_PURGE_INTERVAL", 0),
+		AuditPurgeChunkSize: getEnvInt("AUDIT_PURGE_CHUNK_SIZE", 1000),
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",

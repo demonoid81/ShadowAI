@@ -4,14 +4,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 type Handler struct {
-	svc *Service
+	svc           *Service
+	payloadMode   PayloadMode
+	retentionDays int
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+// NewHandler принимает также privacy-config. Если mode="" и
+// retentionDays=0 — Status endpoint показывает их как есть (не
+// ошибка, оператор видит "not configured").
+func NewHandler(svc *Service, payloadMode PayloadMode, retentionDays int) *Handler {
+	return &Handler{svc: svc, payloadMode: payloadMode, retentionDays: retentionDays}
 }
 
 type listResponse struct {
@@ -62,4 +68,40 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Limit:  limit,
 		Offset: offset,
 	})
+}
+
+// statusResponse — read-only view privacy/retention настроек + purge
+// history для ops dashboard'ов. Не светит secrets.
+type statusResponse struct {
+	PayloadMode     string     `json:"payload_mode"`
+	RetentionDays   int        `json:"retention_days"`
+	LastPurgedAt    *time.Time `json:"last_purged_at,omitempty"`
+	RowsPurgedTotal int        `json:"rows_purged_total"`
+	SchedulerEnabled bool      `json:"scheduler_enabled"`
+}
+
+// Status отдаёт audit privacy config + purge history.
+// Путь: GET /audit/status.
+func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
+	out := statusResponse{
+		PayloadMode:   string(h.payloadMode),
+		RetentionDays: h.retentionDays,
+	}
+
+	// SchedulerEnabled — true если retention сконфигурирован
+	// (scheduler внутри main.go включается при interval>0 и retention>0,
+	// но retention достаточный индикатор для UI).
+	out.SchedulerEnabled = h.retentionDays > 0
+
+	if repo := h.svc.GetRepo(); repo != nil {
+		if last, err := repo.LastPurgeRun(r.Context()); err == nil && last != nil {
+			out.LastPurgedAt = last.CompletedAt
+		}
+		if total, err := repo.TotalRowsPurged(r.Context()); err == nil {
+			out.RowsPurgedTotal = total
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }

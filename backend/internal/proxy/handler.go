@@ -95,6 +95,8 @@ type Handler struct {
 	healthTracker *HealthTracker
 	maxCompletionTokens int
 	firewallPipeline *firewall.Pipeline
+	// PR-A: privacy. Applies to every audit_log write через h.auditLog().
+	auditPayloadMode audit.PayloadMode
 }
 
 // NewHandler creates a new multi-provider proxy handler.
@@ -110,6 +112,7 @@ func NewHandler(
 	healthTracker *HealthTracker,
 	maxCompletionTokens int,
 	firewallPipeline *firewall.Pipeline,
+	auditPayloadMode audit.PayloadMode,
 ) *Handler {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -134,6 +137,7 @@ func NewHandler(
 		healthTracker: healthTracker,
 		maxCompletionTokens: maxCompletionTokens,
 		firewallPipeline: firewallPipeline,
+		auditPayloadMode: auditPayloadMode,
 	}
 }
 
