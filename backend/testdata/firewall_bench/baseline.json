@@ -1,5 +1,5 @@
 {
-  "_comment": "PR-5 MVP baseline. Цель — поймать precision/fpr-регрессию на committed dataset. min_recall намеренно низкий: инспекторы в этом прогоне работают в heuristic-only конфигурации (judge=nil), а curated dataset содержит creative paraphrases, которые существующие regex-patterns не покрывают. Улучшение recall — roadmap: (1) расширить DefaultPromptInjectionPatterns, (2) добавить judge-прогон в отдельном CI slot, (3) дополнить dataset каноническими атаками. Комментарий хранится в _comment — валиден в JSON и не влияет на Baseline struct.",
+  "_comment": "Baseline. heuristic: PR-5 MVP (min_recall намеренно низкий — inspectors в heuristic-only конфигурации + creative paraphrases в dataset'ах). semantic_v2: зафиксировано на реальном прогоне через OpenAI text-embedding-3-small (1536 dim, 123 committed patterns, thresholds 0.55/0.75): P=1.00 R=0.9222 FPR=0.00 F1=0.96. Tolerance: precision -0.05, recall -0.07, fpr +0.05. Комментарий в _comment — валиден в JSON.",
   "inspectors": {
     "prompt_injection": {
       "min_precision": 0.9,
@@ -9,6 +9,14 @@
     "jailbreak": {
       "min_precision": 0.9,
       "min_recall": 0.01,
+      "max_fpr": 0.05
+    },
+    "semantic_v2": {
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "corpus_version": 1,
+      "min_precision": 0.95,
+      "min_recall": 0.85,
       "max_fpr": 0.05
     }
   }
