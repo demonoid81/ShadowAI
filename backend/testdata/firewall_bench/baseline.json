@@ -16,7 +16,7 @@
       "model": "text-embedding-3-small",
       "corpus_version": 1,
       "min_precision": 0.95,
-      "min_recall": 0.85,
+      "min_recall": 0.90,
       "max_fpr": 0.05
     }
   }
