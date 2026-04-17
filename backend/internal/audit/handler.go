@@ -8,16 +8,27 @@ import (
 )
 
 type Handler struct {
-	svc           *Service
-	payloadMode   PayloadMode
-	retentionDays int
+	svc              *Service
+	payloadMode      PayloadMode
+	retentionDays    int
+	schedulerEnabled bool
 }
 
 // NewHandler принимает также privacy-config. Если mode="" и
 // retentionDays=0 — Status endpoint показывает их как есть (не
 // ошибка, оператор видит "not configured").
-func NewHandler(svc *Service, payloadMode PayloadMode, retentionDays int) *Handler {
-	return &Handler{svc: svc, payloadMode: payloadMode, retentionDays: retentionDays}
+//
+// schedulerEnabled — фактическое состояние embedded purge scheduler
+// (caller считает `interval>0 && retention>0`). Если только retention
+// задан, а interval=0 — scheduler не стартует и этот флаг=false,
+// оператор должен запускать cmd/audit-purge самостоятельно.
+func NewHandler(svc *Service, payloadMode PayloadMode, retentionDays int, schedulerEnabled bool) *Handler {
+	return &Handler{
+		svc:              svc,
+		payloadMode:      payloadMode,
+		retentionDays:    retentionDays,
+		schedulerEnabled: schedulerEnabled,
+	}
 }
 
 type listResponse struct {
@@ -84,14 +95,10 @@ type statusResponse struct {
 // Путь: GET /audit/status.
 func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	out := statusResponse{
-		PayloadMode:   string(h.payloadMode),
-		RetentionDays: h.retentionDays,
+		PayloadMode:      string(h.payloadMode),
+		RetentionDays:    h.retentionDays,
+		SchedulerEnabled: h.schedulerEnabled,
 	}
-
-	// SchedulerEnabled — true если retention сконфигурирован
-	// (scheduler внутри main.go включается при interval>0 и retention>0,
-	// но retention достаточный индикатор для UI).
-	out.SchedulerEnabled = h.retentionDays > 0
 
 	if repo := h.svc.GetRepo(); repo != nil {
 		if last, err := repo.LastPurgeRun(r.Context()); err == nil && last != nil {

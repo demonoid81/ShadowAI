@@ -16,18 +16,47 @@ import (
 	"github.com/lib/pq"
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
+	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/pii"
 )
 
 type Handler struct {
-	manager  *Manager
-	repo     *Repository
-	auditSvc *audit.Service
+	manager          *Manager
+	repo             *Repository
+	auditSvc         *audit.Service
+	auditPayloadMode audit.PayloadMode
+	dlpSvc           *dlp.Service
 }
 
-func NewHandler(manager *Manager, repo *Repository, auditSvc *audit.Service) *Handler {
-	return &Handler{manager: manager, repo: repo, auditSvc: auditSvc}
+// NewHandler принимает также audit privacy-config (PR-A): mode и dlpSvc
+// применяются к bodies перед записью в audit_logs. Без этих параметров
+// internaldb-path раньше обходил privacy gate, делая прямой auditSvc.Log.
+func NewHandler(manager *Manager, repo *Repository, auditSvc *audit.Service, auditPayloadMode audit.PayloadMode, dlpSvc *dlp.Service) *Handler {
+	return &Handler{
+		manager:          manager,
+		repo:             repo,
+		auditSvc:         auditSvc,
+		auditPayloadMode: auditPayloadMode,
+		dlpSvc:           dlpSvc,
+	}
+}
+
+// writeAudit применяет AUDIT_PAYLOAD_MODE к raw bodies перед Insert.
+// Единая точка privacy-enforcement для internaldb (аналог handler.auditLog
+// в proxy). Пустой auditPayloadMode → fallback Full (backward compat для
+// редких test-fixture'ов без полной настройки).
+func (h *Handler) writeAudit(log *domain.AuditLog, piiFindings []pii.Finding) {
+	if h.auditSvc == nil {
+		return
+	}
+	mode := h.auditPayloadMode
+	if mode == "" {
+		mode = audit.PayloadModeFull
+	}
+	log.RequestBody, log.ResponseBody = audit.TransformBodies(
+		mode, log.RequestBody, log.ResponseBody, h.dlpSvc, piiFindings)
+	h.auditSvc.Log(log)
 }
 
 type sourceListResponse struct {
@@ -582,7 +611,7 @@ func (h *Handler) auditRequest(ctx context.Context, claims *auth.Claims, source,
 
 	req := auditRequestPayload(query)
 
-	h.auditSvc.Log(&domain.AuditLog{
+	h.writeAudit(&domain.AuditLog{
 		ID:           uuid.New().String(),
 		UserID:       claims.UserID,
 		RequestBody:  req,
@@ -594,7 +623,7 @@ func (h *Handler) auditRequest(ctx context.Context, claims *auth.Claims, source,
 		PIITypes:     pii.DetectedTypes(findings),
 		PolicyAction: policyAction,
 		DurationMs:   int(time.Since(start).Milliseconds()),
-	})
+	}, findings)
 }
 
 func (h *Handler) reloadManager(ctx context.Context) error {
@@ -620,7 +649,7 @@ func (h *Handler) auditAdminRequest(ctx context.Context, claims *auth.Claims, op
 		policyAction = "blocked"
 	}
 
-	h.auditSvc.Log(&domain.AuditLog{
+	h.writeAudit(&domain.AuditLog{
 		ID:           uuid.New().String(),
 		UserID:       claims.UserID,
 		RequestBody:  payload,
@@ -632,7 +661,7 @@ func (h *Handler) auditAdminRequest(ctx context.Context, claims *auth.Claims, op
 		PIITypes:     pii.DetectedTypes(findings),
 		PolicyAction: policyAction,
 		DurationMs:   int(time.Since(start).Milliseconds()),
-	})
+	}, findings)
 }
 
 func auditRequestPayload(raw string) string {

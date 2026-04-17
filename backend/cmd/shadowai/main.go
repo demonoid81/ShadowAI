@@ -261,11 +261,15 @@ func main() {
 
 	// Handlers
 	authHandler := auth.NewHandler(authSvc)
-	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays)
+	// schedulerEnabled ровно повторяет условие запуска goroutine ниже
+	// (cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0). Без
+	// этой согласованности /audit/status врал бы оператору.
+	auditSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0
+	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db)
-	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc)
+	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc)
 	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode)
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
