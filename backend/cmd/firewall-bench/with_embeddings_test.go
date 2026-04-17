@@ -272,6 +272,156 @@ func TestRun_WithEmbeddingsAlone(t *testing.T) {
 	}
 }
 
+// writeBaselineWithoutSemanticV2 — baseline-файл с heuristic entries,
+// но БЕЗ semantic_v2 (bootstrap-сценарий).
+func writeBaselineWithoutSemanticV2(t *testing.T, dir string) string {
+	t.Helper()
+	manifest := map[string]any{
+		"inspectors": map[string]any{
+			"prompt_injection": map[string]any{"min_precision": 0.8, "min_recall": 0.2, "max_fpr": 0.05},
+			"jailbreak":        map[string]any{"min_precision": 0.8, "min_recall": 0.01, "max_fpr": 0.05},
+		},
+	}
+	b, _ := json.Marshal(manifest)
+	p := filepath.Join(dir, "baseline.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// writeBaselineWithIncompleteSemanticV2 — entry присутствует, но
+// любое из provider/model/corpus_version пустое/ноль.
+func writeBaselineWithIncompleteSemanticV2(t *testing.T, dir string) string {
+	t.Helper()
+	manifest := map[string]any{
+		"inspectors": map[string]any{
+			"semantic_v2": map[string]any{
+				// provider = "" (incomplete metadata lock)
+				"model": "nomic-embed-text", "corpus_version": 1,
+				"min_precision": 0.5, "min_recall": 0.5, "max_fpr": 0.5,
+			},
+		},
+	}
+	b, _ := json.Marshal(manifest)
+	p := filepath.Join(dir, "baseline.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRun_WithEmbeddings_MissingSemanticV2Baseline_FailsHard — PR-6.1.1:
+// если baseline не содержит entry для semantic_v2, run возвращает exit 1
+// с explicit error в stderr. Это закрывает fail-open gap: до PR-6.1.1
+// CI мог "успешно" пройти без реального regression gate.
+func TestRun_WithEmbeddings_MissingSemanticV2Baseline_FailsHard(t *testing.T) {
+	srv := mockOllamaServer(t)
+	defer srv.Close()
+	tmp := t.TempDir()
+	corpusPath := writeCorpus(t, tmp, "ollama", "nomic-embed-text")
+	baselinePath := writeBaselineWithoutSemanticV2(t, tmp)
+	configureEmbeddingEnv(t, srv.URL, corpusPath, "nomic-embed-text")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--with-embeddings",
+		"--data", testDataDir(t),
+		"--baseline", baselinePath,
+	}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 (missing semantic_v2 entry)\nstderr: %s", code, stderr.String())
+	}
+	errStr := stderr.String()
+	if !strings.Contains(errStr, "semantic_v2") {
+		t.Errorf("stderr должен упомянуть semantic_v2: %s", errStr)
+	}
+	if !strings.Contains(errStr, "--allow-missing-baseline") {
+		t.Errorf("stderr должен подсказать --allow-missing-baseline: %s", errStr)
+	}
+}
+
+// TestRun_WithEmbeddings_IncompleteSemanticV2Metadata_FailsHard —
+// entry присутствует, но metadata lock incomplete (provider = "").
+// Без этого check semantic_v2 baseline с одними только thresholds и
+// без привязки к embedding space был бы semantically fail-open.
+func TestRun_WithEmbeddings_IncompleteSemanticV2Metadata_FailsHard(t *testing.T) {
+	srv := mockOllamaServer(t)
+	defer srv.Close()
+	tmp := t.TempDir()
+	corpusPath := writeCorpus(t, tmp, "ollama", "nomic-embed-text")
+	baselinePath := writeBaselineWithIncompleteSemanticV2(t, tmp)
+	configureEmbeddingEnv(t, srv.URL, corpusPath, "nomic-embed-text")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--with-embeddings",
+		"--data", testDataDir(t),
+		"--baseline", baselinePath,
+	}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 (incomplete metadata)\nstderr: %s", code, stderr.String())
+	}
+	errStr := stderr.String()
+	if !strings.Contains(errStr, "incomplete metadata lock") {
+		t.Errorf("stderr должен упомянуть incomplete metadata: %s", errStr)
+	}
+}
+
+// TestRun_WithEmbeddings_MissingSemanticV2Baseline_WithAllowFlag —
+// тот же bootstrap-сценарий, но с --allow-missing-baseline: warning и
+// прогоняем без regression-check. Exit 0, если метрики mock'а валидны.
+func TestRun_WithEmbeddings_MissingSemanticV2Baseline_WithAllowFlag(t *testing.T) {
+	srv := mockOllamaServer(t)
+	defer srv.Close()
+	tmp := t.TempDir()
+	corpusPath := writeCorpus(t, tmp, "ollama", "nomic-embed-text")
+	baselinePath := writeBaselineWithoutSemanticV2(t, tmp)
+	configureEmbeddingEnv(t, srv.URL, corpusPath, "nomic-embed-text")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--with-embeddings",
+		"--allow-missing-baseline",
+		"--data", testDataDir(t),
+		"--baseline", baselinePath,
+		"--format", "json",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Errorf("exit = %d, want 0 (bootstrap разрешён флагом)\nstderr: %s", code, stderr.String())
+	}
+
+	var report struct {
+		Results []struct {
+			Inspector string `json:"inspector"`
+		} `json:"results"`
+		Warnings []string `json:"warnings"`
+	}
+	_ = json.Unmarshal(stdout.Bytes(), &report)
+
+	found := false
+	for _, r := range report.Results {
+		if r.Inspector == "semantic_v2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("semantic_v2 должен быть в results даже в bootstrap mode")
+	}
+	warnedAboutBaseline := false
+	for _, w := range report.Warnings {
+		if strings.Contains(w, "semantic_v2") && strings.Contains(w, "allow-missing-baseline") {
+			warnedAboutBaseline = true
+		}
+	}
+	if !warnedAboutBaseline {
+		t.Errorf("должен быть warning про bootstrap-режим, got warnings: %v", report.Warnings)
+	}
+}
+
 // TestRun_WithEmbeddings_InitFailureReturnsRuntime — если embedding
 // endpoint недоступен при init (client build сам по себе ок, но первый
 // реальный call, который произойдёт в Embed, упадёт), мы всё равно

@@ -156,7 +156,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Работает на union всех category-datasets (prompt_injection +
 	// jailbreak), потому что corpus содержит паттерны обеих категорий.
 	if *withEmbeddings {
-		code := runSemanticV2(ctx, *dataDir, baseline, &report, stderr)
+		code := runSemanticV2(ctx, *dataDir, baseline, &report, stderr, *allowMissingBaseline)
 		if code != exitOK {
 			// Critical misconfig (metadata mismatch, build fail). В
 			// отличие от regression, здесь нет осмысленного output —
@@ -184,33 +184,63 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // runSemanticV2 — отдельный pass, инкапсулирующий:
 //   - построение client+corpus+inspector из env;
+//   - PR-6.1.1: hard-fail если baseline не содержит semantic_v2 entry
+//     с полным metadata lock (provider/model/corpus_version),
+//     если только не передан --allow-missing-baseline (bootstrap mode);
 //   - hard-fail на metadata mismatch против baseline;
 //   - загрузку category-datasets и объединение в один positive/negative
 //     сет (corpus mixed-categoryal, бенчмарк — тоже);
 //   - запись результата и regressions в общий report.
 //
-// Возвращает exitOK при happy path или regression (regression эскалируется
-// в caller через report.Regressions → exitRegression); exitRuntime при
-// init/metadata/dataset ошибках.
-func runSemanticV2(ctx context.Context, dataDir string, baseline *firewallbench.Baseline, report *runReport, stderr io.Writer) int {
+// Возвращает exitOK при happy path; exitRuntime при init/metadata/baseline/
+// dataset ошибках. Regressions эскалируются в caller через report.Regressions
+// → exitRegression.
+func runSemanticV2(ctx context.Context, dataDir string, baseline *firewallbench.Baseline, report *runReport, stderr io.Writer, allowMissingBaseline bool) int {
 	setup, err := buildSemanticV2FromEnv()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: --with-embeddings: %v\n", err)
 		return exitRuntime
 	}
 
-	// PR-6.1: metadata lock. Baseline thresholds для semantic_v2 имеют
-	// смысл только в своём embedding space. Миссматч provider/model/
-	// corpus_version — это misconfig, не regression, выходим exitRuntime.
-	if mismatches := baseline.CheckInspectorMetadata(
-		"semantic_v2", setup.Provider, setup.Model, setup.CorpusVersion,
-	); len(mismatches) > 0 {
-		bp, bm, bcv := baseline.MetadataFor("semantic_v2")
-		fmt.Fprintln(stderr, "error: semantic_v2 metadata mismatch vs baseline:")
-		fmt.Fprintf(stderr, "  baseline: provider=%q model=%q corpus_version=%d\n", bp, bm, bcv)
-		fmt.Fprintf(stderr, "  runtime:  provider=%q model=%q corpus_version=%d\n",
-			setup.Provider, setup.Model, setup.CorpusVersion)
-		return exitRuntime
+	// PR-6.1.1: baseline-полнота. Без полного metadata lock regression
+	// thresholds не привязаны к embedding space — semantic_v2 bench-slot
+	// становится fail-open (запуск "проходит", но gate ничего не ловит).
+	// Разрешаем пропустить только через --allow-missing-baseline
+	// (локальный bootstrap, пока baseline entry ещё не создан).
+	hasEntry := baseline.HasInspector("semantic_v2")
+	bp, bm, bcv := baseline.MetadataFor("semantic_v2")
+	baselineReady := hasEntry && bp != "" && bm != "" && bcv > 0
+
+	if !baselineReady {
+		if !allowMissingBaseline {
+			switch {
+			case !hasEntry:
+				fmt.Fprintln(stderr, `error: baseline не содержит "semantic_v2" entry; добавьте её (provider+model+corpus_version+thresholds) или передайте --allow-missing-baseline для bootstrap`)
+			default:
+				fmt.Fprintf(stderr,
+					"error: baseline для semantic_v2 incomplete metadata lock (provider=%q model=%q corpus_version=%d); все три поля обязательны, или передайте --allow-missing-baseline для bootstrap\n",
+					bp, bm, bcv)
+			}
+			return exitRuntime
+		}
+		// allowMissing path: делаем warning и прогоняем без
+		// regression-check (оператор увидит metrics).
+		report.Warnings = append(report.Warnings,
+			`baseline для "semantic_v2" отсутствует/неполный (--allow-missing-baseline): regression-check пропущен`)
+	}
+
+	// PR-6.1: metadata lock match-check. Делается только если baseline
+	// ready — иначе мы уже в allowMissing-пути и match нечего сверять.
+	if baselineReady {
+		if mismatches := baseline.CheckInspectorMetadata(
+			"semantic_v2", setup.Provider, setup.Model, setup.CorpusVersion,
+		); len(mismatches) > 0 {
+			fmt.Fprintln(stderr, "error: semantic_v2 metadata mismatch vs baseline:")
+			fmt.Fprintf(stderr, "  baseline: provider=%q model=%q corpus_version=%d\n", bp, bm, bcv)
+			fmt.Fprintf(stderr, "  runtime:  provider=%q model=%q corpus_version=%d\n",
+				setup.Provider, setup.Model, setup.CorpusVersion)
+			return exitRuntime
+		}
 	}
 
 	categories := []string{"prompt_injection", "jailbreak"}
@@ -234,13 +264,10 @@ func runSemanticV2(ctx context.Context, dataDir string, baseline *firewallbench.
 	result := firewallbench.Run(ctx, "semantic_v2", detector, allPos, allNeg)
 	report.Results = append(report.Results, result)
 
-	if !baseline.HasInspector("semantic_v2") {
-		report.Warnings = append(report.Warnings,
-			`no baseline for inspector "semantic_v2" — регрессия не проверяется`)
-		return exitOK
+	if baselineReady {
+		report.Regressions = append(report.Regressions,
+			baseline.CheckRegression("semantic_v2", result.Metrics)...)
 	}
-	report.Regressions = append(report.Regressions,
-		baseline.CheckRegression("semantic_v2", result.Metrics)...)
 	return exitOK
 }
 

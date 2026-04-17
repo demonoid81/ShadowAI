@@ -82,7 +82,8 @@ FIREWALL_SA_V2_THRESHOLD=0.75
 FIREWALL_SA_V2_BLOCK_THRESHOLD=0.88
 ```
 
-Baseline для `semantic_v2` **обязан** содержать metadata lock:
+Baseline для `semantic_v2` **обязан** содержать запись с полным
+metadata lock (провайдер + модель + corpus_version) **плюс** пороги:
 ```json
 "semantic_v2": {
   "provider": "ollama",
@@ -94,10 +95,17 @@ Baseline для `semantic_v2` **обязан** содержать metadata lock:
 }
 ```
 
-Если runtime provider/model/corpus_version не совпадают с baseline,
-CLI завершается **exit 1** (misconfig, не regression) с diff'ом в
-stderr. Это предотвращает сравнение метрик, снятых в разных
-embedding spaces.
+**PR-6.1.1 gate** (обязательно для CI):
+- если baseline **не содержит** `semantic_v2` entry → **exit 1**;
+- если entry есть, но отсутствует любое из `provider`/`model`/
+  `corpus_version` (или `corpus_version == 0`) → **exit 1**;
+- если runtime provider/model/corpus_version **не совпадает** с
+  baseline → **exit 1** (misconfig, не regression).
+
+Для локального bootstrap (впервые разворачиваем inspector, baseline
+entry ещё не создан) можно передать `--allow-missing-baseline` —
+он снимет только два первых случая (отсутствующая/неполная запись).
+Metadata mismatch, corrupt JSON и read-error флагом **не** снимаются.
 
 ## Separate CI slot для semantic_v2
 
