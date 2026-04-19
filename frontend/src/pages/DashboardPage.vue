@@ -15,14 +15,21 @@
       <table class="w-full text-sm">
         <thead>
           <tr class="text-left text-gray-500 border-b border-dark-700">
-            <th class="px-4 py-2">{{ $t('dashboard.email') }}</th>
+            <th class="px-4 py-2">{{ $t('dashboard.userIdShort') }}</th>
+            <th class="px-4 py-2">{{ $t('dashboard.emailMasked') }}</th>
             <th class="px-4 py-2">{{ $t('dashboard.requests') }}</th>
             <th class="px-4 py-2">{{ $t('dashboard.cost') }}</th>
           </tr>
         </thead>
         <tbody>
+          <!--
+            PR-D.1 privacy: backend отдаёт email_masked, не raw email.
+            Primary identifier — user_id (первая колонка таблицы). Для
+            полного email оператор идёт в GET /api/users/{id} (аудируется).
+          -->
           <tr v-for="u in store.topUsers" :key="u.user_id" class="border-b border-dark-800">
-            <td class="px-4 py-2">{{ u.email }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-gray-500">{{ u.user_id?.slice(0, 8) }}…</td>
+            <td class="px-4 py-2">{{ u.email_masked }}</td>
             <td class="px-4 py-2 text-gray-400">{{ u.requests }}</td>
             <td class="px-4 py-2 text-green-400">${{ u.cost?.toFixed(4) }}</td>
           </tr>
