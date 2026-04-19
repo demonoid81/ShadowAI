@@ -18,21 +18,30 @@ type Handler struct {
 	schedulerEnabled bool
 	// PR-D: admin-access audit. Nil — no-op (dev scenarios без БД).
 	adminAudit adminaudit.Recorder
+	// PR-D.1: admin-events retention config для Status endpoint.
+	adminEventsRetentionDays    int
+	adminEventsSchedulerEnabled bool
 }
 
-// NewHandler принимает также privacy-config и adminaudit.Recorder.
-// Если mode="" и retentionDays=0 — Status endpoint показывает их как
-// есть (не ошибка, оператор видит "not configured").
-//
-// schedulerEnabled — фактическое состояние embedded purge scheduler
-// (caller считает `interval>0 && retention>0`).
-func NewHandler(svc *Service, payloadMode PayloadMode, retentionDays int, schedulerEnabled bool, adminAudit adminaudit.Recorder) *Handler {
+// NewHandler принимает privacy + retention config для обоих таблиц
+// (audit_logs + admin_event_logs) и adminaudit.Recorder (PR-D/D.1).
+func NewHandler(
+	svc *Service,
+	payloadMode PayloadMode,
+	retentionDays int,
+	schedulerEnabled bool,
+	adminAudit adminaudit.Recorder,
+	adminEventsRetentionDays int,
+	adminEventsSchedulerEnabled bool,
+) *Handler {
 	return &Handler{
-		svc:              svc,
-		payloadMode:      payloadMode,
-		retentionDays:    retentionDays,
-		schedulerEnabled: schedulerEnabled,
-		adminAudit:       adminAudit,
+		svc:                         svc,
+		payloadMode:                 payloadMode,
+		retentionDays:               retentionDays,
+		schedulerEnabled:            schedulerEnabled,
+		adminAudit:                  adminAudit,
+		adminEventsRetentionDays:    adminEventsRetentionDays,
+		adminEventsSchedulerEnabled: adminEventsSchedulerEnabled,
 	}
 }
 
@@ -124,12 +133,25 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 // statusResponse — read-only view privacy/retention настроек + purge
 // history для ops dashboard'ов. Не светит secrets.
+//
+// AdminEvents — отдельный блок (PR-D.1): admin_event_logs живёт по
+// своему retention policy, scheduler может быть disabled независимо
+// от audit_logs scheduler'а.
 type statusResponse struct {
-	PayloadMode     string     `json:"payload_mode"`
-	RetentionDays   int        `json:"retention_days"`
-	LastPurgedAt    *time.Time `json:"last_purged_at,omitempty"`
-	RowsPurgedTotal int        `json:"rows_purged_total"`
-	SchedulerEnabled bool      `json:"scheduler_enabled"`
+	PayloadMode      string            `json:"payload_mode"`
+	RetentionDays    int               `json:"retention_days"`
+	LastPurgedAt     *time.Time        `json:"last_purged_at,omitempty"`
+	RowsPurgedTotal  int               `json:"rows_purged_total"`
+	SchedulerEnabled bool              `json:"scheduler_enabled"`
+	AdminEvents      adminEventsStatus `json:"admin_events"`
+}
+
+// adminEventsStatus — блок admin_event_logs (PR-D.1).
+type adminEventsStatus struct {
+	RetentionDays    int        `json:"retention_days"`
+	LastPurgedAt     *time.Time `json:"last_purged_at,omitempty"`
+	RowsPurgedTotal  int        `json:"rows_purged_total"`
+	SchedulerEnabled bool       `json:"scheduler_enabled"`
 }
 
 // Status отдаёт audit privacy config + purge history.
@@ -139,14 +161,25 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		PayloadMode:      string(h.payloadMode),
 		RetentionDays:    h.retentionDays,
 		SchedulerEnabled: h.schedulerEnabled,
+		AdminEvents: adminEventsStatus{
+			RetentionDays:    h.adminEventsRetentionDays,
+			SchedulerEnabled: h.adminEventsSchedulerEnabled,
+		},
 	}
 
 	if repo := h.svc.GetRepo(); repo != nil {
-		if last, err := repo.LastPurgeRun(r.Context()); err == nil && last != nil {
+		if last, err := repo.LastPurgeRun(r.Context(), PurgeTargetAuditLogs); err == nil && last != nil {
 			out.LastPurgedAt = last.CompletedAt
 		}
-		if total, err := repo.TotalRowsPurged(r.Context()); err == nil {
+		if total, err := repo.TotalRowsPurged(r.Context(), PurgeTargetAuditLogs); err == nil {
 			out.RowsPurgedTotal = total
+		}
+		// PR-D.1: admin_event_logs block.
+		if last, err := repo.LastPurgeRun(r.Context(), "admin_event_logs"); err == nil && last != nil {
+			out.AdminEvents.LastPurgedAt = last.CompletedAt
+		}
+		if total, err := repo.TotalRowsPurged(r.Context(), "admin_event_logs"); err == nil {
+			out.AdminEvents.RowsPurgedTotal = total
 		}
 	}
 

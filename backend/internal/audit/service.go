@@ -20,17 +20,12 @@ type Repo interface {
 	List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error)
 
 	// PR-A: retention/purge.
-	// PurgeOlderThan удаляет rows с created_at < cutoff чанками
-	// chunkSize. Возвращает total rows deleted. chunkSize <= 0 — fail.
 	PurgeOlderThan(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)
-	// RecordPurgeRun сохраняет запись о завершённом purge-run.
-	RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int) error
-	// LastPurgeRun возвращает последний завершённый purge (или nil,
-	// если ни одного ещё не было).
-	LastPurgeRun(ctx context.Context) (*domain.PurgeRun, error)
-	// TotalRowsPurged — сумма rows_deleted по всем purge-runs.
-	// Используется status endpoint'ом. Никогда не отрицательное.
-	TotalRowsPurged(ctx context.Context) (int, error)
+	// PR-D.1: target parameter разделяет purge-runs по таблицам
+	// (audit_logs vs admin_event_logs). target="" → audit_logs (BC).
+	RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error
+	LastPurgeRun(ctx context.Context, target string) (*domain.PurgeRun, error)
+	TotalRowsPurged(ctx context.Context, target string) (int, error)
 }
 
 type Service struct {

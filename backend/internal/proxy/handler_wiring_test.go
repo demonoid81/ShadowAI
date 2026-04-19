@@ -62,13 +62,13 @@ func (c *captureAuditRepo) snapshot() []*domain.AuditLog {
 func (c *captureAuditRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (int, error) {
 	return 0, nil
 }
-func (c *captureAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int) error {
+func (c *captureAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
 	return nil
 }
-func (c *captureAuditRepo) LastPurgeRun(_ context.Context) (*domain.PurgeRun, error) {
+func (c *captureAuditRepo) LastPurgeRun(_ context.Context, _ string) (*domain.PurgeRun, error) {
 	return nil, nil
 }
-func (c *captureAuditRepo) TotalRowsPurged(_ context.Context) (int, error) {
+func (c *captureAuditRepo) TotalRowsPurged(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
 

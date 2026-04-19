@@ -59,6 +59,10 @@ type Config struct {
 	AuditAllowFullInProd        bool
 	AuditAllowNoRetentionInProd bool
 
+	// PR-D.1: отдельное retention для admin_event_logs. Admin events
+	// обычно нужно хранить дольше user traffic (compliance). 0 = no-purge.
+	AdminAuditRetentionDays int
+
 	// Firewall
 	FirewallEnabled              bool
 	FirewallPIEnabled            bool
@@ -149,6 +153,8 @@ func Load() *Config {
 		AuditPurgeChunkSize:         getEnvInt("AUDIT_PURGE_CHUNK_SIZE", 1000),
 		AuditAllowFullInProd:        getEnv("AUDIT_ALLOW_FULL_IN_PROD", "false") == "true",
 		AuditAllowNoRetentionInProd: getEnv("AUDIT_ALLOW_NO_RETENTION_IN_PROD", "false") == "true",
+		// PR-D.1
+		AdminAuditRetentionDays: getEnvInt("ADMIN_AUDIT_RETENTION_DAYS", 0),
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",

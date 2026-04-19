@@ -281,7 +281,8 @@ func main() {
 	// (cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0). Без
 	// этой согласованности /audit/status врал бы оператору.
 	auditSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0
-	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled, adminAuditSvc)
+	adminEventsSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0
+	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled, adminAuditSvc, cfg.AdminAuditRetentionDays, adminEventsSchedulerEnabled)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db, adminAuditSvc)
@@ -346,7 +347,7 @@ func main() {
 					})
 					return
 				}
-				if err := repo.RecordPurgeRun(ctx, cutoff, deleted); err != nil {
+				if err := repo.RecordPurgeRun(ctx, cutoff, deleted, audit.PurgeTargetAuditLogs); err != nil {
 					log.Printf("audit-purge scheduler: record run failed: %v", err)
 				}
 				log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
@@ -363,6 +364,56 @@ func main() {
 				select {
 				case <-ticker.C:
 					purge()
+				case <-connectivityCtx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// PR-D.1: scheduler для admin_event_logs. Отдельная retention
+	// (compliance-aware: admin events обычно хранятся дольше).
+	if cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0 {
+		go func() {
+			log.Printf("admin-events purge scheduler: interval=%s retention=%d days chunk=%d",
+				cfg.AuditPurgeInterval, cfg.AdminAuditRetentionDays, cfg.AuditPurgeChunkSize)
+			ticker := time.NewTicker(cfg.AuditPurgeInterval)
+			defer ticker.Stop()
+			auditRepoHandle := auditSvc.GetRepo()
+			purgeAdmin := func() {
+				cutoff := time.Now().UTC().Add(-time.Duration(cfg.AdminAuditRetentionDays) * 24 * time.Hour)
+				ctx, cancel := context.WithTimeout(connectivityCtx, 30*time.Minute)
+				defer cancel()
+				deleted, err := adminAuditRepo.PurgeOlderThan(ctx, cutoff, cfg.AuditPurgeChunkSize)
+				if err != nil {
+					log.Printf("admin-events purge scheduler: err: %v", err)
+					adminAuditSvc.Record(ctx, adminaudit.Event{
+						ActorUserID: nil, Action: "purge", Resource: adminaudit.PurgeTarget,
+						Path: "scheduler", Method: "INTERNAL", Success: false,
+						Metadata: map[string]any{
+							"mode": "scheduler", "target": adminaudit.PurgeTarget,
+							"cutoff": cutoff.Format(time.RFC3339), "error": err.Error(),
+						},
+					})
+					return
+				}
+				if err := auditRepoHandle.RecordPurgeRun(ctx, cutoff, deleted, adminaudit.PurgeTarget); err != nil {
+					log.Printf("admin-events purge scheduler: record run failed: %v", err)
+				}
+				log.Printf("admin-events purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
+				adminAuditSvc.Record(ctx, adminaudit.Event{
+					ActorUserID: nil, Action: "purge", Resource: adminaudit.PurgeTarget,
+					Path: "scheduler", Method: "INTERNAL", Success: true,
+					Metadata: map[string]any{
+						"mode": "scheduler", "target": adminaudit.PurgeTarget,
+						"cutoff": cutoff.Format(time.RFC3339), "rows_deleted": deleted,
+					},
+				})
+			}
+			for {
+				select {
+				case <-ticker.C:
+					purgeAdmin()
 				case <-connectivityCtx.Done():
 					return
 				}

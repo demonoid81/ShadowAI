@@ -48,6 +48,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		dryRun        = fs.Bool("dry-run", false, "count what would be deleted but do not modify rows")
 		chunkSize     = fs.Int("chunk-size", 1000, "batch size for chunked DELETE (protects against long locks)")
 		dbURL         = fs.String("database-url", "", "override DATABASE_URL env")
+		target        = fs.String("target", "audit_logs", "purge target: audit_logs | admin_event_logs (PR-D.1)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return exitRuntime
@@ -60,6 +61,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *chunkSize <= 0 {
 		fmt.Fprintln(stderr, "error: --chunk-size must be > 0")
+		return exitRuntime
+	}
+	switch *target {
+	case audit.PurgeTargetAuditLogs, adminaudit.PurgeTarget:
+		// OK
+	default:
+		fmt.Fprintf(stderr, "error: invalid --target %q (want audit_logs|admin_event_logs)\n", *target)
 		return exitRuntime
 	}
 
@@ -83,17 +91,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	cutoff := time.Now().UTC().Add(-time.Duration(*retentionDays) * 24 * time.Hour)
-	fmt.Fprintf(stdout, "audit-purge: cutoff=%s (retention=%d days), chunk_size=%d, dry_run=%v\n",
-		cutoff.Format(time.RFC3339), *retentionDays, *chunkSize, *dryRun)
+	fmt.Fprintf(stdout, "audit-purge: target=%s cutoff=%s (retention=%d days), chunk_size=%d, dry_run=%v\n",
+		*target, cutoff.Format(time.RFC3339), *retentionDays, *chunkSize, *dryRun)
 
-	repo := audit.NewRepository(db)
+	auditRepo := audit.NewRepository(db)
 
 	if *dryRun {
 		// Dry-run: COUNT через прямой SELECT. PurgeOlderThan не вызываем,
 		// чтобы не модифицировать строки.
+		table := "audit_logs"
+		if *target == adminaudit.PurgeTarget {
+			table = "admin_event_logs"
+		}
 		var n int
+		//nolint:gosec // table name из whitelist, не user input.
 		if err := db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM audit_logs WHERE created_at < $1`, cutoff).Scan(&n); err != nil {
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE created_at < $1`, table),
+			cutoff).Scan(&n); err != nil {
 			fmt.Fprintf(stderr, "error: count: %v\n", err)
 			return exitRuntime
 		}
@@ -101,26 +115,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	deleted, err := repo.PurgeOlderThan(ctx, cutoff, *chunkSize)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: purge: %v\n", err)
-		// PR-D: admin-event даже на fail (оператор видит попытку).
-		recordPurgeAdminEvent(ctx, db, cutoff, 0, "cli", err.Error())
+	var deleted int
+	var purgeErr error
+	if *target == adminaudit.PurgeTarget {
+		deleted, purgeErr = adminaudit.NewRepository(db).PurgeOlderThan(ctx, cutoff, *chunkSize)
+	} else {
+		deleted, purgeErr = auditRepo.PurgeOlderThan(ctx, cutoff, *chunkSize)
+	}
+	if purgeErr != nil {
+		fmt.Fprintf(stderr, "error: purge: %v\n", purgeErr)
+		recordPurgeAdminEvent(ctx, db, cutoff, 0, "cli", *target, purgeErr.Error())
 		return exitRuntime
 	}
-	if err := repo.RecordPurgeRun(ctx, cutoff, deleted); err != nil {
-		// Purge уже выполнен — не отменяем, но сообщаем оператору.
+	if err := auditRepo.RecordPurgeRun(ctx, cutoff, deleted, *target); err != nil {
 		fmt.Fprintf(stderr, "warning: purge succeeded (%d rows deleted) but failed to record run: %v\n", deleted, err)
 	}
-	recordPurgeAdminEvent(ctx, db, cutoff, deleted, "cli", "")
+	recordPurgeAdminEvent(ctx, db, cutoff, deleted, "cli", *target, "")
 	fmt.Fprintf(stdout, "deleted %d rows\n", deleted)
 	return exitOK
 }
 
 // recordPurgeAdminEvent — PR-D: логирует успешный/неудачный purge в
 // admin_event_logs. actor_user_id = NULL (системная CLI-операция).
-// Метаданные включают mode=cli|scheduler и cutoff RFC3339.
-func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, rowsDeleted int, mode, errMsg string) {
+// Метаданные включают mode=cli|scheduler, cutoff RFC3339, target.
+func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, rowsDeleted int, mode, target, errMsg string) {
 	repo := adminaudit.NewRepository(db)
 	svc := adminaudit.NewService(repo)
 	success := errMsg == ""
@@ -128,6 +146,7 @@ func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, ro
 		"mode":         mode,
 		"cutoff":       cutoff.Format(time.RFC3339),
 		"rows_deleted": rowsDeleted,
+		"target":       target,
 	}
 	if !success {
 		metadata["error"] = errMsg
@@ -135,7 +154,7 @@ func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, ro
 	svc.Record(ctx, adminaudit.Event{
 		ActorUserID: nil,
 		Action:      "purge",
-		Resource:    "audit_logs",
+		Resource:    target,
 		Path:        "cmd/audit-purge",
 		Method:      "CLI",
 		StatusCode:  0,

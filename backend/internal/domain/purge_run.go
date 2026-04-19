@@ -14,4 +14,7 @@ type PurgeRun struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	Cutoff      time.Time  `json:"cutoff"`
 	RowsDeleted int        `json:"rows_deleted"`
+	// Target — имя таблицы purge-ится ("audit_logs" | "admin_event_logs").
+	// Default "audit_logs" для backward compat с rows созданными до PR-D.1.
+	Target string `json:"target,omitempty"`
 }

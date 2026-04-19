@@ -5,10 +5,35 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/auth"
 )
+
+// maskEmail — PR-D.1 privacy hardening. Screens admin UI/screenshots
+// от утечки полного email. Сохраняет domain (для recognition) и
+// первые 2 символа local part.
+//
+//	john.doe@example.com  → jo***@example.com
+//	a@example.com         → *@example.com
+//	""                     → ""
+//	no-@-sign              → *** (маркер: не-email)
+func maskEmail(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at <= 0 {
+		if email == "" {
+			return ""
+		}
+		return "***"
+	}
+	local := email[:at]
+	domain := email[at:]
+	if len(local) <= 2 {
+		return "*" + domain
+	}
+	return local[:2] + "***" + domain
+}
 
 type Handler struct {
 	db         *sql.DB
@@ -113,11 +138,15 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TopUser — строка в /dashboard/top-users. PR-D.1: Email теперь
+// masked — скриншоты админки не должны раскрывать PII клиентов.
+// Primary identifier для lookup/UI — UserID. Полный email оператор
+// получает через GET /api/users/{id} (аудируется в admin_event_logs).
 type TopUser struct {
-	UserID   string  `json:"user_id"`
-	Email    string  `json:"email"`
-	Requests int     `json:"requests"`
-	Cost     float64 `json:"cost"`
+	UserID      string  `json:"user_id"`
+	EmailMasked string  `json:"email_masked"`
+	Requests    int     `json:"requests"`
+	Cost        float64 `json:"cost"`
 }
 
 func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
@@ -133,10 +162,12 @@ func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
 	var users []TopUser
 	for rows.Next() {
 		var u TopUser
-		if err := rows.Scan(&u.UserID, &u.Email, &u.Requests, &u.Cost); err != nil {
+		var rawEmail string
+		if err := rows.Scan(&u.UserID, &rawEmail, &u.Requests, &u.Cost); err != nil {
 			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 			return
 		}
+		u.EmailMasked = maskEmail(rawEmail)
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {

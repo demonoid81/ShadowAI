@@ -49,13 +49,13 @@ func (r *recordingRepo) List(_ context.Context, limit, offset int, userID, model
 func (r *recordingRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (int, error) {
 	return 0, nil
 }
-func (r *recordingRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int) error {
+func (r *recordingRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
 	return nil
 }
-func (r *recordingRepo) LastPurgeRun(_ context.Context) (*domain.PurgeRun, error) {
+func (r *recordingRepo) LastPurgeRun(_ context.Context, _ string) (*domain.PurgeRun, error) {
 	return nil, nil
 }
-func (r *recordingRepo) TotalRowsPurged(_ context.Context) (int, error) {
+func (r *recordingRepo) TotalRowsPurged(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
 
@@ -80,7 +80,7 @@ func TestAuditHandler_HasShadow_Whitelist(t *testing.T) {
 	for _, tc := range cases {
 		repo := &recordingRepo{}
 		svc := &Service{repo: repo}
-		h := NewHandler(svc, PayloadModeRedacted, 30, true, nil)
+		h := NewHandler(svc, PayloadModeRedacted, 30, true, nil, 0, false)
 
 		req := httptest.NewRequest("GET", "/audit/logs?has_shadow="+tc.query, nil)
 		rec := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestAuditHandler_HasShadow_Whitelist(t *testing.T) {
 func TestAuditHandler_Status_ExposesConfig(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
-	h := NewHandler(svc, PayloadModeRedacted, 30, true, nil)
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, nil, 0, false)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	rec := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestAuditHandler_List_RecordsAdminEvent(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
 	rec := &captureRecorder{}
-	h := NewHandler(svc, PayloadModeRedacted, 30, true, rec)
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, rec, 0, false)
 
 	req := httptest.NewRequest("GET", "/audit/logs?limit=10&policy_action=blocked", nil)
 	w := httptest.NewRecorder()
@@ -166,7 +166,7 @@ func TestAuditHandler_Status_RecordsAdminEvent(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
 	rec := &captureRecorder{}
-	h := NewHandler(svc, PayloadModeRedacted, 30, true, rec)
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, rec, 0, false)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	w := httptest.NewRecorder()
@@ -185,7 +185,7 @@ func TestAuditHandler_Status_SchedulerDisabled_WithRetention(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
 	// retention=30, но schedulerEnabled=false (interval=0 в main.go).
-	h := NewHandler(svc, PayloadModeRedacted, 30, false, nil)
+	h := NewHandler(svc, PayloadModeRedacted, 30, false, nil, 0, false)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	rec := httptest.NewRecorder()
@@ -206,7 +206,7 @@ func TestAuditHandler_Status_SchedulerDisabled_WithRetention(t *testing.T) {
 func TestAuditHandler_Status_NoPIILeak(t *testing.T) {
 	repo := &recordingRepo{}
 	svc := &Service{repo: repo}
-	h := NewHandler(svc, PayloadModeFull, 90, false, nil)
+	h := NewHandler(svc, PayloadModeFull, 90, false, nil, 0, false)
 
 	req := httptest.NewRequest("GET", "/audit/status", nil)
 	rec := httptest.NewRecorder()
@@ -229,7 +229,7 @@ func TestAuditHandler_HasShadow_ReachesRepo_EndToEnd(t *testing.T) {
 		},
 	}
 	svc := &Service{repo: repo}
-	h := NewHandler(svc, PayloadModeRedacted, 30, true, nil)
+	h := NewHandler(svc, PayloadModeRedacted, 30, true, nil, 0, false)
 
 	req := httptest.NewRequest("GET", "/audit/logs?has_shadow=yes", nil)
 	rec := httptest.NewRecorder()

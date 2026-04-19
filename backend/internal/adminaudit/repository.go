@@ -12,9 +12,47 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/shadowai/backend/internal/domain"
 )
+
+// PurgeTarget — значение для audit_purge_runs.target при purge
+// admin_event_logs. Используется CLI и scheduler'ом.
+const PurgeTarget = "admin_event_logs"
+
+// PurgeOlderThan удаляет admin_event_logs-rows с created_at < cutoff
+// в чанках (защита от lock'ов). Аналогично audit.Repository.PurgeOlderThan,
+// но для admin-events-таблицы.
+func (r *Repository) PurgeOlderThan(ctx context.Context, cutoff time.Time, chunkSize int) (int, error) {
+	if chunkSize <= 0 {
+		return 0, fmt.Errorf("admin purge: chunkSize must be > 0, got %d", chunkSize)
+	}
+	total := 0
+	for {
+		res, err := r.db.ExecContext(ctx,
+			`DELETE FROM admin_event_logs WHERE id IN (
+				SELECT id FROM admin_event_logs WHERE created_at < $1 LIMIT $2
+			)`, cutoff, chunkSize)
+		if err != nil {
+			return total, fmt.Errorf("admin purge exec: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("admin purge RowsAffected: %w", err)
+		}
+		total += int(n)
+		if n < int64(chunkSize) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		default:
+		}
+	}
+	return total, nil
+}
 
 type Repository struct {
 	db *sql.DB
