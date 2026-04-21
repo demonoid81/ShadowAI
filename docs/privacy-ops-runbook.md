@@ -491,10 +491,13 @@ external tooling.
 
 ### 8.5 Access audit для user reads
 
-- **[gap]** GET `/api/users/{id}` (полный user object с email) пока
-  НЕ пишется в `admin_event_logs`. Это prerequisite для "read-trail
-  at PII granularity".
-- **[planned]** обернуть `authHandler.GetUser` вызовом `recordAdminRead`.
+- **[implemented]** GET `/api/users/{id}` → запись в `admin_event_logs`
+  (resource=`user`, action=`read`, target_id=`{id}`). Metadata
+  включает `target_role`; email НЕ дублируется (сам endpoint
+  возвращает email — запись о доступе достаточна для forensics).
+  Реализовано в `authHandler.recordUserRead` (PR-G0).
+- **[gap]** `ListUsers` (GET `/api/users`) и `UpdateUser`
+  (PUT `/api/users/{id}`) пока НЕ покрыты — см. PR-G0.1/G0.2 roadmap.
 
 ### 8.6 4-eyes policy для destructive ops
 
@@ -534,6 +537,9 @@ external tooling.
 
 ## 9. Change log
 
+- **1.1 (2026-04-21)** — PR-G0: §8.5 user-read access audit переведён
+  в `[implemented]` для GET `/api/users/{id}`. ListUsers/UpdateUser
+  остаются `[gap]` (PR-G0.1/G0.2).
 - **1.0 (2026-04-19)** — начальная версия, покрывает PR-A/B/C/D/D.1.
   Известные gaps §8 явно перечислены.
 

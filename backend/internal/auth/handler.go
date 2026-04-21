@@ -156,10 +156,47 @@ func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	user, err := h.service.GetRepo().GetByID(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "user not found"})
+		h.recordUserRead(r, id, http.StatusNotFound, false, map[string]any{
+			"error": "user not found",
+		})
 		return
 	}
 	user.APIKey = ""
 	writeJSON(w, http.StatusOK, user)
+	// PR-G0: GetUser returns full user object (email, role, timestamps).
+	// Admin access к прямой PII аудируется для forensics/SOC 2.
+	// Metadata НЕ содержит email (сам email — PII; admin_event_logs
+	// не должен дублировать его). target_id + target_role достаточно
+	// для "кто когда читал role=admin".
+	h.recordUserRead(r, id, http.StatusOK, true, map[string]any{
+		"target_role": user.Role,
+	})
+}
+
+// recordUserRead — PR-G0: admin read GET /api/users/{id} → admin_event_logs.
+// Nil-safe через recorder-check; не влияет на response latency существенно
+// (один Insert). При failure logger в adminaudit.Service молча проглотит —
+// admin audit не должен ломать primary endpoint (fail-open для availability).
+func (h *Handler) recordUserRead(r *http.Request, targetID string, status int, success bool, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if claims := GetClaims(r.Context()); claims != nil {
+		id := claims.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "read",
+		Resource:    "user",
+		TargetID:    targetID,
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  status,
+		Success:     success,
+		Metadata:    metadata,
+	})
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
