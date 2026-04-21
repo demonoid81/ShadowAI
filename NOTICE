@@ -1,0 +1,31 @@
+ShadowAI Core
+Copyright 2026 ShadowAI Contributors
+
+This product includes software developed by the ShadowAI project
+(https://github.com/demonoid81/ShadowAI).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+see LICENSE file for terms.
+
+---
+
+ShadowAI is a dual-project with two lines:
+
+- **ShadowAI Core** (this repository) — Apache License 2.0.
+  Includes: proxy, firewall engine, inspectors (including semantic_v2),
+  benchmark harness, basic policy engine, basic auth, basic dashboard.
+
+- **ShadowAI Enterprise** (separate, non-public repository) —
+  proprietary commercial license. Includes: privacy/audit hardening
+  (AUDIT_PAYLOAD_MODE, retention, DSAR, admin_event_logs, user-read
+  access audit, dashboard masking), provider/model governance, SIEM
+  integration, SSO/SCIM, legal hold, tenant isolation, compliance
+  control mappings, and premium support.
+
+See TRADEMARK.md for the ShadowAI trademark and branding policy.
+
+---
+
+Third-party software notices are preserved in vendored dependencies'
+own LICENSE / NOTICE files. See backend/go.sum, frontend/package-lock.json,
+and the Go module cache for full third-party license inventory.
