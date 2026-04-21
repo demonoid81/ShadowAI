@@ -2,6 +2,9 @@
 
 AI Control Plane и LLM Firewall — единый reverse-proxy для LLM API с многоуровневой защитой, политиками, аудитом и бюджетированием.
 
+> **ShadowAI Core** (этот репозиторий) распространяется под [Apache License 2.0](LICENSE).
+> Enterprise-функции (privacy hardening, DSAR, admin access audit, provider/model governance, SSO/SCIM, SIEM integration, tenant isolation) поставляются отдельно как **ShadowAI Enterprise** под проприетарной commercial лицензией — см. [NOTICE](NOTICE) и раздел [License & Licensing](#license--licensing) в конце.
+
 ---
 
 ## Оглавление
@@ -816,3 +819,44 @@ docker compose up -d --build backend
 - Post-call аудит бюджета: после получения ответа проверяется фактический расход; при превышении лимита — HTTP 402.
 - Внутренние источники БД перезагружаются фоново по `INTERNAL_DB_REFRESH_INTERVAL`.
 - Graceful shutdown по SIGINT/SIGTERM с 10-секундным таймаутом.
+
+---
+
+## License & Licensing
+
+ShadowAI распространяется как **dual-project**:
+
+- **ShadowAI Core** — этот репозиторий, лицензия [Apache License 2.0](LICENSE).
+  Включает: proxy, firewall engine, все 10 инспекторов (включая semantic_v2),
+  benchmark harness, basic policy engine, Prometheus metrics, basic auth/JWT,
+  basic dashboard.
+- **ShadowAI Enterprise** — отдельный приватный репозиторий под проприетарной
+  commercial self-host лицензией (MSA + Order Form + EULA).
+  Включает: `AUDIT_PAYLOAD_MODE` / retention / purge, DSAR erasure,
+  `admin_event_logs` + retention, user-read access audit, dashboard masking,
+  Provider/Model Governance, SIEM integration, SSO/SCIM, legal hold,
+  tenant isolation, compliance control mappings (SOC 2 / ISO 27001 /
+  ISO 42001 / EU AI Act), premium support SLA.
+
+Для обсуждения коммерческой лицензии — открыть issue с тегом `[commercial]`
+либо связаться с maintainer'ом напрямую.
+
+### Трейдмарк
+
+Использование имени «**ShadowAI**» и ShadowAI-логотипа регулируется
+[TRADEMARK.md](TRADEMARK.md). Apache 2.0 **не** передаёт права на
+трейдмарк (см. Section 6 Apache License).
+
+Короткая версия:
+- Форк разрешён, но назовите его иначе (например, `AcmeGuard — fork of ShadowAI`).
+- Предоставление managed-hosted-service под именем «ShadowAI» требует
+  отдельного письменного соглашения.
+
+### Контрибуция
+
+Вклад в Core принимается через **DCO sign-off** (`git commit -s`).
+Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md). CLA не требуется.
+
+Enterprise-функции не принимают pull request'ы в этом репозитории;
+если у вас есть идея enterprise-фичи — откройте issue для обсуждения
+scope и она может попасть в roadmap enterprise-репо.
