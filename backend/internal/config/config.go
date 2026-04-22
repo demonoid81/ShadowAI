@@ -72,6 +72,10 @@ type Config struct {
 	SIEMTimeout            time.Duration // SIEM_TIMEOUT (default 3s)
 	SIEMBearerToken        string        // SIEM_BEARER_TOKEN (optional)
 	SIEMInsecureSkipVerify bool          // SIEM_INSECURE_SKIP_VERIFY (dev only)
+	// PR-S1.1: prod-guard override. InsecureSkipVerify=true в prod
+	// требует явного SIEM_ALLOW_INSECURE_IN_PROD=true. Без override —
+	// ValidateStartupConfig отвергает конфиг.
+	SIEMAllowInsecureInProd bool // SIEM_ALLOW_INSECURE_IN_PROD
 
 	// Firewall
 	FirewallEnabled              bool
@@ -167,11 +171,12 @@ func Load() *Config {
 		AdminAuditRetentionDays: getEnvInt("ADMIN_AUDIT_RETENTION_DAYS", 0),
 
 		// PR-S1: SIEM mirror.
-		SIEMEnabled:            getEnv("SIEM_ENABLED", "false") == "true",
-		SIEMEndpoint:           getEnv("SIEM_ENDPOINT", ""),
-		SIEMTimeout:            getDuration("SIEM_TIMEOUT", 3*time.Second),
-		SIEMBearerToken:        getEnv("SIEM_BEARER_TOKEN", ""),
-		SIEMInsecureSkipVerify: getEnv("SIEM_INSECURE_SKIP_VERIFY", "false") == "true",
+		SIEMEnabled:             getEnv("SIEM_ENABLED", "false") == "true",
+		SIEMEndpoint:            getEnv("SIEM_ENDPOINT", ""),
+		SIEMTimeout:             getDuration("SIEM_TIMEOUT", 3*time.Second),
+		SIEMBearerToken:         getEnv("SIEM_BEARER_TOKEN", ""),
+		SIEMInsecureSkipVerify:  getEnv("SIEM_INSECURE_SKIP_VERIFY", "false") == "true",
+		SIEMAllowInsecureInProd: getEnv("SIEM_ALLOW_INSECURE_IN_PROD", "false") == "true",
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",
@@ -254,6 +259,24 @@ func (c *Config) ValidateStartupConfig() error {
 	}
 	if c.AuditRetentionDays == 0 && !c.AuditAllowNoRetentionInProd {
 		errs = append(errs, "AUDIT_RETENTION_DAYS=0 requires AUDIT_ALLOW_NO_RETENTION_IN_PROD=true in prod")
+	}
+
+	// PR-S1.1: SIEM prod guards.
+	// (1) SIEM_ENABLED=true без endpoint — молчаливо off (misleading).
+	// (2) Non-HTTPS endpoint — evidence stream должен быть in-transit
+	//     encrypted. Запрещено в prod.
+	// (3) InsecureSkipVerify=true — отключает TLS-verify; в prod
+	//     допустимо только через explicit override.
+	if c.SIEMEnabled {
+		endpoint := strings.TrimSpace(c.SIEMEndpoint)
+		if endpoint == "" {
+			errs = append(errs, "SIEM_ENABLED=true requires SIEM_ENDPOINT in prod (empty endpoint hides mirror failure)")
+		} else if !strings.HasPrefix(strings.ToLower(endpoint), "https://") {
+			errs = append(errs, "SIEM_ENDPOINT must use https:// in prod (evidence stream requires in-transit encryption)")
+		}
+		if c.SIEMInsecureSkipVerify && !c.SIEMAllowInsecureInProd {
+			errs = append(errs, "SIEM_INSECURE_SKIP_VERIFY=true requires SIEM_ALLOW_INSECURE_IN_PROD=true in prod (TLS verify bypass)")
+		}
 	}
 
 	if len(errs) == 0 {

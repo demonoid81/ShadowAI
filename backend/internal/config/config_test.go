@@ -384,6 +384,125 @@ func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
 	}
 }
 
+// prodConfigBase — минимальный prod-safe конфиг, чтобы PR-S1.1
+// тесты могли проверять только SIEM-поведение без срабатывания
+// других правил (JWT / DB / AUDIT).
+func prodConfigBase() *Config {
+	return &Config{
+		AppEnv:             "production",
+		DatabaseURL:        "postgres://u:p@db.internal:5432/db?sslmode=require",
+		RedisURL:           "redis://redis.internal:6379/0",
+		JWTSecret:          "super-secret-key-for-production-12345",
+		AuditPayloadMode:   "redacted",
+		AuditRetentionDays: 30,
+	}
+}
+
+// TestValidateStartupConfig_SIEMEnabledEmptyEndpoint — PR-S1.1 guard.
+// SIEM_ENABLED=true без endpoint — это misleading config: operator
+// думает что mirror работает, но ничего не отправляется.
+func TestValidateStartupConfig_SIEMEnabledEmptyEndpoint(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SIEMEnabled = true
+	cfg.SIEMEndpoint = ""
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "SIEM_ENDPOINT") {
+		t.Fatalf("expected SIEM_ENDPOINT error, got %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SIEMNonHTTPSEndpoint — PR-S1.1 guard.
+// Evidence stream требует in-transit encryption. http:// в prod
+// отклоняется.
+func TestValidateStartupConfig_SIEMNonHTTPSEndpoint(t *testing.T) {
+	cases := []string{
+		"http://siem.example.com/ingest",
+		"ftp://siem.example.com/ingest",
+		"siem.example.com/ingest", // без схемы
+	}
+	for _, endpoint := range cases {
+		t.Run(endpoint, func(t *testing.T) {
+			cfg := prodConfigBase()
+			cfg.SIEMEnabled = true
+			cfg.SIEMEndpoint = endpoint
+			err := cfg.ValidateStartupConfig()
+			if err == nil || !strings.Contains(err.Error(), "https://") {
+				t.Fatalf("expected https-requirement error for %q, got %v", endpoint, err)
+			}
+		})
+	}
+}
+
+// TestValidateStartupConfig_SIEMInsecureSkipVerifyWithoutOverride —
+// PR-S1.1 guard. TLS-verify bypass в prod требует explicit
+// SIEM_ALLOW_INSECURE_IN_PROD=true.
+func TestValidateStartupConfig_SIEMInsecureSkipVerifyWithoutOverride(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SIEMEnabled = true
+	cfg.SIEMEndpoint = "https://siem.example.com/ingest"
+	cfg.SIEMInsecureSkipVerify = true
+	// SIEMAllowInsecureInProd — false (дефолт)
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "SIEM_ALLOW_INSECURE_IN_PROD") {
+		t.Fatalf("expected override-required error, got %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SIEMInsecureSkipVerifyWithOverride —
+// explicit override принимается. Redundant в нормальной prod
+// (зачем self-signed cert?), но доступно для legitimate случаев
+// (internal CA, которая не в trust-store контейнера).
+func TestValidateStartupConfig_SIEMInsecureSkipVerifyWithOverride(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SIEMEnabled = true
+	cfg.SIEMEndpoint = "https://siem.internal/ingest"
+	cfg.SIEMInsecureSkipVerify = true
+	cfg.SIEMAllowInsecureInProd = true
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("ValidateStartupConfig() with explicit override unexpected error: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SIEMHappyProdConfig — полностью
+// корректный prod SIEM-сетап.
+func TestValidateStartupConfig_SIEMHappyProdConfig(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SIEMEnabled = true
+	cfg.SIEMEndpoint = "https://siem.example.com/ingest"
+	cfg.SIEMBearerToken = "splunk-hec-xxx"
+	// InsecureSkipVerify=false (дефолт), без override.
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("unexpected error for safe prod config: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SIEMDisabledIgnoresEndpoint — когда
+// SIEM off, endpoint-валидация не применяется (operator может
+// оставить dev-endpoint в env без поломки prod startup).
+func TestValidateStartupConfig_SIEMDisabledIgnoresEndpoint(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SIEMEnabled = false
+	cfg.SIEMEndpoint = "http://leftover-dev-endpoint.local" // non-https, но SIEM off
+	cfg.SIEMInsecureSkipVerify = true                       // тоже игнорируется
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("expected no error when SIEM_ENABLED=false: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SIEMDevAllowsAnything — не-prod env
+// принимает любой SIEM-конфиг, как и другие AUDIT_ALLOW_* guard'ы.
+func TestValidateStartupConfig_SIEMDevAllowsAnything(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                 "development",
+		SIEMEnabled:            true,
+		SIEMEndpoint:           "http://localhost:8088/ingest", // non-https OK в dev
+		SIEMInsecureSkipVerify: true,                            // OK в dev
+	}
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("dev env ValidateStartupConfig() error: %v", err)
+	}
+}
+
 func TestValidateStartupConfig_ProdRejectsLoopbackHosts(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -495,6 +495,18 @@ external tooling.
   `backend/internal/siem/` (PR-S1). Metrics:
   `shadowai_siem_requests_total`, `_fail_total`, `_timeout_total`,
   `_latency_seconds`.
+- **[implemented]** Prod startup-guards (PR-S1.1): `ValidateStartupConfig`
+  отвергает небезопасные SIEM-конфигурации в prod:
+  - `SIEM_ENABLED=true` с пустым `SIEM_ENDPOINT` — rejected
+    (misleading: operator думает что mirror работает, но ничего
+    не отправляется);
+  - `SIEM_ENDPOINT` без схемы `https://` — rejected (evidence
+    stream требует in-transit encryption);
+  - `SIEM_INSECURE_SKIP_VERIFY=true` без explicit
+    `SIEM_ALLOW_INSECURE_IN_PROD=true` — rejected (TLS bypass
+    допустим только при осознанном override: internal CA, kill-switch
+    во время incident).
+  Dev/staging env игнорирует эти правила (`IsProduction()` → false).
 - **[planned]** full WORM-storage (primary storage is external
   append-only, а не PG) — v2+ ask; требует external-first write
   architecture.
@@ -561,6 +573,10 @@ external tooling.
 
 ## 9. Change log
 
+- **1.5 (2026-04-22)** — PR-S1.1: §8.4 дополнен prod-guards для SIEM:
+  empty endpoint / non-https / `InsecureSkipVerify` без override —
+  rejected в `ValidateStartupConfig`. Защита от misconfigured
+  mirror в prod.
 - **1.4 (2026-04-22)** — PR-S1: §8.4 дополнен SIEM mirror для
   `admin_event_logs` через HTTP (fail-open). Закрывает основной
   ask для external tamper-resistant log pipeline. WORM primary
