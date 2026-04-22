@@ -298,6 +298,53 @@ Stage 1 дефолт — **tee в bounded buffer + parse на close**,
 PR-F5 (`parseStreamingUsage` API, метрика
 `metrics.RecordStreamUsageParseFail`) без изменений.
 
+### 8.6 Outbound re-encoding contract
+
+После inspection decision decoded normalized event должен быть
+упакован обратно в **provider-compatible wire format** для клиента.
+Эту сторону выполняет per-provider **downstream emitter**
+(симметричный decoder'у из §8.2). Контракт:
+
+- **Allow path** — **bytes-identity preservation**: если событие не
+  модифицируется inspection pipeline'ом, emitter обязан переслать
+  исходные bytes frame'а без реенкодинга. Это не optimization, а
+  safety: re-encoding может ломать незнакомые поля (provider-specific
+  fields, кастомные event names), которые decoder сознательно
+  игнорирует по §8.2 ("конвертировать без потерь, unknown →
+  `unknown_chunk`"). Идентичность байт → отсутствие классов багов
+  "клиент видит чуть-чуть не то, что прислал провайдер".
+- **Sanitize path** — **provider-specific re-encoding**: emitter
+  получает модифицированный `delta_text` и формирует валидный frame
+  в том же wire format, что прислал provider. Для SSE: `data: {...}\n\n`
+  с сохранением event name, если он был. Для NDJSON: одна строка JSON
+  с `\n`. Contract:
+  - sanitize НЕ меняет event name, `id`, `retry` и прочие служебные
+    поля — только те JSON-path'ы внутри `data:`, которые содержат
+    санитизируемый текст;
+  - JSON-поля, не относящиеся к тексту (tool_calls, function_call,
+    logprobs, provider metadata), **пропускаются as-is**;
+  - если inspector хочет модифицировать не-текстовые поля → Stage 1
+    это **не поддержано**, promote в `buffered_fallback`.
+- **Block path** — emitter **не формирует** финальный content frame.
+  Вместо этого пишется terminal error frame (для SSE —
+  `event: error\ndata: {"error":"..."}\n\n` + connection close; для
+  NDJSON — одна строка JSON с error payload + close). См. также §12
+  и Open Question §17.3.
+- **Unknown / provider_error events** — emitter передаёт исходные
+  bytes как есть (identity path), чтобы клиент увидел то же, что
+  пришло от провайдера.
+
+**Параллельный контракт с `parseStreamingUsage`** — usage frames
+идут через emitter **немодифицированными**, даже если inspection
+pipeline сработал на соседнем `delta_text`. Accounting side-channel
+не должен быть затронут sanitize/block действиями на текстовом
+канале.
+
+Provider adapter в PR-F7.1 обязан поставлять **оба** направления
+(decoder + emitter) как парный интерфейс и иметь round-trip тест
+"decode(X) → emit = X" на canonical fixtures (как regression guard
+для identity-preservation в allow path).
+
 ---
 
 ## 9. Provider Coverage
@@ -426,19 +473,21 @@ privacy semantics request body.
 ### 12.1 Inspector error
 
 Fail-open vs fail-closed — per inspector class. Текущий inventory
-response-side inspector'ов:
+response-side inspector'ов + streaming-compatibility:
 
-| Inspector             | File                              | Stage 1 default          |
-|-----------------------|-----------------------------------|--------------------------|
-| OutputValidation      | `firewall/output_validation.go`   | fail-closed (safety-critical) |
-| PII / DLP             | `firewall/pii_inspector.go`, `firewall/dlp_inspector.go` | fail-closed |
-| ContentModeration     | `firewall/content_moderation.go`  | fail-closed              |
-| Semantic / SemanticV2 | `firewall/semantic.go`, `firewall/semantic_v2.go` | fail-open (latency-sensitive) |
-| PolicyInspector       | `firewall/policy_inspector.go`    | fail-closed              |
+| Inspector             | File                              | Stage 1 fail mode | Streaming compat |
+|-----------------------|-----------------------------------|-------------------|------------------|
+| OutputValidation      | `firewall/output_validation.go`   | fail-closed (safety-critical) | incremental (heuristic/regex) |
+| PII / DLP             | `firewall/pii_inspector.go`, `firewall/dlp_inspector.go` | fail-closed | incremental (pattern-based) |
+| ContentModeration (heuristic-only) | `firewall/content_moderation.go` | fail-closed | incremental |
+| ContentModeration + judge (enabled) | `firewall/content_moderation.go` + `firewall/judge.go` | fail-closed | **buffered_fallback** (см. §12.6) |
+| Semantic / SemanticV2 | `firewall/semantic.go`, `firewall/semantic_v2.go` | fail-open (latency-sensitive) | buffered_fallback |
+| PolicyInspector       | `firewall/policy_inspector.go`    | fail-closed      | incremental      |
+| Judge (direct)        | `firewall/judge.go`               | fail-open (latency-sensitive) | NOT activated mid-stream (см. §12.6) |
 
-Эти дефолты фиксируются implementation PR (PR-F7.2), RFC только
-закрепляет **принцип**: safety-critical inspectors → fail-closed,
-advisory/latency-sensitive → fail-open.
+Принцип: safety-critical inspectors → fail-closed,
+advisory/latency-sensitive → fail-open. Дефолты фиксируются
+implementation PR (PR-F7.2).
 
 ### 12.2 Provider malformed stream
 
@@ -471,6 +520,42 @@ advisory/latency-sensitive → fail-open.
   - request timeout: глобальный HTTP server deadline;
   - inspector timeout: per-inspector, per-call, mapped на
     fail-open/closed по §12.1.
+
+### 12.6 LLM-as-Judge interaction (incremental streaming)
+
+Judge (`firewall/judge.go`) — **LLM-based classifier**, который в
+текущей архитектуре условно вызывается из `ContentModerationInspector`
+когда heuristic score переходит `JudgeThreshold`
+(`content_moderation.go:70-76`). Contract в streaming path:
+
+- **Judge НЕ вызывается mid-stream в Stage 1.** Обоснование:
+  judge-call — это отдельный upstream LLM round-trip с latency
+  порядка секунд; исполнять его на каждый chunk'овый sliding window
+  неприемлемо (latency regression + cost multiplication +
+  потенциальная рекурсия judge→proxy→judge, см. §15).
+- **Политика для CM+judge-enabled config в incremental streaming —
+  `buffered_fallback`**, не heuristic-only downgrade. Обоснование:
+  heuristic-only downgrade сохранит incrementality, но **ослабит
+  safety parity** с buffered path (buffered сегодня видит judge
+  verdict на полном ответе; incremental-heuristic-only его не
+  получит — это silent safety regression, нарушает Hard Invariant
+  §6.1). Явный fallback на buffered mode сохраняет текущий judge
+  verdict ценой UX этого конкретного stream'а.
+- **Маркеры**: отдельная метрика
+  `streaming_fallback_total{reason="judge_inspector"}` + audit
+  outcome `stream_buffered_fallback` + `metadata.fallback_reason="cm_judge_enabled"`.
+- **Альтернатива (НЕ Stage 1)**: async judge на полной accumulated
+  text'е в конце stream'а, с rollback / redaction emitted chunks —
+  отклонено для Stage 1 (rollback already-sent bytes невозможен на
+  HTTP level; потребовал бы delayed-emit буферизации всех chunks
+  до end-of-stream, что эквивалентно buffered_fallback по
+  latency).
+- **Hard deny unsupported как альтернатива fallback** (§17.5) —
+  доступно как policy knob для high-compliance deploy'ев в Stage 2,
+  не Stage 1 default.
+
+Этот пункт явно фиксируется до PR-F7.1, чтобы implementation не
+выбрал тихо heuristic-only downgrade.
 
 ---
 
@@ -513,7 +598,10 @@ advisory/latency-sensitive → fail-open.
 2. `streaming_fallback_total` метрика показала 0 non-synthetic events
    за это окно;
 3. shadow-mode divergence rate < 0.1% на aggregate traffic;
-4. runbook §N описывает новый path;
+4. `docs/firewall.md` имеет раздел "Streaming mode" (новая
+   §11 в firewall doc, владелец — PR-F7.4) с описанием incremental
+   path, метрик §14, fallback-поведения §12.6 и operator
+   troubleshooting'ом;
 5. отдельный PR (`PR-F7.5` или позже) удаляет buffered код +
    соответствующие тесты, с явным release note.
 
@@ -552,7 +640,11 @@ advisory/latency-sensitive → fail-open.
   stream завершается ровно одной audit записью;
 - **no recursion through judge path**: judge inspector уже выделен
   отдельно, streaming его не активирует mid-stream в Stage 1 (judge
-  — buffered only);
+  — buffered only, см. §12.6);
+- **no silent safety regression при CM+judge**: см. §12.6 — деплой
+  с judge-enabled `ContentModeration` получает explicit
+  `buffered_fallback`, не heuristic-only downgrade, чтобы сохранить
+  parity с текущим buffered path;
 - **provider-specific parser trust assumptions** явно
   документируются (таблица §9.1 — baseline, implementation PR
   расширяет);
@@ -665,10 +757,10 @@ scope F7, портит provider-agnostic положение.
 
 | PR       | Содержание                                                                  |
 |----------|-----------------------------------------------------------------------------|
-| PR-F7.1  | normalized stream event model + provider adapters (per-provider PR-ы возможны) |
-| PR-F7.2  | incremental response inspection engine + inspector flags + fail modes       |
+| PR-F7.1  | normalized stream event model + **paired decoder/emitter** provider adapters (per-provider PR-ы возможны) + round-trip fixtures |
+| PR-F7.2  | incremental response inspection engine + inspector flags + fail modes + **CM+judge fallback policy wiring** (§12.6) |
 | PR-F7.3  | streaming audit & accounting finalization (outcome classifier, metadata)    |
-| PR-F7.4  | fallback visibility + metrics + runbook + changelog                         |
+| PR-F7.4  | fallback visibility + metrics + **`docs/firewall.md` §11 "Streaming mode"** + changelog |
 | PR-F7.5+ | (Stage 2) broader sanitize, tier-1 zero-fallback, legacy buffered removal   |
 
 ---
@@ -704,3 +796,12 @@ RFC готов к merge и последующему implementation-kickoff ес�
   per-inspector, видимый через метрики и audit outcome.
 - **Legacy удаляется только по commit criterion §13.4**, не по
   ощущению готовности.
+- **Bytes-identity preservation для allow path** (§8.6): provider
+  adapter re-encode на allow не делает — пересылает исходные
+  bytes frame'а. Re-encoding допускается только на sanitize path.
+- **CM+judge-enabled config → `buffered_fallback`** (§12.6), не
+  heuristic-only downgrade. Judge mid-stream не активируется в
+  Stage 1.
+- **Decoder + emitter — парный интерфейс** (§8.6): каждый provider
+  adapter обязан поставлять обе стороны и иметь round-trip тест
+  `decode(X) → emit = X` на canonical fixtures.

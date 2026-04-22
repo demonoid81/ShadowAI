@@ -95,7 +95,37 @@ matrix, budget/audit/rollout contracts).
 - [x] Commit criterion для legacy removal зафиксирован.
 - [x] Current-behavior ссылается на реальные file:line, а не
       описательно.
-- [ ] Commit + merge в feature-ветку.
+- [x] Commit v1: `74f33ba`.
+- [x] Follow-up по ревью: §8.6 outbound re-encoding contract,
+      §12.6 CM+judge streaming policy, §13.4 runbook ссылка
+      заменена на конкретный `docs/firewall.md §11`. Commit v2.
+
+## Follow-up (review fix)
+
+Пользователь зафиксировал три замечания:
+
+1. Medium: не было явного outbound re-encoding contract для
+   incremental path. Добавлена §8.6 с чётким разделением allow
+   (bytes-identity), sanitize (provider-specific re-encode с
+   ограничениями на non-text fields) и block (terminal error
+   frame). Добавлено требование о round-trip тесте `decode→emit=X`
+   для каждого adapter'а в PR-F7.1.
+2. Medium: не была доведена security semantics для
+   `ContentModeration + judge-enabled` config. Добавлена §12.6:
+   политика `buffered_fallback` (не heuristic-only downgrade — это
+   было бы silent safety regression относительно текущего
+   buffered path). Таблица §12.1 расширена строкой "CM + judge
+   (enabled)" с явной streaming compat = buffered_fallback.
+3. Low: placeholder "runbook §N" в §13.4 заменён на конкретную
+   ссылку `docs/firewall.md §11 "Streaming mode"` (новая секция,
+   владелец — PR-F7.4).
+
+Синхронизированы §15 (Security Considerations — добавлена ссылка
+на §12.6), §19 (Implementation PR-ы — explicit mention
+paired decoder/emitter в F7.1 и docs/firewall.md §11 в F7.4) и §21
+(Decisions fixed — добавлены три новых пункта: bytes-identity
+preservation, CM+judge→buffered_fallback, decoder/emitter как
+парный интерфейс).
 
 ## Примечания
 
