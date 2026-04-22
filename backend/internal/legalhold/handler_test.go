@@ -365,16 +365,104 @@ func TestRelease_HappyPath_MetadataHasHashOnly(t *testing.T) {
 	}
 }
 
-// TestCaseRefHash_Deterministic — одинаковый case_ref всегда даёт
-// одинаковый hash (SIEM может correlate events).
-func TestCaseRefHash_Deterministic(t *testing.T) {
-	a := caseRefHash("SEC-2026-042")
-	b := caseRefHash("SEC-2026-042")
+// TestTokenizer_UnkeyedDeterministic — unkeyed mode (dev fallback):
+// одинаковый case_ref всегда даёт одинаковый token. Backward
+// compat с PR-L1.1 SHA-256 behavior.
+func TestTokenizer_UnkeyedDeterministic(t *testing.T) {
+	tok := newTokenizer("")
+	a := tok.Tokenize("SEC-2026-042")
+	b := tok.Tokenize("SEC-2026-042")
 	if a != b {
-		t.Errorf("hash not deterministic: %q vs %q", a, b)
+		t.Errorf("unkeyed not deterministic: %q vs %q", a, b)
 	}
-	if a == caseRefHash("SEC-2026-043") {
-		t.Error("different case_refs produce same hash")
+	if a == tok.Tokenize("SEC-2026-043") {
+		t.Error("different case_refs produce same token")
+	}
+}
+
+// TestTokenizer_KeyedDeterministic — PR-L1.2 HMAC path. Одинаковый
+// secret+caseRef → одинаковый token (SIEM correlation).
+func TestTokenizer_KeyedDeterministic(t *testing.T) {
+	tok := newTokenizer("super-secret-key-for-hmac-32chars!")
+	a := tok.Tokenize("SEC-2026-042")
+	b := tok.Tokenize("SEC-2026-042")
+	if a != b {
+		t.Errorf("keyed not deterministic: %q vs %q", a, b)
+	}
+	if a == tok.Tokenize("SEC-2026-043") {
+		t.Error("different case_refs produce same keyed token")
+	}
+}
+
+// TestTokenizer_KeyedDiffersFromUnkeyed — PR-L1.2 regression guard:
+// keyed token для того же caseRef ОТЛИЧАЕТСЯ от unkeyed. Это
+// подтверждает, что secret реально примешивается — attacker с
+// mirror dump'ом не может восстановить raw case_ref brute-force'ом
+// (если secret secure).
+func TestTokenizer_KeyedDiffersFromUnkeyed(t *testing.T) {
+	unkeyed := newTokenizer("")
+	keyed := newTokenizer("super-secret-key-for-hmac-32chars!")
+	caseRef := "SEC-2026-042"
+	if unkeyed.Tokenize(caseRef) == keyed.Tokenize(caseRef) {
+		t.Error("keyed == unkeyed: secret not applied to HMAC")
+	}
+}
+
+// TestTokenizer_DifferentSecretsProduceDifferentTokens — ротация
+// ключа должна менять все tokens (если operator ротирует secret,
+// SIEM-rules по token'ам сломаются — это осознанное поведение).
+func TestTokenizer_DifferentSecretsProduceDifferentTokens(t *testing.T) {
+	t1 := newTokenizer("secret-key-number-one-32chars!!!!")
+	t2 := newTokenizer("secret-key-number-two-32chars!!!!")
+	caseRef := "SEC-2026-042"
+	if t1.Tokenize(caseRef) == t2.Tokenize(caseRef) {
+		t.Error("different secrets produced same token")
+	}
+}
+
+// TestTokenizer_TokenLength_16Hex — формат стабилен: 16 hex chars
+// = 64 bit, одинаковый для unkeyed и keyed.
+func TestTokenizer_TokenLength_16Hex(t *testing.T) {
+	for name, tok := range map[string]*tokenizer{
+		"unkeyed": newTokenizer(""),
+		"keyed":   newTokenizer("super-secret-key-for-hmac-32chars!"),
+	} {
+		got := tok.Tokenize("any-case-ref")
+		if len(got) != 16 {
+			t.Errorf("%s: token len = %d, want 16 hex", name, len(got))
+		}
+	}
+}
+
+// TestNewHandlerWithSecret_UsesKeyed — integration: Handler созданный
+// с secret использует keyed tokenizer, не plain.
+func TestNewHandlerWithSecret_UsesKeyed(t *testing.T) {
+	repo := &memRepo{}
+	rec := &captureRecorder{}
+	secret := "super-secret-key-for-hmac-32chars!"
+	h := NewHandlerWithSecret(NewService(repo), rec, secret)
+
+	caseRef := "SEC-2026-042"
+	rawBody := `{"target_user_id":"u-1","case_ref":"` + caseRef + `","reason":"r"}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(rawBody)), "u-admin")
+	w := httptest.NewRecorder()
+	h.Create(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d", w.Code)
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	gotToken, _ := meta["case_ref_hash"].(string)
+
+	// Token должен совпадать с тем, что keyed tokenizer вернёт
+	// напрямую.
+	wantToken := newTokenizer(secret).Tokenize(caseRef)
+	if gotToken != wantToken {
+		t.Errorf("handler token = %q, want keyed tokenizer output %q", gotToken, wantToken)
+	}
+	// И должен ОТЛИЧАТЬСЯ от unkeyed (proof того, что secret работает).
+	if gotToken == newTokenizer("").Tokenize(caseRef) {
+		t.Error("handler с secret сгенерил unkeyed token")
 	}
 }
 

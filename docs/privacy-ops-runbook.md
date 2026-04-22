@@ -498,11 +498,24 @@ external tooling.
 
 ### 8.2 Legal hold
 
-- **[gap]** Flag `legal_hold` на user-row'ах отсутствует.
-- **[gap]** `ScrubUserDataTx` не проверяет hold-registry.
-- **[gap]** Нет endpoint'а `/api/legal-holds` CRUD.
-- **[planned]** таблица `legal_holds` + интерсепт в erase flow
-  (см. §5.5).
+- **[implemented]** таблица `legal_holds` (migration 013),
+  application-layer enforcement в `ErasureService.EraseUser`
+  pre-tx (см. §5). Admin CRUD: `POST /api/legal-holds`,
+  `POST /api/legal-holds/{id}/release`, `GET /api/legal-holds`.
+  Attempted-blocked erasures — `admin_event_logs` с
+  `metadata.blocked_by_hold=true`.
+- **[implemented]** (PR-L1.2) case_ref токен для SIEM-mirror —
+  keyed HMAC-SHA256 (`LEGAL_HOLD_TOKEN_SECRET` обязателен в prod,
+  `ValidateStartupConfig` требует >=32 chars). Без secret
+  guessable case-IDs (SEC-2026-NNN) можно было бы brute-force'ить
+  из mirror dump.
+- **[gap]** Retention-aware purge: длинный hold не приостанавливает
+  `cmd/audit-purge` автоматически. Manual: оператор ставит
+  `AUDIT_PURGE_INTERVAL=0` на период hold'а.
+- **[gap]** 4-eyes approver workflow для apply/release hold —
+  §5.5 roadmap.
+- **[gap]** Hold-scope шире user-level (query-window, date-range) —
+  v2+ roadmap.
 
 ### 8.3 External storage erasure
 
@@ -606,6 +619,12 @@ external tooling.
 
 ## 9. Change log
 
+- **1.8 (2026-04-22)** — PR-L1.2: keyed HMAC для case_ref token'а
+  (`LEGAL_HOLD_TOKEN_SECRET`, prod required, >=32 chars). Ранее
+  plain SHA-256 — теперь HMAC-SHA256 truncated 64 bit, не
+  brute-force'абелен оффлайн для guessable case-ID форматов.
+  Runbook §8.2: статус `[gap]`/`[planned]` переведён в
+  `[implemented]` — убрано противоречие с §5.
 - **1.7 (2026-04-22)** — PR-L1.1: privacy+error-split hardening для
   legal hold. `case_ref` больше не дублируется в `admin_event_logs`
   / SIEM — только `case_ref_hash` (SHA-256 truncated к 16 hex).

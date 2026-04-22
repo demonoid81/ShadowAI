@@ -77,6 +77,13 @@ type Config struct {
 	// ValidateStartupConfig отвергает конфиг.
 	SIEMAllowInsecureInProd bool // SIEM_ALLOW_INSECURE_IN_PROD
 
+	// PR-L1.2: secret для keyed HMAC token'а на case_ref (legal hold).
+	// Без этого secret'а attacker с SIEM-mirror dump'ом может
+	// brute-force guessable case IDs (SEC-2026-NNN) через plain SHA-256.
+	// Prod: REQUIRED (ValidateStartupConfig отвергнёт empty). Dev:
+	// fallback на unkeyed hash с warning-логом.
+	LegalHoldTokenSecret string // LEGAL_HOLD_TOKEN_SECRET
+
 	// Firewall
 	FirewallEnabled              bool
 	FirewallPIEnabled            bool
@@ -178,6 +185,9 @@ func Load() *Config {
 		SIEMInsecureSkipVerify:  getEnv("SIEM_INSECURE_SKIP_VERIFY", "false") == "true",
 		SIEMAllowInsecureInProd: getEnv("SIEM_ALLOW_INSECURE_IN_PROD", "false") == "true",
 
+		// PR-L1.2
+		LegalHoldTokenSecret: getEnv("LEGAL_HOLD_TOKEN_SECRET", ""),
+
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",
 		FirewallPIEnabled:            getEnv("FIREWALL_PI_ENABLED", "true") == "true",
@@ -267,6 +277,15 @@ func (c *Config) ValidateStartupConfig() error {
 	//     encrypted. Запрещено в prod.
 	// (3) InsecureSkipVerify=true — отключает TLS-verify; в prod
 	//     допустимо только через explicit override.
+	// PR-L1.2: legal-hold token secret обязателен в prod. Без него
+	// case_ref token в SIEM mirror — plain SHA-256 truncated, что
+	// brute-force'ится оффлайн для guessable case-ID форматов.
+	if strings.TrimSpace(c.LegalHoldTokenSecret) == "" {
+		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be set (>=32 chars) in prod to enable keyed HMAC for legal-hold case refs")
+	} else if len(c.LegalHoldTokenSecret) < 32 {
+		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be >=32 chars (current shorter — insufficient entropy for HMAC)")
+	}
+
 	if c.SIEMEnabled {
 		endpoint := strings.TrimSpace(c.SIEMEndpoint)
 		if endpoint == "" {

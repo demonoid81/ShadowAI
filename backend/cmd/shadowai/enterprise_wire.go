@@ -53,7 +53,13 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	// сразу передать HoldChecker.
 	legalHoldRepo := legalhold.NewPGRepository(deps.DB)
 	legalHoldSvc := legalhold.NewService(legalHoldRepo)
-	legalHoldHandler := legalhold.NewHandler(legalHoldSvc, adminAuditRecorder)
+	// PR-L1.2: keyed HMAC tokenizer для case_ref. Prod startup-guard
+	// (ValidateStartupConfig) уже гарантирует, что LegalHoldTokenSecret
+	// задан и >=32 chars. Dev: пустой secret → unkeyed fallback с
+	// warning.
+	legalHoldHandler := legalhold.NewHandlerWithSecret(
+		legalHoldSvc, adminAuditRecorder, deps.Cfg.LegalHoldTokenSecret,
+	)
 
 	// DSAR erasure (PR-B). auditRepo + budgetRepo используются как
 	// AuditScrubber + BudgetDeleter через interface intersection.

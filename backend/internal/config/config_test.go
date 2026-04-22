@@ -377,6 +377,7 @@ func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
 		AuditAllowFullInProd:        true,
 		AuditRetentionDays:          0,
 		AuditAllowNoRetentionInProd: true,
+		LegalHoldTokenSecret:        "super-secret-legal-hold-hmac-32!!!",
 	}
 
 	if err := cfg.ValidateStartupConfig(); err != nil {
@@ -384,17 +385,62 @@ func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
 	}
 }
 
-// prodConfigBase — минимальный prod-safe конфиг, чтобы PR-S1.1
-// тесты могли проверять только SIEM-поведение без срабатывания
-// других правил (JWT / DB / AUDIT).
+// prodConfigBase — минимальный prod-safe конфиг, чтобы PR-S1.1 /
+// PR-L1.2 тесты могли проверять только целевое поведение без
+// срабатывания других правил (JWT / DB / AUDIT / Legal hold secret).
 func prodConfigBase() *Config {
 	return &Config{
-		AppEnv:             "production",
-		DatabaseURL:        "postgres://u:p@db.internal:5432/db?sslmode=require",
-		RedisURL:           "redis://redis.internal:6379/0",
-		JWTSecret:          "super-secret-key-for-production-12345",
-		AuditPayloadMode:   "redacted",
-		AuditRetentionDays: 30,
+		AppEnv:               "production",
+		DatabaseURL:          "postgres://u:p@db.internal:5432/db?sslmode=require",
+		RedisURL:             "redis://redis.internal:6379/0",
+		JWTSecret:            "super-secret-key-for-production-12345",
+		AuditPayloadMode:     "redacted",
+		AuditRetentionDays:   30,
+		LegalHoldTokenSecret: "super-secret-legal-hold-hmac-32!!!",
+	}
+}
+
+// TestValidateStartupConfig_LegalHoldSecretMissing — PR-L1.2 guard.
+// Prod без LEGAL_HOLD_TOKEN_SECRET отвергается (plain hash
+// brute-force-weak для guessable case IDs).
+func TestValidateStartupConfig_LegalHoldSecretMissing(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.LegalHoldTokenSecret = ""
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "LEGAL_HOLD_TOKEN_SECRET") {
+		t.Fatalf("expected LEGAL_HOLD_TOKEN_SECRET error, got %v", err)
+	}
+}
+
+// TestValidateStartupConfig_LegalHoldSecretTooShort — короткий secret
+// отвергается (insufficient entropy для HMAC).
+func TestValidateStartupConfig_LegalHoldSecretTooShort(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.LegalHoldTokenSecret = "short" // <32 chars
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), ">=32 chars") {
+		t.Fatalf("expected length error, got %v", err)
+	}
+}
+
+// TestValidateStartupConfig_LegalHoldSecretOK — >=32 chars проходит.
+func TestValidateStartupConfig_LegalHoldSecretOK(t *testing.T) {
+	cfg := prodConfigBase()
+	// prodConfigBase уже задаёт 32+ char secret.
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("ok secret: unexpected error: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_LegalHoldSecret_DevIgnored — dev env
+// принимает пустой secret (fallback на unkeyed + warning).
+func TestValidateStartupConfig_LegalHoldSecret_DevIgnored(t *testing.T) {
+	cfg := &Config{
+		AppEnv:               "development",
+		LegalHoldTokenSecret: "", // OK в dev
+	}
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("dev env: unexpected error: %v", err)
 	}
 }
 
@@ -517,12 +563,13 @@ func TestValidateStartupConfig_ProdRejectsLoopbackHosts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{
-				AppEnv:             "production",
-				DatabaseURL:        tt.dbURL,
-				RedisURL:           tt.redisURL,
-				JWTSecret:          "super-secret-key-for-production-12345",
-				AuditPayloadMode:   "redacted",
-				AuditRetentionDays: 30,
+				AppEnv:               "production",
+				DatabaseURL:          tt.dbURL,
+				RedisURL:             tt.redisURL,
+				JWTSecret:            "super-secret-key-for-production-12345",
+				AuditPayloadMode:     "redacted",
+				AuditRetentionDays:   30,
+				LegalHoldTokenSecret: "super-secret-legal-hold-hmac-32!!!",
 			}
 			err := cfg.ValidateStartupConfig()
 			if err == nil || !strings.Contains(err.Error(), tt.expectSub) {

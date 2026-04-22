@@ -5,9 +5,11 @@
 package legalhold
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -17,14 +19,44 @@ import (
 	"github.com/shadowai/backend/internal/auth"
 )
 
-// caseRefHash — PR-L1.1: не пишем raw case_ref в admin_event_logs
-// (→ SIEM mirror). Вместо этого truncated SHA-256 для SIEM-side
-// correlation ("все события для case с hash X"). 16 hex = 64 bit,
-// коллизии крайне редкие. Raw case_ref остаётся в legal_holds
-// table для legal audit (доступен только admin через GET
-// /api/legal-holds).
-func caseRefHash(caseRef string) string {
-	sum := sha256.Sum256([]byte(caseRef))
+// tokenizer — PR-L1.2: keyed HMAC-SHA256 (truncated к 16 hex =
+// 64 bit) вместо plain SHA-256 для case_ref-токена в SIEM/admin
+// metadata. Keyed tokenizer предотвращает offline brute-force
+// guessable case ID форматов (SEC-2026-NNN и т.п.). Secret задан в
+// LEGAL_HOLD_TOKEN_SECRET; prod-валидация в ValidateStartupConfig
+// требует >=32 chars.
+//
+// Fallback: если secret пустой (dev/legacy deploy), Tokenize()
+// возвращает unkeyed SHA-256 hash + логирует WARNING один раз на
+// process (не spam'ит per-request).
+type tokenizer struct {
+	secret        []byte
+	warnedUnkeyed bool
+}
+
+// newTokenizer. Пустой secret → unkeyed mode (dev only — prod
+// startup-guard отвергает).
+func newTokenizer(secret string) *tokenizer {
+	return &tokenizer{secret: []byte(secret)}
+}
+
+// Tokenize возвращает 16-hex-char токен case_ref. Деterministic
+// относительно secret: одинаковый (secret, caseRef) → одинаковый
+// token (SIEM correlation сохраняется).
+func (t *tokenizer) Tokenize(caseRef string) string {
+	if len(t.secret) == 0 {
+		// Unkeyed fallback — для dev / legacy без secret.
+		// Одноразовый warning, чтобы operator увидел в logs.
+		if !t.warnedUnkeyed {
+			log.Printf("legalhold: LEGAL_HOLD_TOKEN_SECRET not set, using unkeyed SHA-256 for case_ref tokens — DEV ONLY, brute-force-weak")
+			t.warnedUnkeyed = true
+		}
+		sum := sha256.Sum256([]byte(caseRef))
+		return hex.EncodeToString(sum[:8])
+	}
+	mac := hmac.New(sha256.New, t.secret)
+	mac.Write([]byte(caseRef))
+	sum := mac.Sum(nil)
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -40,10 +72,22 @@ func caseRefHash(caseRef string) string {
 type Handler struct {
 	svc        *Service
 	adminAudit adminaudit.Recorder
+	tokens     *tokenizer
 }
 
+// NewHandler — каноничный конструктор. Использует unkeyed tokenizer
+// (совместимость с существующими тестами). Для prod wiring
+// передавайте secret через NewHandlerWithSecret.
 func NewHandler(svc *Service, adminAudit adminaudit.Recorder) *Handler {
-	return &Handler{svc: svc, adminAudit: adminAudit}
+	return &Handler{svc: svc, adminAudit: adminAudit, tokens: newTokenizer("")}
+}
+
+// NewHandlerWithSecret — PR-L1.2: конструктор с LEGAL_HOLD_TOKEN_SECRET
+// для keyed-HMAC case_ref токенов в admin_event_logs / SIEM mirror.
+// Prod wiring (enterprise_wire.go) должен использовать именно этот
+// вариант.
+func NewHandlerWithSecret(svc *Service, adminAudit adminaudit.Recorder, tokenSecret string) *Handler {
+	return &Handler{svc: svc, adminAudit: adminAudit, tokens: newTokenizer(tokenSecret)}
 }
 
 type createRequest struct {
@@ -99,7 +143,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, errorResponse{Error: "user already has active hold"})
 			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusConflict, false, map[string]any{
 				"error_code":     "already_active",
-				"case_ref_hash":  caseRefHash(req.CaseRef),
+				"case_ref_hash":  h.tokens.Tokenize(req.CaseRef),
 			})
 		case IsValidation(err):
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
@@ -126,7 +170,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	// дублируется в admin_event_logs / SIEM.
 	h.recordAdmin(r, "apply_hold", hold.ID, http.StatusCreated, true, map[string]any{
 		"target_user_id": hold.TargetUserID,
-		"case_ref_hash":  caseRefHash(hold.CaseRef),
+		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
 	})
 }
 
@@ -189,7 +233,7 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 	// PR-L1.1: case_ref_hash вместо raw case_ref.
 	h.recordAdmin(r, "release_hold", hold.ID, http.StatusOK, true, map[string]any{
 		"target_user_id": hold.TargetUserID,
-		"case_ref_hash":  caseRefHash(hold.CaseRef),
+		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
 	})
 }
 
