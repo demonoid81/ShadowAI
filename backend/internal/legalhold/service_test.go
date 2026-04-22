@@ -106,7 +106,15 @@ func (m *memRepo) Release(_ context.Context, id, releasedBy string) (*Hold, erro
 	}
 	for i := range m.holds {
 		if m.holds[i].ID == id {
-			if m.holds[i].Status != StatusActive {
+			switch m.holds[i].Status {
+			case StatusPending:
+				// PR-L2.3: pending нельзя release — только reject.
+				return nil, ErrPendingNotReleasable
+			case StatusReleased:
+				return nil, ErrNotActive
+			case StatusActive:
+				// ok, proceed below
+			default:
 				return nil, ErrNotActive
 			}
 			now := time.Now().UTC()
@@ -411,15 +419,23 @@ func TestReject_AllowsSelfRejection(t *testing.T) {
 	}
 }
 
-// TestReleaseHold_OnlyActive — release на pending → ErrNotActive.
-// Pending-hold'ы должны отменяться через Reject.
-func TestReleaseHold_OnlyActive(t *testing.T) {
+// TestReleaseHold_PendingUseReject — PR-L2.3 regression guard:
+// Release на pending возвращает ErrPendingNotReleasable (distinct
+// from ErrNotActive), чтобы handler мог вернуть 409 вместо ошибочного
+// 200 already_released. Operator должен использовать /reject для
+// отмены pending.
+func TestReleaseHold_PendingUseReject(t *testing.T) {
 	s := NewService(&memRepo{})
 	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-admin")
 
 	_, err := s.ReleaseHold(context.Background(), h.ID, "u-admin")
-	if !IsNotActive(err) {
-		t.Errorf("release(pending): err = %v, want ErrNotActive", err)
+	if !IsPendingNotReleasable(err) {
+		t.Errorf("release(pending): err = %v, want ErrPendingNotReleasable", err)
+	}
+	// Критично: НЕ должен collapse'ить в ErrNotActive (иначе
+	// handler трактует как идемпотентный 200 already_released).
+	if IsNotActive(err) {
+		t.Error("pending release collapsed в ErrNotActive — handler ложно вернёт 200")
 	}
 }
 

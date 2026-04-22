@@ -25,7 +25,19 @@ var ErrNotFound = errors.New("legalhold: hold not found")
 // ErrNotActive — попытка release уже released hold'а. Идемпотентно
 // трактуем как "already released" в handler'е, но на repo-уровне
 // даём явную ошибку.
+//
+// PR-L2.3 note: ранее ErrNotActive также возвращалась для pending
+// status. Это collapse'ило семантику "pending нельзя release" в
+// "hold уже released 200". Теперь для pending возвращается
+// ErrPendingNotReleasable — отдельный non-idempotent error, чтобы
+// handler мог вернуть 409 "use reject" вместо ложного 200.
 var ErrNotActive = errors.New("legalhold: hold is not active")
+
+// ErrPendingNotReleasable — PR-L2.3: Release вызван на pending hold.
+// Это НЕ идемпотентность (hold ещё не был active), а contract
+// violation — pending должен отменяться через Reject. Handler
+// мапит это в 409 с подсказкой operator'у.
+var ErrPendingNotReleasable = errors.New("legalhold: hold is pending, use reject to cancel")
 
 // ErrNotPending — approve/reject на hold, у которого уже не
 // pending (approved или released). L2.3.
@@ -367,9 +379,12 @@ func (r *PGRepository) checkExistsInactive(ctx context.Context, id string) (*Hol
 	}
 	switch status {
 	case string(StatusPending):
-		// Release на pending — не поддержан; pending уходит через Reject.
-		return nil, ErrNotActive
+		// Release на pending НЕ идемпотентен — hold ещё не был active.
+		// Handler вернёт 409 с указанием использовать reject.
+		return nil, ErrPendingNotReleasable
 	case string(StatusReleased):
+		// Идемпотентность: hold был active → released; повторный
+		// Release безопасно возвращает 200 через ErrNotActive path.
 		return nil, ErrNotActive
 	default:
 		// active, но UPDATE не нашёл — race с concurrent release.

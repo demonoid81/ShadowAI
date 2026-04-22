@@ -185,6 +185,42 @@ func TestRelease_Idempotent(t *testing.T) {
 	}
 }
 
+// TestRelease_PendingReturns409_NotIdempotent — PR-L2.3 regression
+// guard: release на pending НЕ должен возвращать 200 already_released
+// (это collapse семантики). Должен быть 409 + error_code=
+// pending_not_releasable с подсказкой operator'у использовать reject.
+func TestRelease_PendingReturns409_NotIdempotent(t *testing.T) {
+	h, _, rec := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-admin")
+	// НЕ approve. Release на pending должен 409.
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Release(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (pending not releasable)", w.Code)
+	}
+	// Guard: body не должен утверждать already_released.
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] == "already_released" {
+		t.Error("response заявляет already_released для pending hold — collapse семантики")
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "pending_not_releasable" {
+		t.Errorf("error_code = %v, want pending_not_releasable", meta["error_code"])
+	}
+	if rec.events[0].Success {
+		t.Error("event success=true на 409 pending release — ложная запись успеха в audit")
+	}
+}
+
 // TestRelease_NotFound.
 func TestRelease_NotFound(t *testing.T) {
 	h, _, _ := setupHandler(t)

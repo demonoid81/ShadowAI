@@ -181,6 +181,11 @@ func IsNotPending(err error) bool { return errors.Is(err, ErrNotPending) }
 // (4-eyes policy violation).
 func IsSelfApproval(err error) bool { return errors.Is(err, ErrSelfApproval) }
 
+// IsPendingNotReleasable — PR-L2.3: Release вызван на pending hold.
+// Handler возвращает 409 "use reject to cancel" вместо ошибочного
+// 200 "already_released".
+func IsPendingNotReleasable(err error) bool { return errors.Is(err, ErrPendingNotReleasable) }
+
 // IsAlreadyActive — helper для handler'а, чтобы не импортировать
 // errors package ради одной проверки.
 func IsAlreadyActive(err error) bool { return errors.Is(err, ErrAlreadyActive) }

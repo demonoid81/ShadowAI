@@ -367,8 +367,18 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 			h.recordAdmin(r, "release_hold", id, http.StatusNotFound, false, map[string]any{
 				"error_code": "not_found",
 			})
+		case IsPendingNotReleasable(err):
+			// PR-L2.3: pending hold нельзя release. Operator должен
+			// использовать /reject. Возвращаем 409, НЕ 200
+			// already_released — контракт "pending ещё не был active"
+			// требует явной отмены через другой endpoint.
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "hold is pending, use reject to cancel"})
+			h.recordAdmin(r, "release_hold", id, http.StatusConflict, false, map[string]any{
+				"error_code": "pending_not_releasable",
+			})
 		case IsNotActive(err):
-			// Идемпотентность: already-released — 200 с маркером.
+			// Идемпотентность: already-released (ранее был active →
+			// released). 200 с маркером.
 			writeJSON(w, http.StatusOK, map[string]any{
 				"id":     id,
 				"status": "already_released",

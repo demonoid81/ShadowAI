@@ -1,6 +1,6 @@
 # ShadowAI — Privacy / Retention / DSAR / Legal-Hold / Incident Runbook
 
-**Версия документа:** 1.17
+**Версия документа:** 1.18
 **Дата:** 2026-04-19
 **Audience:** ops, compliance, legal, incident responders.
 **Покрывает:** ShadowAI backend после merge PR-A/B/C/D/D.1.
@@ -385,8 +385,15 @@ review.
    ```
    200 + body с `status:"released", is_active=false,
    released_at, released_by`. Event `release_hold`. После release
-   DSAR на этого user'а работает штатно. Release на pending
-   возвращает 409 — для отмены pending используйте reject.
+   DSAR на этого user'а работает штатно.
+
+   **Release на pending** возвращает **409** с
+   `{"error":"hold is pending, use reject to cancel"}` и admin
+   event `metadata.error_code="pending_not_releasable"`. НЕ
+   трактуется как идемпотентный успех — для отмены pending
+   используйте `/reject`. Идемпотентность Release сохраняется
+   только для "уже released" (active → released двойной вызов → 200
+   `already_released`).
 
 ### 5.4 Конфликт DSAR vs Legal Hold
 
@@ -615,10 +622,17 @@ external tooling.
   доступа к legal_holds (package enterprise-only) — использует
   backward-compat `PurgeOlderThan`. Для Core operator ожидается
   чисто manual retention без legal-hold'ов.
-- **[gap]** 4-eyes approver workflow для apply/release hold —
-  §5.5 roadmap.
+- **[implemented]** (PR-L2.3) 4-eyes approver workflow для apply
+  hold: create делает pending, второй admin делает approve →
+  active. Self-approval блокируется на repo-layer + handler
+  возвращает 403 с `metadata.error_code=self_approval`
+  (SIEM-alerting key). См. §5.2 / §5.3.
+- **[gap]** 4-eyes для release (на сейчас release делает один
+  admin) — §5.5 roadmap.
 - **[gap]** Hold-scope шире user-level (query-window, date-range) —
   v2+ roadmap.
+- **[gap]** SLA / escalation на неподтверждённые pending —
+  §5.5 roadmap.
 
 ### 8.3 External storage erasure
 
@@ -722,6 +736,17 @@ external tooling.
 
 ## 9. Change log
 
+- **1.18 (2026-04-22)** — PR-L2.3.1 follow-up по ревью:
+  - Release на pending перестал collapse'иться в 200
+    `already_released`. Новый sentinel `ErrPendingNotReleasable`
+    (отличный от `ErrNotActive`) → handler возвращает 409
+    `pending_not_releasable` с подсказкой использовать `/reject`.
+    Admin event пишется `success=false`, что защищает audit-trail
+    от ложного "successful release" на pending.
+  - §8.2 — убран stale gap "4-eyes approver workflow не
+    реализован"; запись переведена в `[implemented]` с указанием
+    на §5.2/§5.3. Добавлены явные gap'ы для release-4-eyes, SLA
+    escalation, bulk approvals.
 - **1.17 (2026-04-22)** — PR-L2.3: 4-eyes approver workflow для legal
   hold. Migration 015 добавляет `legal_holds.status` (pending /
   active / released) + `approved_at/by`. Partial-unique index

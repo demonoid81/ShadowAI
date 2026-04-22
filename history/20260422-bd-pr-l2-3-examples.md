@@ -183,7 +183,7 @@ POST /api/legal-holds/h-123/approve     (token=u-carol)
 
 ---
 
-## Пример 6 (failure): release на pending → 409
+## Пример 6 (failure): release на pending → 409 pending_not_releasable
 
 Pending hold нельзя release'ить — для cancel используется reject.
 
@@ -191,20 +191,35 @@ Pending hold нельзя release'ить — для cancel использует�
 POST /api/legal-holds/h-123/release     (h-123 is pending)
 ```
 
-**Response 409** (через IsNotActive path — существующая
-идемпотентность Release, но здесь hold НЕ был active и НЕ
-released — сигнал operator'у использовать reject).
+**Response 409:**
+```json
+{"error": "hold is pending, use reject to cancel"}
+```
 
-Actually: repo возвращает ErrNotActive; handler'у в этом случае
-корректно переводит в 200 "already_released". **Это гейп — см.
-notes ниже**.
+**Side effects:**
+- Hold UNCHANGED (всё ещё pending).
+- `admin_event_logs`: action=release_hold, success=false,
+  status_code=409, metadata:
+  `{error_code:"pending_not_releasable"}`.
 
-### Notes на Пример 6
+### Rationale
 
-В реализации PR-L2.3 Release на pending даёт 200
-"already_released" — т.к. pending ≠ active, Release
-интерпретирует как "already released". Это разумно, но может
-запутать operator'а. Docs явно направляют reject для pending.
+Release и Reject — две разные операции в state machine:
+
+| Transition | Endpoint | Operator intent |
+|------------|----------|-----------------|
+| active → released | POST /release | "litigation ended, hold снят" |
+| pending → released | POST /reject | "request больше не нужен / ошибка заявки" |
+
+Collapse pending-release в 200 "already_released" был бы обманом
+audit-trail: operator получит "успех", evidence в admin event
+будет говорить `success=true status=already_released`, но реально
+hold в pending-state и ничего не произошло. PR-L2.3 review
+`49c759f+1` ввёл отдельный `ErrPendingNotReleasable` для честной
+400-class ошибки.
+
+Идемпотентность Release **сохраняется** только для "было active,
+стало released" path (двойной release → 200 already_released).
 
 ---
 
