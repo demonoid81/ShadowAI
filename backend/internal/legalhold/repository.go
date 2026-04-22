@@ -136,6 +136,31 @@ func (r *PGRepository) checkExistsInactive(ctx context.Context, id string) (*Hol
 	return nil, ErrNotActive
 }
 
+// ActiveUserIDs — PR-L2: bulk lookup для retention-aware audit
+// purge. Возвращает target_user_id всех is_active=true записей.
+// Индекс idx_legal_holds_active_per_user гарантирует, что каждый
+// UUID встречается не более одного раза.
+func (r *PGRepository) ActiveUserIDs(ctx context.Context) ([]string, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT target_user_id::text FROM legal_holds WHERE is_active = true`)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: active user ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // HasActiveHold — hot-path check для ErasureService.
 func (r *PGRepository) HasActiveHold(ctx context.Context, userID string) (bool, error) {
 	if r == nil || r.db == nil {

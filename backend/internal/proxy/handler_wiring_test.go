@@ -62,6 +62,10 @@ func (c *captureAuditRepo) snapshot() []*domain.AuditLog {
 func (c *captureAuditRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (int, error) {
 	return 0, nil
 }
+// PR-L2 stub.
+func (c *captureAuditRepo) PurgeOlderThanExcept(_ context.Context, _ time.Time, _ int, _ []string) (int, error) {
+	return 0, nil
+}
 func (c *captureAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
 	return nil
 }

@@ -49,6 +49,10 @@ func (r *recordingRepo) List(_ context.Context, limit, offset int, userID, model
 func (r *recordingRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (int, error) {
 	return 0, nil
 }
+// PR-L2 stub.
+func (r *recordingRepo) PurgeOlderThanExcept(_ context.Context, _ time.Time, _ int, _ []string) (int, error) {
+	return 0, nil
+}
 func (r *recordingRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
 	return nil
 }

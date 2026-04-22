@@ -509,9 +509,18 @@ external tooling.
   `ValidateStartupConfig` требует >=32 chars). Без secret
   guessable case-IDs (SEC-2026-NNN) можно было бы brute-force'ить
   из mirror dump.
-- **[gap]** Retention-aware purge: длинный hold не приостанавливает
-  `cmd/audit-purge` автоматически. Manual: оператор ставит
-  `AUDIT_PURGE_INTERVAL=0` на период hold'а.
+- **[implemented]** (PR-L2) Retention-aware purge для enterprise
+  `runAuditPurgeScheduler`: перед каждым purge-tick'ом scheduler
+  берёт snapshot `target_user_id`s всех active hold'ов и передаёт
+  их в `PurgeOlderThanExcept`. Rows под active hold НЕ удаляются
+  даже если старше cutoff'а. `holds_excluded` count попадает в
+  admin_event_logs.metadata → SIEM mirror. Fail-closed: если
+  hold-lookup падает, purge-tick пропускается (evidence сохраняется
+  > availability).
+- **[gap]** Core-only build'а `cmd/audit-purge` CLI не имеет
+  доступа к legal_holds (package enterprise-only) — использует
+  backward-compat `PurgeOlderThan`. Для Core operator ожидается
+  чисто manual retention без legal-hold'ов.
 - **[gap]** 4-eyes approver workflow для apply/release hold —
   §5.5 roadmap.
 - **[gap]** Hold-scope шире user-level (query-window, date-range) —
@@ -619,6 +628,12 @@ external tooling.
 
 ## 9. Change log
 
+- **1.12 (2026-04-22)** — PR-L2: retention-aware audit purge.
+  Enterprise scheduler `runAuditPurgeScheduler` теперь вызывает
+  `PurgeOlderThanExcept(cutoff, chunk, heldUserIDs)`, где
+  `heldUserIDs` = `legalhold.Service.ActiveUserIDs()` snapshot.
+  Fail-closed: hold-lookup error → skip tick. §8.2 retention-aware
+  gap закрыт.
 - **1.11 (2026-04-22)** — PR-G2.1: defence-in-depth для duplicate
   role entries. `evaluateRoleRules` собирает rules со ВСЕХ
   matching role entries (не early-return на первом), что делает

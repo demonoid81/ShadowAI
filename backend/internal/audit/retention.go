@@ -21,15 +21,51 @@ const PurgeTargetAuditLogs = "audit_logs"
 //
 // Возвращает total deleted. Если chunkSize <= 0 — error.
 func (r *Repository) PurgeOlderThan(ctx context.Context, cutoff time.Time, chunkSize int) (int, error) {
+	return r.PurgeOlderThanExcept(ctx, cutoff, chunkSize, nil)
+}
+
+// PurgeOlderThanExcept — PR-L2: retention-aware purge. Удаляет
+// audit_logs-rows с created_at < cutoff, НО исключает rows, где
+// user_id присутствует в exceptUserIDs (список user'ов под active
+// legal hold). user_id IS NULL rows всегда eligible для purge
+// (после DSAR erasure user_id уже обнулён, и legal-hold relevance
+// потеряна).
+//
+// exceptUserIDs nil / пустой → старое поведение (backward compat
+// для callers до PR-L2).
+//
+// Используется enterprise audit-purge scheduler: перед каждым
+// tick'ом scheduler читает `SELECT target_user_id FROM legal_holds
+// WHERE is_active = true` и передаёт список сюда. Core CLI
+// `cmd/audit-purge` продолжает вызывать backward-compat
+// `PurgeOlderThan` (Core scope — нет legal_holds таблицы).
+func (r *Repository) PurgeOlderThanExcept(ctx context.Context, cutoff time.Time, chunkSize int, exceptUserIDs []string) (int, error) {
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)
 	}
+	useExcept := len(exceptUserIDs) > 0
 	total := 0
 	for {
-		res, err := r.db.ExecContext(ctx,
-			`DELETE FROM audit_logs WHERE id IN (
-				SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2
-			)`, cutoff, chunkSize)
+		var (
+			res sql.Result
+			err error
+		)
+		if useExcept {
+			// pq array — строки UUID передаются как ANY($3::uuid[]).
+			// NULL user_id остаются eligible (они уже erased).
+			res, err = r.db.ExecContext(ctx,
+				`DELETE FROM audit_logs WHERE id IN (
+					SELECT id FROM audit_logs
+					WHERE created_at < $1
+					  AND (user_id IS NULL OR NOT (user_id::text = ANY($3)))
+					LIMIT $2
+				)`, cutoff, chunkSize, uuidArrayLiteral(exceptUserIDs))
+		} else {
+			res, err = r.db.ExecContext(ctx,
+				`DELETE FROM audit_logs WHERE id IN (
+					SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2
+				)`, cutoff, chunkSize)
+		}
 		if err != nil {
 			return total, fmt.Errorf("purge exec: %w", err)
 		}
@@ -48,6 +84,38 @@ func (r *Repository) PurgeOlderThan(ctx context.Context, cutoff time.Time, chunk
 		}
 	}
 	return total, nil
+}
+
+// uuidArrayLiteral — PR-L2 helper. Конвертирует []string в
+// Postgres text[] literal ({id1,id2,...}). Используется в
+// PurgeOlderThanExcept для передачи exceptUserIDs как параметр
+// ANY(). Избегаем зависимости от pq.Array, чтобы минимизировать
+// surface для mock'ов.
+func uuidArrayLiteral(ids []string) string {
+	if len(ids) == 0 {
+		return "{}"
+	}
+	// В postgres text[] literal элементы quoted если содержат
+	// спецсимволы. UUID'ы безопасны (dash+hex), но обернём
+	// для будущей форсc (если operator случайно положит
+	// non-UUID в target_user_id).
+	var b []byte
+	b = append(b, '{')
+	for i, id := range ids {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, '"')
+		for _, ch := range id {
+			if ch == '"' || ch == '\\' {
+				b = append(b, '\\')
+			}
+			b = append(b, byte(ch))
+		}
+		b = append(b, '"')
+	}
+	b = append(b, '}')
+	return string(b)
 }
 
 // RecordPurgeRun сохраняет запись о завершённом purge-run для указанной

@@ -95,8 +95,11 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		StartSchedulers: func(ctx context.Context, cfg *config.Config) {
 			// PR-A: audit-purge scheduler для audit_logs.
 			// PR-S1: purge events тоже уходят в SIEM через fanout recorder.
+			// PR-L2: legalHoldSvc передаётся для retention-aware purge —
+			// rows под active hold не удаляются даже если они старше
+			// cutoff'а.
 			if cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0 {
-				go runAuditPurgeScheduler(ctx, cfg, deps.AuditSvc, adminAuditRecorder)
+				go runAuditPurgeScheduler(ctx, cfg, deps.AuditSvc, adminAuditRecorder, legalHoldSvc)
 			}
 			// PR-D.1: admin-events purge scheduler.
 			if cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0 {
@@ -106,9 +109,16 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	}
 }
 
-// runAuditPurgeScheduler — PR-A: периодический purge audit_logs.
-// Пишет admin_event для каждого запуска (success/failure).
-func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *audit.Service, adminAuditSvc adminaudit.Recorder) {
+// runAuditPurgeScheduler — PR-A + PR-L2: периодический purge
+// audit_logs с retention-aware exclusion. Перед каждым purge tick
+// получает список active-hold user_ids; audit rows этих users'ов
+// НЕ удаляются даже если созданы раньше cutoff'а. Пишет admin_event
+// с excluded_hold_count metadata для forensics.
+//
+// Fail-closed: если legalhold.ActiveUserIDs fails, purge пропускается
+// — compliance (preserve evidence) выше availability (освободить
+// диск).
+func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *audit.Service, adminAuditSvc adminaudit.Recorder, legalHoldSvc *legalhold.Service) {
 	log.Printf("audit-purge scheduler: interval=%s retention=%d days chunk=%d",
 		cfg.AuditPurgeInterval, cfg.AuditRetentionDays, cfg.AuditPurgeChunkSize)
 	ticker := time.NewTicker(cfg.AuditPurgeInterval)
@@ -118,7 +128,23 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 		cutoff := time.Now().UTC().Add(-time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour)
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
-		deleted, err := repo.PurgeOlderThan(rctx, cutoff, cfg.AuditPurgeChunkSize)
+
+		// PR-L2: hold snapshot до purge — atomicity на read-level.
+		heldUserIDs, err := legalHoldSvc.ActiveUserIDs(rctx)
+		if err != nil {
+			log.Printf("audit-purge scheduler: hold lookup failed (skip tick): %v", err)
+			adminAuditSvc.Record(rctx, adminaudit.Event{
+				ActorUserID: nil, Action: "purge", Resource: "audit_logs",
+				Path: "scheduler", Method: "INTERNAL", Success: false,
+				Metadata: map[string]any{
+					"mode": "scheduler", "cutoff": cutoff.Format(time.RFC3339),
+					"error": "hold_lookup_failed",
+				},
+			})
+			return
+		}
+
+		deleted, err := repo.PurgeOlderThanExcept(rctx, cutoff, cfg.AuditPurgeChunkSize, heldUserIDs)
 		if err != nil {
 			log.Printf("audit-purge scheduler: err: %v", err)
 			adminAuditSvc.Record(rctx, adminaudit.Event{
@@ -134,13 +160,15 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 		if err := repo.RecordPurgeRun(rctx, cutoff, deleted, audit.PurgeTargetAuditLogs); err != nil {
 			log.Printf("audit-purge scheduler: record run failed: %v", err)
 		}
-		log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
+		log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s, holds_excluded=%d)",
+			deleted, cutoff.Format(time.RFC3339), len(heldUserIDs))
 		adminAuditSvc.Record(rctx, adminaudit.Event{
 			ActorUserID: nil, Action: "purge", Resource: "audit_logs",
 			Path: "scheduler", Method: "INTERNAL", Success: true,
 			Metadata: map[string]any{
 				"mode": "scheduler", "cutoff": cutoff.Format(time.RFC3339),
-				"rows_deleted": deleted,
+				"rows_deleted":    deleted,
+				"holds_excluded":  len(heldUserIDs), // PR-L2
 			},
 		})
 	}

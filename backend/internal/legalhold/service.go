@@ -38,6 +38,10 @@ type Repository interface {
 	Release(ctx context.Context, id, releasedBy string) (*Hold, error)
 	HasActiveHold(ctx context.Context, userID string) (bool, error)
 	List(ctx context.Context) ([]Hold, error)
+	// PR-L2: bulk lookup для retention-aware purge. Возвращает
+	// target_user_id'ы всех is_active=true записей (каждый UUID
+	// ровно один раз — DB partial-unique index гарантирует).
+	ActiveUserIDs(ctx context.Context) ([]string, error)
 }
 
 // Service — тонкая обёртка над repo. Валидация входа (non-empty
@@ -118,6 +122,16 @@ func (s *Service) List(ctx context.Context) ([]Hold, error) {
 		return nil, ErrNotConfigured
 	}
 	return s.repo.List(ctx)
+}
+
+// ActiveUserIDs — PR-L2: для retention-aware audit-purge scheduler.
+// nil Service возвращает (nil, ErrNotConfigured) — scheduler
+// трактует как fail-closed (skip purge на этом тике).
+func (s *Service) ActiveUserIDs(ctx context.Context) ([]string, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	return s.repo.ActiveUserIDs(ctx)
 }
 
 // IsAlreadyActive — helper для handler'а, чтобы не импортировать

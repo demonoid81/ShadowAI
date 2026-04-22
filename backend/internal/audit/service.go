@@ -21,6 +21,11 @@ type Repo interface {
 
 	// PR-A: retention/purge.
 	PurgeOlderThan(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)
+	// PR-L2: retention-aware purge с exclusion list. Rows, где
+	// user_id in exceptUserIDs, НЕ удаляются (защита evidence для
+	// users'ов под active legal hold). nil/empty exceptUserIDs →
+	// идентично PurgeOlderThan.
+	PurgeOlderThanExcept(ctx context.Context, cutoff time.Time, chunkSize int, exceptUserIDs []string) (int, error)
 	// PR-D.1: target parameter разделяет purge-runs по таблицам
 	// (audit_logs vs admin_event_logs). target="" → audit_logs (BC).
 	RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error

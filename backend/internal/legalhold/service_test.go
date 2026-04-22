@@ -79,6 +79,19 @@ func (m *memRepo) List(_ context.Context) ([]Hold, error) {
 	return out, nil
 }
 
+func (m *memRepo) ActiveUserIDs(_ context.Context) ([]string, error) {
+	if m.failOn == "active" {
+		return nil, m.failErr
+	}
+	var ids []string
+	for _, h := range m.holds {
+		if h.IsActive {
+			ids = append(ids, h.TargetUserID)
+		}
+	}
+	return ids, nil
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -225,6 +238,61 @@ func TestHasActiveHold_NilService_FailClosed(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("nil service: err=nil, want err")
+	}
+}
+
+// TestActiveUserIDs_HappyPath — PR-L2: scheduler получает только
+// active-hold target_user_ids.
+func TestActiveUserIDs_HappyPath(t *testing.T) {
+	s := NewService(&memRepo{})
+	ctx := context.Background()
+	h1, _ := s.CreateHold(ctx, "u-active-1", "c1", "r", "u-admin")
+	_, _ = s.CreateHold(ctx, "u-active-2", "c2", "r", "u-admin")
+	h3, _ := s.CreateHold(ctx, "u-released", "c3", "r", "u-admin")
+	_ = h1
+	// Release third hold.
+	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin")
+
+	ids, err := s.ActiveUserIDs(ctx)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	// 2 active, released исключён.
+	if len(ids) != 2 {
+		t.Errorf("ids = %v, want 2 active", ids)
+	}
+	set := map[string]bool{}
+	for _, id := range ids {
+		set[id] = true
+	}
+	if !set["u-active-1"] || !set["u-active-2"] {
+		t.Errorf("expected u-active-1 and u-active-2 in %v", ids)
+	}
+	if set["u-released"] {
+		t.Error("released hold's user_id leaked в active list")
+	}
+}
+
+// TestActiveUserIDs_Empty — чистый deploy без holds.
+func TestActiveUserIDs_Empty(t *testing.T) {
+	s := NewService(&memRepo{})
+	ids, err := s.ActiveUserIDs(context.Background())
+	if err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("ids = %v, want empty", ids)
+	}
+}
+
+// TestActiveUserIDs_NilService_FailClosed — fail-closed для
+// scheduler: если service не сконфигурирован, scheduler не
+// должен делать unrestricted purge.
+func TestActiveUserIDs_NilService_FailClosed(t *testing.T) {
+	var s *Service
+	_, err := s.ActiveUserIDs(context.Background())
+	if err == nil {
+		t.Error("nil service: err=nil, want err (fail-closed)")
 	}
 }
 
