@@ -619,6 +619,11 @@ external tooling.
 
 ## 9. Change log
 
+- **1.11 (2026-04-22)** — PR-G2.1: defence-in-depth для duplicate
+  role entries. `evaluateRoleRules` собирает rules со ВСЕХ
+  matching role entries (не early-return на первом), что делает
+  Evaluate robust к direct-SQL / legacy import duplicates. Fix
+  stale package comment в governance/types.go.
 - **1.10 (2026-04-22)** — PR-G2: role-based governance.
   `Mode=role_based` + `Policy.RoleRules` в Policy model. Proxy
   передаёт `claims.Role` в `Evaluate`; unknown role → 403 +

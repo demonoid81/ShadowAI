@@ -229,20 +229,30 @@ func evaluateRules(rules []ProviderRule, provider, model, policyID string) Decis
 	}
 }
 
-// evaluateRoleRules — PR-G2. Находит RoleRule для caller'а и
-// применяет evaluateRules внутри. Если role отсутствует —
-// deny-by-default с CodeUnknownRole.
+// evaluateRoleRules — PR-G2. Собирает ВСЕ matching RoleRule для
+// caller'а (duplicate entries типа admin + Admin могут появиться
+// через direct SQL / legacy import — normalizeRoleRules их merge'ит
+// на write, но read-side должен быть robust). Затем применяет
+// общую evaluateRules к объединённому списку; она уже PR-G1-robust
+// к duplicate providers (обходит все matching).
+//
+// Если role не встречается ни в одной записи — deny-by-default
+// с CodeUnknownRole.
 func evaluateRoleRules(roleRules []RoleRule, role, provider, model, policyID string) Decision {
+	var matched []ProviderRule
 	for _, rr := range roleRules {
 		if !strings.EqualFold(rr.Role, role) {
 			continue
 		}
-		return evaluateRules(rr.Rules, provider, model, policyID)
+		matched = append(matched, rr.Rules...)
 	}
-	return Decision{
-		Kind:     DecisionDeny,
-		Code:     CodeUnknownRole,
-		Reason:   fmt.Sprintf("роль %q не в role_based-policy", role),
-		PolicyID: policyID,
+	if matched == nil {
+		return Decision{
+			Kind:     DecisionDeny,
+			Code:     CodeUnknownRole,
+			Reason:   fmt.Sprintf("роль %q не в role_based-policy", role),
+			PolicyID: policyID,
+		}
 	}
+	return evaluateRules(matched, provider, model, policyID)
 }

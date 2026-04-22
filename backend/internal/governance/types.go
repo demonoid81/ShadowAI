@@ -13,11 +13,15 @@
 // Core-only build передаёт nil Evaluator в proxy; proxy trivially
 // возвращает Allow (nil-safe).
 //
-// НЕ входит в v1:
-//   - role-based routing (PR-G2);
-//   - department/user policy matrix (PR-G2);
-//   - sensitivity-aware routing (PR-G2/G3);
-//   - DPA/compliance inventory UI/reporting (PR-G3).
+// Входит в phase 2 (PR-G2):
+//   - role_based Mode — per-role allowlist (см. ModeAllowlistRoleBased,
+//     Policy.RoleRules, Evaluator.Evaluate(ctx, role, ...)).
+//
+// НЕ входит в phase 2 (roadmap):
+//   - department/user policy matrix (PR-G3);
+//   - sensitivity-aware routing (PR-G3);
+//   - DPA/compliance inventory UI/reporting (PR-G3);
+//   - policy caching для high-traffic deploys (PR-G2.1).
 package governance
 
 import (

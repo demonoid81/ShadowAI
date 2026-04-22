@@ -576,6 +576,47 @@ func TestUpsert_RoleBased_NormalizesRoleNames(t *testing.T) {
 	}
 }
 
+// TestEvaluate_RoleBased_DuplicateRoleEntries_MergesMatches —
+// PR-G2.1 regression: duplicate RoleRule entries (admin + Admin
+// с split model sets) могли попасть в БД через direct SQL или
+// legacy import. Read-path не нормализует, поэтому Evaluate
+// обязан обходить ВСЕ matching role entries (defence-in-depth
+// аналогично duplicate-provider fix в PR-G1 review).
+func TestEvaluate_RoleBased_DuplicateRoleEntries_MergesMatches(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []RoleRule{
+			// Direct-SQL инжекция duplicate roles; case отличается.
+			// Второй entry содержит gpt-4o-mini — модель, которая
+			// ДОЛЖНА быть allowed для admin.
+			{Role: "Admin", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4"}},
+			}},
+			{Role: "admin", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o-mini"}},
+			}},
+		},
+	}})
+	// gpt-4o-mini присутствует только во ВТОРОЙ role entry.
+	// Pre-fix: early-return на первом "Admin" match → Deny/unknown_model.
+	// Post-fix: все matching merge'ятся → Allow.
+	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4o-mini")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("gpt-4o-mini in second duplicate role entry: %+v, want Allow", dec)
+	}
+	// Симметрично: gpt-4 из первой role entry тоже allowed.
+	dec, _ = s.Evaluate(context.Background(), "admin", "openai", "gpt-4")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("gpt-4 in first duplicate role entry: %+v, want Allow", dec)
+	}
+	// Модель, которой нет ни в одной → unknown_model (не unknown_role:
+	// роль-то мы нашли).
+	dec, _ = s.Evaluate(context.Background(), "admin", "openai", "gpt-5-beta")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
+		t.Errorf("model in neither entry: %+v, want Deny/unknown_model", dec)
+	}
+}
+
 // TestUpsert_RoleBased_SkipsEmptyRoleName.
 func TestUpsert_RoleBased_SkipsEmptyRoleName(t *testing.T) {
 	repo := &memRepo{}
