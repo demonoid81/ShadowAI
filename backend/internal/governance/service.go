@@ -3,8 +3,54 @@ package governance
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 )
+
+// normalizeRules приводит Rules к canonical form:
+//   - provider names trim+lowercase, пустые отсекаются;
+//   - modeли trim+lowercase, пустые и дубликаты схлопываются;
+//   - duplicate provider rules merge'атся в один с union моделей;
+//   - итоговый slice отсортирован по provider name для детерминизма.
+//
+// Вызывается в Service.Upsert перед repo.Upsert — в БД всегда
+// canonical form. Защищает от бага, когда admin случайно положит
+// openai + OpenAI как две строки, и от direct-SQL импортов.
+func normalizeRules(in []ProviderRule) []ProviderRule {
+	merged := make(map[string][]string)
+	seenPerProvider := make(map[string]map[string]struct{})
+	order := make([]string, 0, len(in))
+	for _, r := range in {
+		p := strings.ToLower(strings.TrimSpace(r.Provider))
+		if p == "" {
+			continue
+		}
+		if _, ok := merged[p]; !ok {
+			merged[p] = []string{}
+			seenPerProvider[p] = map[string]struct{}{}
+			order = append(order, p)
+		}
+		for _, m := range r.Models {
+			nm := strings.ToLower(strings.TrimSpace(m))
+			if nm == "" {
+				continue
+			}
+			if _, dup := seenPerProvider[p][nm]; dup {
+				continue
+			}
+			seenPerProvider[p][nm] = struct{}{}
+			merged[p] = append(merged[p], nm)
+		}
+	}
+	// Sort providers для стабильного порядка (UI не «прыгает»,
+	// тесты детерминистичны).
+	sort.Strings(order)
+	out := make([]ProviderRule, 0, len(order))
+	for _, p := range order {
+		out = append(out, ProviderRule{Provider: p, Models: merged[p]})
+	}
+	return out
+}
 
 // Repository — источник active policy. В production — PG-backed
 // (см. repository.go); в тестах — in-memory mock.
@@ -43,8 +89,11 @@ func (s *Service) GetActive(ctx context.Context) (*Policy, error) {
 	return s.repo.GetActive(ctx)
 }
 
-// Upsert — прокси к repo. Валидация Mode здесь, чтобы repo слой
-// мог верить в данные.
+// Upsert — прокси к repo. Валидация Mode + нормализация Rules.
+// Нормализация: lowercase provider/model, merge duplicate
+// providers, dedupe моделей, стабильный порядок. Это гарантирует
+// canonical form в БД и защищает Evaluate от order-зависимости
+// duplicate-rules (review finding PR-G1).
 func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy, error) {
 	if s == nil || s.repo == nil {
 		return nil, fmt.Errorf("governance: service not configured")
@@ -52,6 +101,7 @@ func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy,
 	if !p.Mode.IsValid() {
 		return nil, fmt.Errorf("governance: invalid mode %q", p.Mode)
 	}
+	p.Rules = normalizeRules(p.Rules)
 	return s.repo.Upsert(ctx, p, actor)
 }
 
@@ -91,11 +141,17 @@ func (s *Service) Evaluate(ctx context.Context, provider, model string) (Decisio
 		}
 		return dec, nil
 	}
-	// ModeAllowlistStrict
+	// ModeAllowlistStrict. Обходим ВСЕ matching provider rules
+	// (не останавливаемся на первом) — защита от duplicate rules,
+	// которые могли попасть прямым SQL до того, как normalizeRules
+	// стал gateway'ем. При любом match — Allow. Флаг matchedProvider
+	// различает unknown_model vs unknown_provider в финальном deny.
+	matchedProvider := false
 	for _, r := range p.Rules {
 		if !strings.EqualFold(r.Provider, provider) {
 			continue
 		}
+		matchedProvider = true
 		for _, m := range r.Models {
 			if strings.EqualFold(m, model) {
 				return Decision{
@@ -105,7 +161,8 @@ func (s *Service) Evaluate(ctx context.Context, provider, model string) (Decisio
 				}, nil
 			}
 		}
-		// Провайдер найден, модель — нет.
+	}
+	if matchedProvider {
 		return Decision{
 			Kind:     DecisionDeny,
 			Code:     CodeUnknownModel,

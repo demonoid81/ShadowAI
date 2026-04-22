@@ -168,3 +168,47 @@ curl -s -X POST -H "Authorization: Bearer $USER_TOKEN" \
   source.
 - **v3 (PR-G3)**: compliance inventory UI.
 - **v4+**: policy history/diff, approval workflow, L7 egress.
+
+## Review-fix #1 (2026-04-22)
+
+### Medium: Policy rules — order-dependent Evaluate + no dedup
+Ревьюер заметил, что Evaluate останавливался на первом matching
+provider rule и возвращал `unknown_model`, если этот rule не
+содержит запрошенную модель — даже если вторая matching rule
+(например case-duplicate `openai` vs `OpenAI`) разрешает её.
+Handler и Repository сохраняли Rules без дедупликации/нормализации.
+
+**Fix (defence-in-depth):**
+
+1. `service.normalizeRules` — lowercase provider/model, merge
+   duplicate providers (union моделей), dedupe моделей within rule,
+   стабильный порядок. Вызывается в `Service.Upsert` перед
+   `repo.Upsert`. В БД всегда canonical form.
+2. `service.Evaluate` — обходит ВСЕ matching provider rules вместо
+   остановки на первом. Флаг `matchedProvider` различает
+   `unknown_model` vs `unknown_provider` в финальном Deny. Даже если
+   direct-SQL вставит non-canonical rules, Evaluate работает
+   корректно.
+
+**Тесты (7 новых, все red → green):**
+- `TestEvaluate_DuplicateProviderCaseVariants_MergesMatches`
+- `TestEvaluate_DuplicateProviderExact_MergesMatches`
+- `TestEvaluate_DuplicateProvider_ModelInNeitherRule`
+- `TestUpsert_NormalizesProviderCasing`
+- `TestUpsert_MergesDuplicateProviders`
+- `TestUpsert_DedupesModelsWithinRule`
+- `TestUpsert_SkipsEmptyProviderName`
+- `TestUpsert_StableOrdering`
+
+### Low: Misleading comment в main.go wiring
+Старый комментарий утверждал, что при отсутствии таблицы
+`GetActive` возвращает `(nil, nil) → governance_disabled`.
+Фактически repository.go возвращает `(nil, nil)` только для
+`sql.ErrNoRows`; missing table — это другая ошибка, которая
+попадает в fail-closed path (Deny всех запросов).
+
+**Fix:** обновлён комментарий в `main.go`: migration 012
+обозначен как ОБЯЗАТЕЛЬНЫЙ, soft-disable производится через
+admin API с Mode=disabled, не через пропуск миграции.
+Empty state (migration есть, записей нет) обрабатывается
+корректно за счёт seed-row в migration.

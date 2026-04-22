@@ -222,6 +222,183 @@ func TestEvaluate_RepoError_FailClosed(t *testing.T) {
 	}
 }
 
+// TestEvaluate_DuplicateProviderCaseVariants_MergesMatches — review-
+// finding: старая реализация останавливалась на первом matching
+// provider rule и сразу возвращала unknown_model, если модель не
+// в нём — даже если она присутствовала во втором matching rule
+// (например duplicate из-за case-only разницы openai vs OpenAI).
+// После fix'а Evaluate обходит все matching rules.
+func TestEvaluate_DuplicateProviderCaseVariants_MergesMatches(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistStrict, IsActive: true,
+		Rules: []ProviderRule{
+			// Admin каким-то образом положил две строки с case-only
+			// разницей в Rules (прямой SQL, баг UI, импорт). До fix'а
+			// Evaluate возвращал Deny на gpt-4o-mini, потому что
+			// первый matching rule (OpenAI) содержит только gpt-4.
+			{Provider: "OpenAI", Models: []string{"gpt-4"}},
+			{Provider: "openai", Models: []string{"gpt-4o-mini"}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4o-mini")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("kind = %v, want Allow (модель присутствует во втором matching rule), decision=%+v", dec.Kind, dec)
+	}
+}
+
+// TestEvaluate_DuplicateProviderExact_MergesMatches — тот же случай,
+// но без case-разницы: две записи для одного provider (strict dup).
+// Evaluate должен считать union моделей.
+func TestEvaluate_DuplicateProviderExact_MergesMatches(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistStrict, IsActive: true,
+		Rules: []ProviderRule{
+			{Provider: "openai", Models: []string{"gpt-4"}},
+			{Provider: "openai", Models: []string{"gpt-4o"}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4o")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("kind = %v, want Allow для модели из второго rule", dec.Kind)
+	}
+}
+
+// TestEvaluate_DuplicateProvider_ModelInNeitherRule — если ни один
+// из matching rules не содержит модель, возвращаем unknown_model
+// (а не unknown_provider — провайдер-то нашли).
+func TestEvaluate_DuplicateProvider_ModelInNeitherRule(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistStrict, IsActive: true,
+		Rules: []ProviderRule{
+			{Provider: "openai", Models: []string{"gpt-4"}},
+			{Provider: "openai", Models: []string{"gpt-4o"}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-5-beta")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
+		t.Errorf("got %+v, want Deny/unknown_model", dec)
+	}
+}
+
+// TestUpsert_NormalizesProviderCasing — review-fix: Service.Upsert
+// приводит provider/models к lowercase и merge'ит duplicates ДО
+// persist. В БД всегда canonical form — защита от человеческих
+// ошибок в UI и от direct-SQL редактирования.
+func TestUpsert_NormalizesProviderCasing(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistStrict,
+		Rules: []ProviderRule{
+			{Provider: "OpenAI", Models: []string{"GPT-4", "gpt-4o"}},
+		},
+	}
+	saved, err := s.Upsert(context.Background(), p, "u-admin")
+	if err != nil {
+		t.Fatalf("upsert err: %v", err)
+	}
+	if len(saved.Rules) != 1 {
+		t.Fatalf("rules = %+v, want 1", saved.Rules)
+	}
+	if saved.Rules[0].Provider != "openai" {
+		t.Errorf("provider = %q, want lowercase openai", saved.Rules[0].Provider)
+	}
+	// Модели в lowercase.
+	for _, m := range saved.Rules[0].Models {
+		if m != "gpt-4" && m != "gpt-4o" {
+			t.Errorf("model %q не нормализован в lowercase", m)
+		}
+	}
+}
+
+// TestUpsert_MergesDuplicateProviders — две записи одного provider
+// (разные casing) сливаются в одну canonical с union моделей.
+func TestUpsert_MergesDuplicateProviders(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistStrict,
+		Rules: []ProviderRule{
+			{Provider: "OpenAI", Models: []string{"gpt-4"}},
+			{Provider: "openai", Models: []string{"gpt-4o-mini"}},
+		},
+	}
+	saved, _ := s.Upsert(context.Background(), p, "u-admin")
+	if len(saved.Rules) != 1 {
+		t.Fatalf("rules count = %d, want 1 (duplicates merged), rules=%+v", len(saved.Rules), saved.Rules)
+	}
+	got := saved.Rules[0]
+	if got.Provider != "openai" {
+		t.Errorf("provider = %q, want openai", got.Provider)
+	}
+	if len(got.Models) != 2 {
+		t.Errorf("models = %v, want [gpt-4, gpt-4o-mini]", got.Models)
+	}
+}
+
+// TestUpsert_DedupesModelsWithinRule — дубликаты моделей внутри
+// одного rule схлопываются, включая case-only duplicates.
+func TestUpsert_DedupesModelsWithinRule(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistStrict,
+		Rules: []ProviderRule{
+			{Provider: "openai", Models: []string{"gpt-4", "GPT-4", "gpt-4"}},
+		},
+	}
+	saved, _ := s.Upsert(context.Background(), p, "u-admin")
+	if len(saved.Rules) != 1 || len(saved.Rules[0].Models) != 1 {
+		t.Fatalf("expected 1 rule with 1 model, got %+v", saved.Rules)
+	}
+}
+
+// TestUpsert_SkipsEmptyProviderName — пустой provider name отсекается.
+// Админ случайно нажал «добавить rule» без названия — не должно
+// упасть и не должно пробиться в БД.
+func TestUpsert_SkipsEmptyProviderName(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistStrict,
+		Rules: []ProviderRule{
+			{Provider: "", Models: []string{"x"}},
+			{Provider: "openai", Models: []string{"gpt-4"}},
+		},
+	}
+	saved, _ := s.Upsert(context.Background(), p, "u-admin")
+	if len(saved.Rules) != 1 || saved.Rules[0].Provider != "openai" {
+		t.Errorf("empty-provider rule не отсечён: %+v", saved.Rules)
+	}
+}
+
+// TestUpsert_StableOrdering — провайдеры сохраняются в
+// detrministic-порядке (alphabetical по canonical name). Это важно
+// для UI (list не «прыгает» между save'ами) и для
+// deterministic-тестов.
+func TestUpsert_StableOrdering(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistStrict,
+		Rules: []ProviderRule{
+			{Provider: "openai", Models: []string{"gpt-4"}},
+			{Provider: "anthropic", Models: []string{"claude-3"}},
+			{Provider: "gemini", Models: []string{"pro"}},
+		},
+	}
+	saved, _ := s.Upsert(context.Background(), p, "u-admin")
+	if len(saved.Rules) != 3 {
+		t.Fatalf("rules = %d, want 3", len(saved.Rules))
+	}
+	wantOrder := []string{"anthropic", "gemini", "openai"}
+	for i, w := range wantOrder {
+		if saved.Rules[i].Provider != w {
+			t.Errorf("[%d] provider = %q, want %q", i, saved.Rules[i].Provider, w)
+		}
+	}
+}
+
 // TestMode_IsValid — проверка валидатора для handler'а (admin UI
 // может прислать typo или unknown tag).
 func TestMode_IsValid(t *testing.T) {

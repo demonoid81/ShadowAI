@@ -290,9 +290,20 @@ func main() {
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, adminAuditSvc)
 
 	// PR-G1: Provider/Model Governance wiring.
-	// Одно-таблица storage (migration 012_create_provider_governance_policies.sql)
-	// с singleton-строкой. nil-safe: при отсутствии таблицы GetActive
-	// вернёт (nil, nil) → governance_disabled.
+	// Single-row storage (migration 012_create_provider_governance_policies.sql).
+	//
+	// ВАЖНО: migration 012 ОБЯЗАТЕЛЕН для корректной работы этого
+	// сервиса. Если таблица отсутствует, GetActive вернёт repo-error
+	// (не sql.ErrNoRows), и Evaluate корректно отправит fail-closed
+	// Deny на каждый запрос → proxy вернёт 403 для всех вызовов.
+	// Это сознательный выбор (compliance-control должен быть
+	// fail-closed). Для soft-disable через конфиг — установите
+	// Mode=disabled через admin API, а не пропускайте migration.
+	//
+	// Empty state (migration применён, но записей нет) обрабатывается
+	// корректно: repo возвращает (nil, nil) → governance_disabled.
+	// Seed-row в migration 012 создаёт default-запись в disabled mode
+	// при первом apply, чтобы UI видел валидный state с нуля.
 	governanceRepo := governance.NewPGRepository(db)
 	governanceSvc := governance.NewService(governanceRepo)
 	governanceHandler := governance.NewHandler(governanceSvc, adminAuditSvc)
