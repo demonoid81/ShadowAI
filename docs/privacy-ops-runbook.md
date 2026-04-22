@@ -496,8 +496,14 @@ external tooling.
   включает `target_role`; email НЕ дублируется (сам endpoint
   возвращает email — запись о доступе достаточна для forensics).
   Реализовано в `authHandler.recordUserRead` (PR-G0).
-- **[gap]** `ListUsers` (GET `/api/users`) и `UpdateUser`
-  (PUT `/api/users/{id}`) пока НЕ покрыты — см. PR-G0.1/G0.2 roadmap.
+- **[implemented]** GET `/api/users` (ListUsers) → запись в
+  `admin_event_logs` (resource=`users` plural, action=`list`,
+  target_id пустой). Metadata ограничена `user_count`; emails/role'ы
+  клиентов не дублируются (response body уже их содержит). Failure
+  path (repo error → 500) тоже пишет event с `success=false`.
+  Реализовано в `authHandler.recordUsersList` (PR-G0.1).
+- **[gap]** `UpdateUser` (PUT `/api/users/{id}`) пока НЕ покрыт —
+  см. PR-G0.2 roadmap.
 
 ### 8.6 4-eyes policy для destructive ops
 
@@ -537,6 +543,9 @@ external tooling.
 
 ## 9. Change log
 
+- **1.2 (2026-04-22)** — PR-G0.1: §8.5 дополнен ListUsers audit.
+  `authHandler.recordUsersList` пишет admin_event_logs с
+  `resource=users, action=list`. UpdateUser остаётся `[gap]` (PR-G0.2).
 - **1.1 (2026-04-21)** — PR-G0: §8.5 user-read access audit переведён
   в `[implemented]` для GET `/api/users/{id}`. ListUsers/UpdateUser
   остаются `[gap]` (PR-G0.1/G0.2).

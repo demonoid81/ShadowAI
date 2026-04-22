@@ -140,6 +140,9 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.service.GetRepo().ListUsers(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		h.recordUsersList(r, http.StatusInternalServerError, false, map[string]any{
+			"error": "repo_failure",
+		})
 		return
 	}
 	if users == nil {
@@ -149,6 +152,40 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		users[i].APIKey = ""
 	}
 	writeJSON(w, http.StatusOK, users)
+	// PR-G0.1: admin list-access audit. Resource="users" (plural) —
+	// отличает list-scan от targeted read. Metadata ограничена
+	// count'ом — emails/role'ы клиентов admin UI уже получил в response,
+	// и дублировать PII в admin_event_logs не требуется. Forensics
+	// через count + actor + timestamp достаточно для "кто когда
+	// скачал список клиентов".
+	h.recordUsersList(r, http.StatusOK, true, map[string]any{
+		"user_count": len(users),
+	})
+}
+
+// recordUsersList — PR-G0.1: admin list-access audit for
+// GET /api/users. Nil-safe (Core build / dev без adminAudit).
+// Не дублирует email'ы в metadata (response body уже их содержит;
+// event — просто trail актёра/времени).
+func (h *Handler) recordUsersList(r *http.Request, status int, success bool, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if claims := GetClaims(r.Context()); claims != nil {
+		id := claims.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "list",
+		Resource:    "users",
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  status,
+		Success:     success,
+		Metadata:    metadata,
+	})
 }
 
 func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
