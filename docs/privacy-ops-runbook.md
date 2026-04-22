@@ -306,11 +306,17 @@ Requirement "заморозить" удаление данных конкрет�
 4. **Backup freeze** (`[manual]`): infra excludes snapshot'ы с
    held data из eviction.
 5. **Audit-retention**:
-   - **Enterprise build + scheduler** (`[implemented]`, PR-L2.1):
-     in-process scheduler использует single-SQL race-free
-     `PurgeOlderThanRespectingHolds` — rows под active hold
-     автоматически исключаются из каждого purge-tick'а, пока hold
-     remains active. Manual pause НЕ требуется.
+   - **Enterprise build + scheduler** (`[implemented, partial]`,
+     PR-L2/L2.1/L2.2): in-process scheduler использует single-SQL
+     `PurgeOlderThanRespectingHolds`. Rows под active hold
+     исключаются автоматически на каждом tick'е, **за
+     исключением узкого race-window внутри одного DELETE
+     statement'а** (hold, applied ПОСЛЕ начала DELETE, не
+     защитит rows на этом tick'е; на следующем — защитит).
+     Для большинства сценариев это acceptable. Для строгого
+     compliance — apply_hold ДО `cutoff - AUDIT_PURGE_INTERVAL`
+     времени, либо ждать PR-L3 (true race-free через
+     advisory lock).
    - **Core-only CLI** (`cmd/audit-purge` без enterprise tag
      или внешний cron-wrapper вокруг CLI): `[manual]`. CLI не
      консультирует legal_holds (Core scope без enterprise
@@ -518,16 +524,32 @@ external tooling.
   `ValidateStartupConfig` требует >=32 chars). Без secret
   guessable case-IDs (SEC-2026-NNN) можно было бы brute-force'ить
   из mirror dump.
-- **[implemented]** (PR-L2 / PR-L2.1) Retention-aware purge для
-  enterprise `runAuditPurgeScheduler`. PR-L2.1 устранил
-  snapshot-delete race: `PurgeOlderThanRespectingHolds` делает
-  single-SQL DELETE с `NOT EXISTS (... FROM legal_holds ...)` —
-  PG MVCC консультирует legal_holds в момент row-scan'а, hold
-  создаётся atomically защищает свои rows без user-level race.
-  `holds_excluded` count (snapshot) остаётся в admin_event_logs.
-  metadata для forensic UI / SIEM; race в этом числе acceptable
-  (correctness не зависит). Fail-closed: если hold-lookup падает,
-  purge-tick пропускается (evidence preservation > availability).
+- **[implemented, partial]** (PR-L2 / PR-L2.1 / PR-L2.2)
+  Retention-aware purge для enterprise
+  `runAuditPurgeScheduler`. PR-L2.1 СУЖАЕТ (не устраняет)
+  snapshot-delete race через single-SQL DELETE с `NOT EXISTS
+  (... FROM legal_holds ...)`.
+  - **Важно**: PostgreSQL default **READ COMMITTED**
+    даёт statement-level snapshot в начале DELETE. Hold,
+    applied ПОСЛЕ старта statement'а, ещё не виден этому
+    statement'у — его rows могут удалиться на текущем tick'е.
+    На следующем tick'е уже защищены.
+  - **Residual race-window**: миллисекунды (длина одного
+    DELETE-chunk'а для chunkSize=1000). Acceptable для
+    большинства compliance-рамок, но **не строгий race-free
+    guarantee**.
+  - **Mitigation сейчас**: hold рекомендовано apply'ить ЗА
+    ДОЛГО до cutoff времени. Operator workflow:
+    получить hold-order → apply_hold immediately → через
+    `AUDIT_PURGE_INTERVAL` rows уже защищены.
+  - **True race-free — roadmap PR-L3**: SERIALIZABLE
+    isolation + advisory lock (`pg_advisory_lock` на shared
+    namespace между apply_hold и purge).
+  - **Fail-closed на hold-lookup**: если scheduler не может
+    прочитать active-hold list — purge пропускается целиком
+    (evidence preservation > availability).
+  - `holds_excluded` count в admin_event_logs — forensic
+    display (snapshot, race acceptable там).
 - **[gap]** Core-only build'а `cmd/audit-purge` CLI не имеет
   доступа к legal_holds (package enterprise-only) — использует
   backward-compat `PurgeOlderThan`. Для Core operator ожидается
@@ -639,6 +661,16 @@ external tooling.
 
 ## 9. Change log
 
+- **1.14 (2026-04-22)** — PR-L2.2: честные формулировки race-
+  properties. Формулировки "race-free" заменены на "narrows
+  race-window" в retention_hold.go комментарии, enterprise_wire.go
+  и runbook §5.3/§8.2. Явно указан residual race-window (под
+  READ COMMITTED hold ПОСЛЕ начала DELETE не защитит rows в
+  этом statement'е). True race-free design (SERIALIZABLE +
+  advisory lock) — roadmap PR-L3. Также scheduler заменил
+  concrete `(*audit.Repository)` type assertion на structural
+  interface assertion (`holdAwarePurger`), decorator-friendly;
+  при fallback пишется admin-event, не silent log.
 - **1.13 (2026-04-22)** — PR-L2.1: race-fix. Scheduler переключён
   с snapshot→delete two-step на single-SQL
   `PurgeOlderThanRespectingHolds` (NOT EXISTS ... FROM legal_holds).

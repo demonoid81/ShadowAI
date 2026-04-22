@@ -2,14 +2,32 @@
 
 // Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
 //
-// PR-L2.1: устраняет race между ActiveUserIDs snapshot и DELETE
-// (PR-L2). Вместо двухшагового snapshot→delete используется single
-// SQL-statement с `NOT EXISTS (SELECT ... FROM legal_holds ...)`.
-// PG MVCC даёт snapshot-isolated view на то же состояние
-// legal_holds, что видно в момент DELETE row-scan'а — hold,
-// созданный после начала statement'а, защищает rows automatically
-// (если READ COMMITTED) или вся delete пропустит любые rows,
-// защищённые active hold'ом на момент старта statement'а.
+// PR-L2.1 / PR-L2.2: СУЖАЕТ race-window между apply_hold и purge,
+// но НЕ устраняет его полностью.
+//
+// Было (PR-L2): race от snapshot-read (ActiveUserIDs в Go) до
+// DELETE-statement'а — десятки миллисекунд с сетевым round-trip'ом.
+//
+// Стало (PR-L2.1): race только внутри одного DELETE statement'а.
+// PostgreSQL default READ COMMITTED даёт statement-level snapshot,
+// установленный в начале DELETE. Hold, applied ПОСЛЕ начала
+// statement'а, НЕ виден этому statement'у → его rows всё ещё
+// могут удалиться в том же tick'е (на следующем tick'е — уже
+// защищены).
+//
+// Residual race-window зависит от chunkSize (длина одного DELETE).
+// Для prod chunkSize=1000 это миллисекунды; acceptable для
+// большинства compliance-рамок. ДЛЯ СТРОГОГО COMPLIANCE (true
+// race-free):
+//   - SERIALIZABLE isolation на purge transaction +
+//     apply_hold retry logic; или
+//   - advisory lock: apply_hold → pg_advisory_lock(hold_ns),
+//     purge → pg_advisory_lock(hold_ns). Performance-impact на
+//     apply_hold (acceptable, apply редкий).
+//
+// Эти design'ы — roadmap (PR-L3 coordination). Пока — документируем
+// ограничение и полагаемся на `AUDIT_PURGE_INTERVAL` >= некоторой
+// retention margin'ы (hold применён ДО cutoff, не после).
 
 package audit
 
@@ -42,6 +60,10 @@ import (
 //
 // user_id IS NULL rows остаются eligible — это post-DSAR scrubbed
 // rows, legal-hold к ним не может применяться (user'а нет).
+//
+// Race-window: под READ COMMITTED hold, applied после начала DELETE
+// statement'а, не виден ему — его rows могут удалиться. См. package
+// comment выше для полной картины и roadmap-path'ов к true race-free.
 func (r *Repository) PurgeOlderThanRespectingHolds(ctx context.Context, cutoff time.Time, chunkSize int) (int, error) {
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)

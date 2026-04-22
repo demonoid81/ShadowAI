@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -123,13 +124,34 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 		cfg.AuditPurgeInterval, cfg.AuditRetentionDays, cfg.AuditPurgeChunkSize)
 	ticker := time.NewTicker(cfg.AuditPurgeInterval)
 	defer ticker.Stop()
-	// PR-L2.1: type-assert к concrete *audit.Repository, нужен для
-	// доступа к PurgeOlderThanRespectingHolds (enterprise-only
-	// метод, не в audit.Repo interface).
+	// PR-L2.2: structural interface assertion вместо concrete
+	// *audit.Repository. Если в будущем repo будет обёрнут
+	// декоратором (metrics/tracing), decorator сам должен
+	// forward'ить PurgeOlderThanRespectingHolds → assertion
+	// всё ещё пройдёт. В случае несовместимой обёртки scheduler
+	// не просто log-и-выйти, а пишет admin_event для operator'а.
+	// Интерфейс объединяет оба метода scheduler'а: hold-aware
+	// purge + RecordPurgeRun (последний есть в audit.Repo, но
+	// мы декларируем его явно чтобы decorator был обязан
+	// forward'ить оба).
+	type holdAwarePurger interface {
+		PurgeOlderThanRespectingHolds(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)
+		RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error
+	}
 	repoIface := auditSvc.GetRepo()
-	repo, ok := repoIface.(*audit.Repository)
+	repo, ok := repoIface.(holdAwarePurger)
 	if !ok {
-		log.Printf("audit-purge scheduler: unexpected repo type %T — not *audit.Repository, cannot start scheduler", repoIface)
+		log.Printf("audit-purge scheduler: audit.Repo does not implement holdAwarePurger (%T) — scheduler not started", repoIface)
+		adminAuditSvc.Record(ctx, adminaudit.Event{
+			ActorUserID: nil, Action: "scheduler_init_failed",
+			Resource: "audit_logs",
+			Path:     "scheduler", Method: "INTERNAL", Success: false,
+			Metadata: map[string]any{
+				"error":          "repo_missing_hold_aware_method",
+				"repo_concrete":  fmt.Sprintf("%T", repoIface),
+				"component":      "runAuditPurgeScheduler",
+			},
+		})
 		return
 	}
 	purge := func() {
@@ -137,13 +159,16 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
 
-		// PR-L2.1: race-free retention-aware purge через single SQL
-		// statement. `PurgeOlderThanRespectingHolds` делает DELETE
-		// с NOT EXISTS(...FROM legal_holds) — consults legal_holds
-		// непосредственно в delete-statement, а не через отдельный
-		// snapshot. PG MVCC гарантирует consistent view: hold,
-		// applied между началом statement'а и row-scan'ом, защитит
-		// свои rows без user-level race.
+		// PR-L2.1 / PR-L2.2: СУЖАЕТ race-window через single-SQL
+		// DELETE с NOT EXISTS(...FROM legal_holds). Под READ COMMITTED
+		// statement берёт snapshot в начале DELETE — hold applied
+		// ПОСЛЕ начала DELETE ещё не виден, его rows могут удалиться
+		// на этом tick'е. На следующем tick'е уже защищены.
+		//
+		// Истинно race-free design (SERIALIZABLE / advisory lock) —
+		// roadmap PR-L3 coordination. Текущая реализация достаточна
+		// если AUDIT_PURGE_INTERVAL >> время apply_hold round-trip'а
+		// (default values это покрывают).
 		//
 		// heldUserIDs-snapshot продолжаем брать ТОЛЬКО для
 		// metadata.holds_excluded (для forensics UI / SIEM). Race
