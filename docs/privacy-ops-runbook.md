@@ -486,8 +486,18 @@ external tooling.
 - **[gap]** `admin_event_logs` хранится в primary PG, admin с DB-
   доступом может редактировать напрямую. Это нарушает "immutability"
   которую ожидает compliance-grade WORM.
-- **[planned]** Mirroring в external SIEM с append-only storage
-  (Splunk/Elastic/AWS CloudTrail-like).
+- **[implemented]** Mirror в external SIEM через HTTP (Splunk HEC,
+  Elastic ingest, custom collector). `SIEM_ENABLED=true` +
+  `SIEM_ENDPOINT=https://...` + опциональный `SIEM_BEARER_TOKEN`
+  активируют fan-out: каждая запись в `admin_event_logs` дублируется
+  в HTTP sink. Fail-open: недоступность SIEM не ломает primary
+  endpoint; PG остаётся source of truth. Реализовано в
+  `backend/internal/siem/` (PR-S1). Metrics:
+  `shadowai_siem_requests_total`, `_fail_total`, `_timeout_total`,
+  `_latency_seconds`.
+- **[planned]** full WORM-storage (primary storage is external
+  append-only, а не PG) — v2+ ask; требует external-first write
+  architecture.
 
 ### 8.5 Access audit для user reads
 
@@ -551,6 +561,10 @@ external tooling.
 
 ## 9. Change log
 
+- **1.4 (2026-04-22)** — PR-S1: §8.4 дополнен SIEM mirror для
+  `admin_event_logs` через HTTP (fail-open). Закрывает основной
+  ask для external tamper-resistant log pipeline. WORM primary
+  storage остаётся v2+ roadmap.
 - **1.3 (2026-04-22)** — PR-G0.2: §8.5 дополнен UpdateUser audit.
   `authHandler.recordUserUpdate` пишет `admin_event_logs` с
   `resource=user, action=update` + diff в metadata (changed_fields,

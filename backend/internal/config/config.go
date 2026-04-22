@@ -63,6 +63,16 @@ type Config struct {
 	// обычно нужно хранить дольше user traffic (compliance). 0 = no-purge.
 	AdminAuditRetentionDays int
 
+	// PR-S1: SIEM mirror. Отправка admin_event_logs в внешний append-only
+	// sink (Splunk HEC, Elastic ingest gateway, custom collector).
+	// Enterprise-only: поля читаются всегда, но HTTP recorder существует
+	// только в enterprise build.
+	SIEMEnabled            bool          // SIEM_ENABLED (default false)
+	SIEMEndpoint           string        // SIEM_ENDPOINT (HTTPS URL)
+	SIEMTimeout            time.Duration // SIEM_TIMEOUT (default 3s)
+	SIEMBearerToken        string        // SIEM_BEARER_TOKEN (optional)
+	SIEMInsecureSkipVerify bool          // SIEM_INSECURE_SKIP_VERIFY (dev only)
+
 	// Firewall
 	FirewallEnabled              bool
 	FirewallPIEnabled            bool
@@ -155,6 +165,13 @@ func Load() *Config {
 		AuditAllowNoRetentionInProd: getEnv("AUDIT_ALLOW_NO_RETENTION_IN_PROD", "false") == "true",
 		// PR-D.1
 		AdminAuditRetentionDays: getEnvInt("ADMIN_AUDIT_RETENTION_DAYS", 0),
+
+		// PR-S1: SIEM mirror.
+		SIEMEnabled:            getEnv("SIEM_ENABLED", "false") == "true",
+		SIEMEndpoint:           getEnv("SIEM_ENDPOINT", ""),
+		SIEMTimeout:            getDuration("SIEM_TIMEOUT", 3*time.Second),
+		SIEMBearerToken:        getEnv("SIEM_BEARER_TOKEN", ""),
+		SIEMInsecureSkipVerify: getEnv("SIEM_INSECURE_SKIP_VERIFY", "false") == "true",
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",

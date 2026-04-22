@@ -17,6 +17,7 @@ import (
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/governance"
+	"github.com/shadowai/backend/internal/siem"
 )
 
 // buildEnterpriseBundle (Enterprise-build) создаёт full-featured
@@ -29,6 +30,24 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	adminAuditSvc := adminaudit.NewService(adminAuditRepo)
 	adminAuditHandler := adminaudit.NewHandler(adminAuditRepo)
 
+	// PR-S1: SIEM mirror. Если SIEM_ENABLED=true и endpoint задан —
+	// оборачиваем adminAuditSvc fan-out recorder'ом. Primary flow:
+	// handlers писать через adminAuditRecorder, который делает
+	// DB+SIEM (fail-open по SIEM).
+	var adminAuditRecorder adminaudit.Recorder = adminAuditSvc
+	if deps.Cfg.SIEMEnabled && deps.Cfg.SIEMEndpoint != "" {
+		siemRec := siem.NewHTTPRecorder(
+			deps.Cfg.SIEMEndpoint,
+			deps.Cfg.SIEMBearerToken,
+			deps.Cfg.SIEMTimeout,
+			deps.Cfg.SIEMInsecureSkipVerify,
+		)
+		adminAuditRecorder = &siem.FanoutAdminRecorder{
+			DB:   adminAuditSvc,
+			SIEM: siemRec,
+		}
+	}
+
 	// DSAR erasure (PR-B). auditRepo + budgetRepo используются как
 	// AuditScrubber + BudgetDeleter через interface intersection.
 	erasureSvc := auth.NewErasureService(deps.DB, deps.AuditRepo, deps.BudgetRepo)
@@ -36,10 +55,10 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	// Provider/Model Governance (PR-G1). Singleton via migration 012.
 	governanceRepo := governance.NewPGRepository(deps.DB)
 	governanceSvc := governance.NewService(governanceRepo)
-	governanceHandler := governance.NewHandler(governanceSvc, adminAuditSvc)
+	governanceHandler := governance.NewHandler(governanceSvc, adminAuditRecorder)
 
 	return &enterpriseBundle{
-		AdminAudit: adminAuditSvc,
+		AdminAudit: adminAuditRecorder,
 		Governance: governanceSvc,
 		Eraser:     erasureSvc,
 
@@ -55,12 +74,13 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 
 		StartSchedulers: func(ctx context.Context, cfg *config.Config) {
 			// PR-A: audit-purge scheduler для audit_logs.
+			// PR-S1: purge events тоже уходят в SIEM через fanout recorder.
 			if cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0 {
-				go runAuditPurgeScheduler(ctx, cfg, deps.AuditSvc, adminAuditSvc)
+				go runAuditPurgeScheduler(ctx, cfg, deps.AuditSvc, adminAuditRecorder)
 			}
 			// PR-D.1: admin-events purge scheduler.
 			if cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0 {
-				go runAdminEventsPurgeScheduler(ctx, cfg, deps.AuditRepo, adminAuditRepo, adminAuditSvc)
+				go runAdminEventsPurgeScheduler(ctx, cfg, deps.AuditRepo, adminAuditRepo, adminAuditRecorder)
 			}
 		},
 	}

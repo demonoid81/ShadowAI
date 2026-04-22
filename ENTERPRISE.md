@@ -25,6 +25,9 @@ The following paths are covered by [LICENSE.enterprise](LICENSE.enterprise):
 - `backend/internal/governance/` — Provider/Model Governance
   (allowlist, deny-by-default, policy visibility, policy deny
   events).
+- `backend/internal/siem/` — SIEM mirror: fan-out recorder + HTTP
+  sink для внешнего append-only evidence stream
+  (Splunk/Elastic/CloudTrail-like).
 
 ### Individual Go files
 
