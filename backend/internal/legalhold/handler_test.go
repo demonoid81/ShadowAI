@@ -434,6 +434,33 @@ func TestTokenizer_TokenLength_16Hex(t *testing.T) {
 	}
 }
 
+// TestTokenizer_ConcurrentUnkeyed_NoRace — PR-L1.3: `go test -race`
+// regression guard. Два concurrent goroutines вызывают Tokenize()
+// на unkeyed tokenizer. warning-once logic теперь защищена
+// sync.Once, так что race detector должен молчать.
+//
+// Проверка rotates через t.Parallel + параллельный fan-out.
+func TestTokenizer_ConcurrentUnkeyed_NoRace(t *testing.T) {
+	tok := newTokenizer("")
+	const workers = 32
+	start := make(chan struct{})
+	done := make(chan struct{}, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			_ = tok.Tokenize("SEC-2026-042")
+			done <- struct{}{}
+		}()
+	}
+	close(start)
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+	// Explicit re-call чтобы убедиться, что warning не emit'ит
+	// ошибку на повторном calls (sync.Once уже сработал).
+	_ = tok.Tokenize("SEC-2026-043")
+}
+
 // TestNewHandlerWithSecret_UsesKeyed — integration: Handler созданный
 // с secret использует keyed tokenizer, не plain.
 func TestNewHandlerWithSecret_UsesKeyed(t *testing.T) {

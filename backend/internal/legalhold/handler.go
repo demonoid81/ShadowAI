@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -23,34 +24,36 @@ import (
 // 64 bit) вместо plain SHA-256 для case_ref-токена в SIEM/admin
 // metadata. Keyed tokenizer предотвращает offline brute-force
 // guessable case ID форматов (SEC-2026-NNN и т.п.). Secret задан в
-// LEGAL_HOLD_TOKEN_SECRET; prod-валидация в ValidateStartupConfig
-// требует >=32 chars.
+// LEGAL_HOLD_TOKEN_SECRET; prod-валидация в validate_enterprise.go
+// требует >=32 chars (только enterprise build).
 //
 // Fallback: если secret пустой (dev/legacy deploy), Tokenize()
 // возвращает unkeyed SHA-256 hash + логирует WARNING один раз на
-// process (не spam'ит per-request).
+// process. Warning emission защищён sync.Once — безопасно при
+// concurrent requests (PR-L1.3 data-race fix).
 type tokenizer struct {
-	secret        []byte
-	warnedUnkeyed bool
+	secret    []byte
+	warnOnce  sync.Once
 }
 
 // newTokenizer. Пустой secret → unkeyed mode (dev only — prod
-// startup-guard отвергает).
+// startup-guard в enterprise build отвергает).
 func newTokenizer(secret string) *tokenizer {
 	return &tokenizer{secret: []byte(secret)}
 }
 
 // Tokenize возвращает 16-hex-char токен case_ref. Деterministic
 // относительно secret: одинаковый (secret, caseRef) → одинаковый
-// token (SIEM correlation сохраняется).
+// token (SIEM correlation сохраняется). Безопасно вызывать
+// concurrently.
 func (t *tokenizer) Tokenize(caseRef string) string {
 	if len(t.secret) == 0 {
 		// Unkeyed fallback — для dev / legacy без secret.
-		// Одноразовый warning, чтобы operator увидел в logs.
-		if !t.warnedUnkeyed {
+		// sync.Once гарантирует один warning per-process
+		// независимо от concurrent Tokenize-вызовов.
+		t.warnOnce.Do(func() {
 			log.Printf("legalhold: LEGAL_HOLD_TOKEN_SECRET not set, using unkeyed SHA-256 for case_ref tokens — DEV ONLY, brute-force-weak")
-			t.warnedUnkeyed = true
-		}
+		})
 		sum := sha256.Sum256([]byte(caseRef))
 		return hex.EncodeToString(sum[:8])
 	}

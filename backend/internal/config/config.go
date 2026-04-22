@@ -277,14 +277,13 @@ func (c *Config) ValidateStartupConfig() error {
 	//     encrypted. Запрещено в prod.
 	// (3) InsecureSkipVerify=true — отключает TLS-verify; в prod
 	//     допустимо только через explicit override.
-	// PR-L1.2: legal-hold token secret обязателен в prod. Без него
-	// case_ref token в SIEM mirror — plain SHA-256 truncated, что
-	// brute-force'ится оффлайн для guessable case-ID форматов.
-	if strings.TrimSpace(c.LegalHoldTokenSecret) == "" {
-		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be set (>=32 chars) in prod to enable keyed HMAC for legal-hold case refs")
-	} else if len(c.LegalHoldTokenSecret) < 32 {
-		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be >=32 chars (current shorter — insufficient entropy for HMAC)")
-	}
+	// PR-L1.3: enterprise-only validation (LEGAL_HOLD_TOKEN_SECRET и
+	// прочее enterprise-specific) живёт в validate_enterprise.go и
+	// validate_core.go (build-tag split). В core-build — no-op; в
+	// enterprise-build — реальные проверки. Это поддерживает Core-only
+	// build contract (L-1): pure Apache deploy не требует enterprise
+	// env vars.
+	errs = appendEnterpriseValidations(c, errs)
 
 	if c.SIEMEnabled {
 		endpoint := strings.TrimSpace(c.SIEMEndpoint)

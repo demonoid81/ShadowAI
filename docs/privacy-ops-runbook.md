@@ -619,6 +619,14 @@ external tooling.
 
 ## 9. Change log
 
+- **1.9 (2026-04-22)** — PR-L1.3: scope fix для PR-L1.2 startup
+  validation. `LEGAL_HOLD_TOKEN_SECRET` теперь enforce'ится ТОЛЬКО
+  в enterprise build (через `//go:build enterprise` split в
+  `validate_enterprise.go` / `validate_core.go`). Pure Apache core
+  deploy не требует этого env var — поддерживает L-1 build
+  contract. Также fix: `tokenizer.warnedUnkeyed` → `sync.Once`
+  (устранение data race в dev fallback path при concurrent
+  requests).
 - **1.8 (2026-04-22)** — PR-L1.2: keyed HMAC для case_ref token'а
   (`LEGAL_HOLD_TOKEN_SECRET`, prod required, >=32 chars). Ранее
   plain SHA-256 — теперь HMAC-SHA256 truncated 64 bit, не
