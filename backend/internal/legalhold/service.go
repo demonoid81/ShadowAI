@@ -38,10 +38,17 @@ type Repository interface {
 	Release(ctx context.Context, id, releasedBy string) (*Hold, error)
 	HasActiveHold(ctx context.Context, userID string) (bool, error)
 	List(ctx context.Context) ([]Hold, error)
-	// PR-L2: bulk lookup для retention-aware purge. Возвращает
-	// target_user_id'ы всех is_active=true записей (каждый UUID
-	// ровно один раз — DB partial-unique index гарантирует).
+	// PR-L2 + L2.3: bulk lookup для retention-aware purge.
+	// Возвращает target_user_id'ы записей со status='active'
+	// (каждый UUID не более одного раза). Pending hold'ы НЕ
+	// попадают сюда до approve.
 	ActiveUserIDs(ctx context.Context) ([]string, error)
+	// PR-L2.3 4-eyes: перевод pending → active. approverID
+	// должен отличаться от creator (4-eyes policy; check в
+	// repo-implementation).
+	Approve(ctx context.Context, id, approverID string) (*Hold, error)
+	// PR-L2.3: pending → released (rejected / cancelled).
+	Reject(ctx context.Context, id, rejectorID string) (*Hold, error)
 }
 
 // Service — тонкая обёртка над repo. Валидация входа (non-empty
@@ -133,6 +140,46 @@ func (s *Service) ActiveUserIDs(ctx context.Context) ([]string, error) {
 	}
 	return s.repo.ActiveUserIDs(ctx)
 }
+
+// Approve — PR-L2.3: 4-eyes перевод pending → active. approverID
+// должен отличаться от creator — проверка на repo-слое (FOR UPDATE
+// lock + cmp с created_by). Возвращает ErrSelfApproval, если
+// approver == creator; ErrNotFound, если id не существует;
+// ErrNotPending, если hold уже approve'нут/released.
+func (s *Service) Approve(ctx context.Context, id, approverID string) (*Hold, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	if strings.TrimSpace(approverID) == "" {
+		return nil, fmt.Errorf("approver_id required: %w", ErrValidation)
+	}
+	return s.repo.Approve(ctx, id, approverID)
+}
+
+// Reject — PR-L2.3: перевод pending → released (rejected /
+// cancelled). rejectorID фиксируется в released_by. Отличие от
+// Release: Reject работает только на pending, Release — только на
+// active.
+func (s *Service) Reject(ctx context.Context, id, rejectorID string) (*Hold, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	return s.repo.Reject(ctx, id, rejectorID)
+}
+
+// IsNotPending — helper для handler'а: approve/reject на
+// active/released hold → 409 Conflict.
+func IsNotPending(err error) bool { return errors.Is(err, ErrNotPending) }
+
+// IsSelfApproval — helper для handler'а: approver == creator → 403
+// (4-eyes policy violation).
+func IsSelfApproval(err error) bool { return errors.Is(err, ErrSelfApproval) }
 
 // IsAlreadyActive — helper для handler'а, чтобы не импортировать
 // errors package ради одной проверки.

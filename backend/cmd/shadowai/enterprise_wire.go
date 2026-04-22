@@ -88,8 +88,12 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			admin.HandleFunc("/governance/policy", governanceHandler.GetPolicy).Methods("GET")
 			admin.HandleFunc("/governance/policy", governanceHandler.UpdatePolicy).Methods("PUT")
 			// PR-L1: Legal holds (admin-only).
+			// PR-L2.3: 4-eyes workflow — create делает pending,
+			// approve/reject нужны для transition → active/released.
 			admin.HandleFunc("/legal-holds", legalHoldHandler.Create).Methods("POST")
 			admin.HandleFunc("/legal-holds", legalHoldHandler.List).Methods("GET")
+			admin.HandleFunc("/legal-holds/{id}/approve", legalHoldHandler.Approve).Methods("POST")
+			admin.HandleFunc("/legal-holds/{id}/reject", legalHoldHandler.Reject).Methods("POST")
 			admin.HandleFunc("/legal-holds/{id}/release", legalHoldHandler.Release).Methods("POST")
 		},
 

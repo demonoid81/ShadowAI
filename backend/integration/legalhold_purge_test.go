@@ -30,6 +30,10 @@ func TestCoord_HoldBeforePurge_RowsProtected(t *testing.T) {
 	auditID := insertAuditLog(t, db, userID, time.Now().Add(-48*time.Hour))
 
 	// 1. apply_hold FIRST → commit.
+	// PR-L2.3: Create делает pending — нужен approve другим admin'ом
+	// чтобы получить active. approverID (non-empty "admin-approver")
+	// != createdBy (nil в этом теста — см. Hold struct без CreatedBy),
+	// поэтому 4-eyes check пропускает.
 	hRepo := legalhold.NewPGRepository(db)
 	hold, err := hRepo.Create(ctx, &legalhold.Hold{
 		TargetUserID: userID,
@@ -39,8 +43,13 @@ func TestCoord_HoldBeforePurge_RowsProtected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply_hold: %v", err)
 	}
-	if !hold.IsActive {
-		t.Fatal("hold not active")
+	approverID := insertTestUser(t, db, "approver-a@example.com")
+	approved, err := hRepo.Approve(ctx, hold.ID, approverID)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if !approved.IsActive {
+		t.Fatal("hold not active after approve")
 	}
 
 	// 2. purge SECOND.
@@ -100,6 +109,7 @@ func TestCoord_PurgeBeforeHold_RowsDeleted(t *testing.T) {
 	}
 
 	// 2. apply_hold LATE — должен пройти normally (user существует).
+	// PR-L2.3: Create делает pending; approve делает active.
 	hRepo := legalhold.NewPGRepository(db)
 	hold, err := hRepo.Create(ctx, &legalhold.Hold{
 		TargetUserID: userID,
@@ -109,8 +119,13 @@ func TestCoord_PurgeBeforeHold_RowsDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply_hold after purge: %v", err)
 	}
-	if !hold.IsActive {
-		t.Fatal("hold not active после apply")
+	approverID := insertTestUser(t, db, "approver-b@example.com")
+	approved, err := hRepo.Approve(ctx, hold.ID, approverID)
+	if err != nil {
+		t.Fatalf("approve after purge: %v", err)
+	}
+	if !approved.IsActive {
+		t.Fatal("hold not active после apply+approve")
 	}
 
 	// Row уже удалён — это допустимо по контракту PR-L3.
@@ -135,14 +150,19 @@ func TestCoord_MixedUsers(t *testing.T) {
 	heldAuditID := insertAuditLog(t, db, heldUserID, oldTS)
 	freeAuditID := insertAuditLog(t, db, freeUserID, oldTS)
 
-	// apply_hold на held-user.
+	// apply_hold на held-user + approve (L2.3 pending→active).
 	hRepo := legalhold.NewPGRepository(db)
-	if _, err := hRepo.Create(ctx, &legalhold.Hold{
+	heldHold, err := hRepo.Create(ctx, &legalhold.Hold{
 		TargetUserID: heldUserID,
 		CaseRef:      "MIX-1",
 		Reason:       "mixed test",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("apply_hold: %v", err)
+	}
+	approverID := insertTestUser(t, db, "approver-mix@example.com")
+	if _, err := hRepo.Approve(ctx, heldHold.ID, approverID); err != nil {
+		t.Fatalf("approve: %v", err)
 	}
 
 	// purge.
@@ -160,5 +180,87 @@ func TestCoord_MixedUsers(t *testing.T) {
 	}
 	if auditLogExists(t, db, freeAuditID) {
 		t.Error("free-user audit не удалён — over-protection")
+	}
+}
+
+// TestCoord_PendingHold_DoesNotProtect — PR-L2.3 regression guard:
+// pending hold (без approve) НЕ защищает audit от purge. Только
+// status='active' участвует в purge-protection. Этот контракт
+// критичен: creator не может protect'ить audit в обход 4-eyes.
+func TestCoord_PendingHold_DoesNotProtect(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "pending-only@example.com")
+	auditID := insertAuditLog(t, db, userID, time.Now().Add(-48*time.Hour))
+
+	// Create pending — НЕ approve.
+	hRepo := legalhold.NewPGRepository(db)
+	if _, err := hRepo.Create(ctx, &legalhold.Hold{
+		TargetUserID: userID,
+		CaseRef:      "PEND-1",
+		Reason:       "pending without approve",
+	}); err != nil {
+		t.Fatalf("create pending: %v", err)
+	}
+
+	// Purge должен удалить row несмотря на существующий pending.
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx,
+		time.Now().Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1 (pending НЕ защищает)", deleted)
+	}
+	if auditLogExists(t, db, auditID) {
+		t.Error("pending hold защитил audit — L2.3 contract нарушен")
+	}
+}
+
+// TestCoord_ApprovedThenReleased_NoLongerProtects — L2.3: approve
+// → active → release → released transition. После release pending
+// hold не должен continue защищать (released — terminal state).
+func TestCoord_ApprovedThenReleased_NoLongerProtects(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "released-mix@example.com")
+	auditID := insertAuditLog(t, db, userID, time.Now().Add(-48*time.Hour))
+
+	hRepo := legalhold.NewPGRepository(db)
+	hold, err := hRepo.Create(ctx, &legalhold.Hold{
+		TargetUserID: userID,
+		CaseRef:      "REL-1",
+		Reason:       "approve then release",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	approverID := insertTestUser(t, db, "approver-rel@example.com")
+	if _, err := hRepo.Approve(ctx, hold.ID, approverID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := hRepo.Release(ctx, hold.ID, approverID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// Released hold → purge удаляет row.
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx,
+		time.Now().Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1 (released hold не должен защищать)", deleted)
+	}
+	if auditLogExists(t, db, auditID) {
+		t.Error("released hold продолжает защищать audit")
 	}
 }

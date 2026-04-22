@@ -65,11 +65,25 @@ func (t *tokenizer) Tokenize(caseRef string) string {
 
 // Handler обслуживает admin-only CRUD для legal holds.
 //
-// Routes:
+// Routes (PR-L2.3 — 4-eyes workflow):
 //
-//	POST /api/legal-holds             — apply hold
-//	POST /api/legal-holds/{id}/release — release
-//	GET  /api/legal-holds              — list active + history
+//	POST /api/legal-holds              — создать pending hold
+//	POST /api/legal-holds/{id}/approve — pending → active (4-eyes)
+//	POST /api/legal-holds/{id}/reject  — pending → released (cancel)
+//	POST /api/legal-holds/{id}/release — active → released (normal)
+//	GET  /api/legal-holds              — list (active+pending+released)
+//
+// 4-eyes policy: approver должен отличаться от creator. Violation
+// → 403 apply_hold_self_approval. Hold effective (блокирует DSAR и
+// защищает от purge) ТОЛЬКО после approve.
+//
+// Admin events:
+//
+//	apply_hold_requested — create (pending)
+//	apply_hold_approved  — approve (pending → active)
+//	apply_hold_rejected  — reject (pending → released)
+//	release_hold         — release (active → released)
+//	read                 — list
 //
 // Все ответы регистрируются в admin_event_logs (resource=legal_hold).
 type Handler struct {
@@ -104,8 +118,11 @@ type holdResponse struct {
 	TargetUserID string  `json:"target_user_id"`
 	CaseRef      string  `json:"case_ref"`
 	Reason       string  `json:"reason"`
+	Status       string  `json:"status"`
 	CreatedBy    *string `json:"created_by,omitempty"`
 	CreatedAt    string  `json:"created_at"`
+	ApprovedAt   *string `json:"approved_at,omitempty"`
+	ApprovedBy   *string `json:"approved_by,omitempty"`
 	ReleasedAt   *string `json:"released_at,omitempty"`
 	ReleasedBy   *string `json:"released_by,omitempty"`
 	IsActive     bool    `json:"is_active"`
@@ -117,6 +134,11 @@ type errorResponse struct {
 
 // Create — POST /api/legal-holds. Admin-only. Body:
 // {"target_user_id":..., "case_ref":..., "reason":...}
+//
+// PR-L2.3: hold создаётся в status='pending', НЕ блокирует DSAR
+// и НЕ защищает от purge до approve. Admin event action —
+// "apply_hold_requested" (раньше был "apply_hold" — breaking
+// change для SIEM-consumer'ов; changelog 1.17 документирует).
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {
@@ -131,36 +153,40 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
-		h.recordAdmin(r, "apply_hold", "", http.StatusBadRequest, false, map[string]any{"error": "invalid_json"})
+		h.recordAdmin(r, "apply_hold_requested", "", http.StatusBadRequest, false, map[string]any{"error": "invalid_json"})
 		return
 	}
 
 	hold, err := h.svc.CreateHold(r.Context(), req.TargetUserID, req.CaseRef, req.Reason, claims.UserID)
 	if err != nil {
 		// PR-L1.1: split error paths. Validation → 400 (generic);
-		// not configured → 503; already active → 409; всё остальное
-		// (repo/runtime) → 500 generic. Raw err.Error() НЕ уходит
-		// клиенту; admin audit получает machine-readable error_code.
+		// not configured → 503; already active/pending → 409; всё
+		// остальное (repo/runtime) → 500 generic. Raw err.Error() НЕ
+		// уходит клиенту; admin audit получает machine-readable
+		// error_code.
 		switch {
 		case IsAlreadyActive(err):
-			writeJSON(w, http.StatusConflict, errorResponse{Error: "user already has active hold"})
-			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusConflict, false, map[string]any{
-				"error_code":     "already_active",
-				"case_ref_hash":  h.tokens.Tokenize(req.CaseRef),
+			// L2.3: "already active" теперь означает "уже есть
+			// blocking (pending или active) hold для user'а" —
+			// partial-unique index покрывает оба статуса.
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "user already has blocking hold"})
+			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusConflict, false, map[string]any{
+				"error_code":    "already_blocking",
+				"case_ref_hash": h.tokens.Tokenize(req.CaseRef),
 			})
 		case IsValidation(err):
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
-			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
 				"error_code": "validation_failed",
 			})
 		case IsNotConfigured(err):
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
-			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusServiceUnavailable, false, map[string]any{
+			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusServiceUnavailable, false, map[string]any{
 				"error_code": "not_configured",
 			})
 		default:
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold creation failed"})
-			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusInternalServerError, false, map[string]any{
+			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusInternalServerError, false, map[string]any{
 				"error_code": "internal_error",
 			})
 		}
@@ -168,12 +194,149 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, toResponse(hold))
-	// PR-L1.1: case_ref_hash вместо raw case_ref в metadata. Raw
-	// остаётся в legal_holds table (доступен через GET), но не
-	// дублируется в admin_event_logs / SIEM.
-	h.recordAdmin(r, "apply_hold", hold.ID, http.StatusCreated, true, map[string]any{
+	// PR-L1.1: case_ref_hash вместо raw case_ref. PR-L2.3: status
+	// в metadata для SIEM-фильтров ("created pending" vs old
+	// "immediately active").
+	h.recordAdmin(r, "apply_hold_requested", hold.ID, http.StatusCreated, true, map[string]any{
 		"target_user_id": hold.TargetUserID,
 		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+		"status":         string(hold.Status),
+	})
+}
+
+// Approve — POST /api/legal-holds/{id}/approve. Admin-only. Body
+// не требуется. 4-eyes policy: approver должен отличаться от
+// creator, иначе 403 + admin event apply_hold_self_approval.
+//
+// Semantics:
+//
+//	pending   → active  (200, apply_hold_approved success=true)
+//	active    → 409     (already_active, action=apply_hold_approved)
+//	released  → 409     (already_released)
+//	not found → 404
+//	self      → 403     (metadata.error_code="self_approval")
+func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing id"})
+		return
+	}
+
+	hold, err := h.svc.Approve(r.Context(), id, claims.UserID)
+	if err != nil {
+		switch {
+		case IsNotFound(err):
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "hold not found"})
+			h.recordAdmin(r, "apply_hold_approved", id, http.StatusNotFound, false, map[string]any{
+				"error_code": "not_found",
+			})
+		case IsSelfApproval(err):
+			// 4-eyes violation. 403 + отдельный event_code для
+			// SIEM-alerting (это подозрительная активность —
+			// admin пытается apply + approve собственный hold).
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "approver must differ from creator"})
+			h.recordAdmin(r, "apply_hold_approved", id, http.StatusForbidden, false, map[string]any{
+				"error_code": "self_approval",
+			})
+		case IsNotPending(err):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "hold is not pending"})
+			h.recordAdmin(r, "apply_hold_approved", id, http.StatusConflict, false, map[string]any{
+				"error_code": "not_pending",
+			})
+		case IsValidation(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
+			h.recordAdmin(r, "apply_hold_approved", id, http.StatusBadRequest, false, map[string]any{
+				"error_code": "validation_failed",
+			})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "apply_hold_approved", id, http.StatusServiceUnavailable, false, map[string]any{
+				"error_code": "not_configured",
+			})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold approval failed"})
+			h.recordAdmin(r, "apply_hold_approved", id, http.StatusInternalServerError, false, map[string]any{
+				"error_code": "internal_error",
+			})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toResponse(hold))
+	h.recordAdmin(r, "apply_hold_approved", hold.ID, http.StatusOK, true, map[string]any{
+		"target_user_id": hold.TargetUserID,
+		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+		"status":         string(hold.Status),
+	})
+}
+
+// Reject — POST /api/legal-holds/{id}/reject. Admin-only. Body не
+// требуется. pending → released (rejected / cancelled). Отличается
+// от Release: Release работает на active, Reject — на pending.
+// Rejector может быть тем же admin, что и creator (это cancellation
+// собственного request'а, не approval).
+func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing id"})
+		return
+	}
+
+	hold, err := h.svc.Reject(r.Context(), id, claims.UserID)
+	if err != nil {
+		switch {
+		case IsNotFound(err):
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "hold not found"})
+			h.recordAdmin(r, "apply_hold_rejected", id, http.StatusNotFound, false, map[string]any{
+				"error_code": "not_found",
+			})
+		case IsNotPending(err):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "hold is not pending"})
+			h.recordAdmin(r, "apply_hold_rejected", id, http.StatusConflict, false, map[string]any{
+				"error_code": "not_pending",
+			})
+		case IsValidation(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
+			h.recordAdmin(r, "apply_hold_rejected", id, http.StatusBadRequest, false, map[string]any{
+				"error_code": "validation_failed",
+			})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "apply_hold_rejected", id, http.StatusServiceUnavailable, false, map[string]any{
+				"error_code": "not_configured",
+			})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold rejection failed"})
+			h.recordAdmin(r, "apply_hold_rejected", id, http.StatusInternalServerError, false, map[string]any{
+				"error_code": "internal_error",
+			})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toResponse(hold))
+	h.recordAdmin(r, "apply_hold_rejected", hold.ID, http.StatusOK, true, map[string]any{
+		"target_user_id": hold.TargetUserID,
+		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+		"status":         string(hold.Status),
 	})
 }
 
@@ -270,10 +433,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]holdResponse, 0, len(holds))
 	activeCount := 0
+	pendingCount := 0
 	for i := range holds {
 		out = append(out, toResponse(&holds[i]))
-		if holds[i].IsActive {
+		switch holds[i].Status {
+		case StatusActive:
 			activeCount++
+		case StatusPending:
+			pendingCount++
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -281,6 +448,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		"resource_subtype": "legal_hold_list",
 		"total":            len(holds),
 		"active_count":     activeCount,
+		"pending_count":    pendingCount,
 	})
 }
 
@@ -312,9 +480,17 @@ func toResponse(h *Hold) holdResponse {
 		TargetUserID: h.TargetUserID,
 		CaseRef:      h.CaseRef,
 		Reason:       h.Reason,
+		Status:       string(h.Status),
 		CreatedBy:    h.CreatedBy,
 		CreatedAt:    h.CreatedAt.UTC().Format(time.RFC3339),
 		IsActive:     h.IsActive,
+	}
+	if h.ApprovedAt != nil {
+		s := h.ApprovedAt.UTC().Format(time.RFC3339)
+		r.ApprovedAt = &s
+	}
+	if h.ApprovedBy != nil {
+		r.ApprovedBy = h.ApprovedBy
 	}
 	if h.ReleasedAt != nil {
 		s := h.ReleasedAt.UTC().Format(time.RFC3339)

@@ -1,6 +1,6 @@
 # ShadowAI — Privacy / Retention / DSAR / Legal-Hold / Incident Runbook
 
-**Версия документа:** 1.0
+**Версия документа:** 1.17
 **Дата:** 2026-04-19
 **Audience:** ops, compliance, legal, incident responders.
 **Покрывает:** ShadowAI backend после merge PR-A/B/C/D/D.1.
@@ -260,49 +260,104 @@ Requirement "заморозить" удаление данных конкрет�
 
 ### 5.2 Implementation status
 
-**[implemented]** PR-L1: автоматизация per-user legal holds.
-- Таблица `legal_holds` (migration
-  `backend/migrations-enterprise/013_create_legal_holds.sql`).
+**[implemented]** PR-L1 + PR-L2.3: автоматизация per-user legal
+holds с 4-eyes approver workflow.
+- Таблицы:
+  - `legal_holds` (migration
+    `backend/migrations-enterprise/013_create_legal_holds.sql`).
+  - PR-L2.3: `legal_holds.status` column + `approved_at/by`
+    (migration `015_legal_hold_status_four_eyes.sql`). Статусы:
+    `pending | active | released`.
 - Admin-only endpoints:
-  - `POST /api/legal-holds` — apply hold (409 если уже active).
-  - `POST /api/legal-holds/{id}/release` — release (идемпотентно).
-  - `GET /api/legal-holds` — list active + released history.
+  - `POST /api/legal-holds` — создать **pending** hold. Ещё НЕ
+    блокирует DSAR и НЕ защищает audit от purge. 409 если у
+    user'а уже есть blocking (pending OR active) hold.
+  - `POST /api/legal-holds/{id}/approve` — **4-eyes approval**:
+    pending → active. Approver должен отличаться от creator;
+    self-approval → 403 + admin event с `error_code=self_approval`
+    (SIEM-alerting key).
+  - `POST /api/legal-holds/{id}/reject` — pending → released
+    (cancel). Rejector может совпадать с creator (cancel собственного
+    request'а).
+  - `POST /api/legal-holds/{id}/release` — active → released
+    (идемпотентно, на pending возвращает 409).
+  - `GET /api/legal-holds` — list (active + pending + released
+    история). admin event metadata содержит `active_count` и
+    `pending_count`.
 - `ErasureService.EraseUser` делает pre-tx `HasActiveHold` check.
-  User под hold → HTTP 409 + body `{status:"hold_active"}`.
-  Fail-closed при `legal_holds` DB error (compliance выше
-  availability).
-- Admin audit: `action=apply_hold | release_hold`,
-  `resource=legal_hold`. Blocked erasures пишутся с
-  `metadata.blocked_by_hold=true`.
+  Только `status = 'active'` блокирует — pending hold НЕ блокирует
+  DSAR. Fail-closed при `legal_holds` DB error.
+- Admin audit events:
+  - `apply_hold_requested` — create (pending).
+  - `apply_hold_approved`  — approve (pending → active). 4-eyes
+    violation (self-approval) → success=false +
+    `metadata.error_code=self_approval`.
+  - `apply_hold_rejected`  — reject (pending → released).
+  - `release_hold`         — release (active → released).
+  - `read`                 — list.
+  Все events mirror'ятся в SIEM (PR-S1).
 
-**[gap]** Что осталось вне scope PR-L1:
-- `PurgeOlderThan` / audit-retention scheduler не учитывает hold'ы
-  (automated purge не экранирует audit rows для held users). На v1
-  operator вручную приостанавливает `AUDIT_PURGE_INTERVAL=0` при
-  длинных hold'ах.
+**[breaking, SIEM]** PR-L2.3 переименовал `action=apply_hold` →
+`apply_hold_requested`. SIEM-rules и дашборды, которые matched
+`apply_hold` exact, должны быть обновлены. Error code на dup
+conflict: `already_active` → `already_blocking`. Changelog 1.17
+фиксирует migration path.
+
+**[gap]** Что осталось вне scope:
 - Backup-freeze — infra-уровня, остаётся manual.
 - Hold-scope шире user-level (query-window, date-range hold) —
   roadmap.
+- SLA / escalation engine на неподтверждённые pending — roadmap.
+- Bulk approvals — roadmap.
+- UI beyond minimal API — roadmap.
 
-### 5.3 Operator процедура (pr-L1)
+### 5.3 Operator процедура (PR-L1 + PR-L2.3)
+
+**Важно (PR-L2.3)**: legal hold становится effective (блокирует
+DSAR и защищает audit от purge) ТОЛЬКО после второго approve.
+Шаг "apply" теперь создаёт только request — требуется independent
+review.
 
 1. **Trigger**: legal/compliance получает hold-order, фиксируют
    внешнее дело/запрос (ticket, subpoena ID).
-2. **Apply hold**:
+2. **Step 1 — Request hold (creator admin)**:
    ```bash
-   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN_CREATOR" \
      -H "Content-Type: application/json" \
      -d '{"target_user_id":"u-target",
           "case_ref":"SEC-2026-042",
           "reason":"SEC inquiry, see ticket LEGAL-137"}' \
      https://shadowai.example/api/legal-holds
    ```
-   Response 201 с `id`. Event `apply_hold` + mirror в SIEM.
-3. **DSAR attempts блокируются автоматически**: запрос
-   `POST /api/users/{id}/erase` на held user вернёт 409 +
-   `{status:"hold_active"}`. Admin event `erase` + metadata
-   `blocked_by_hold=true` сохраняется как evidence "попытка была,
-   блок сработал".
+   Response 201 с `id` и `status:"pending"`. Event
+   `apply_hold_requested` + mirror в SIEM. На этом этапе hold
+   НЕ блокирует DSAR.
+3. **Step 2 — 4-eyes approval (другой admin)**:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN_APPROVER" \
+     https://shadowai.example/api/legal-holds/{id}/approve
+   ```
+   Approver должен отличаться от creator. Response 200 с
+   `status:"active"`. Event `apply_hold_approved`. С этого
+   момента hold effective.
+
+   Если approver == creator → 403 + event
+   `apply_hold_approved` с `success=false` и
+   `metadata.error_code=self_approval` (критичный SIEM-alert).
+
+4. **(Optional) — Cancel pending request**:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+     https://shadowai.example/api/legal-holds/{id}/reject
+   ```
+   Переводит pending → released (cancelled). Event
+   `apply_hold_rejected`. Допустимо creator'у (это отмена
+   собственного request'а, НЕ approval).
+
+5. **DSAR attempts блокируются автоматически** (только после
+   approve): запрос `POST /api/users/{id}/erase` на held user
+   вернёт 409 + `{status:"hold_active"}`. Admin event `erase` +
+   metadata `blocked_by_hold=true`.
 4. **Backup freeze** (`[manual]`): infra excludes snapshot'ы с
    held data из eviction.
 5. **Audit-retention**:
@@ -323,14 +378,15 @@ Requirement "заморозить" удаление данных конкрет�
      `AUDIT_PURGE_INTERVAL=0` на время hold'а либо
      предоставить собственный exclusion-wrapper вокруг
      `PurgeOlderThanExcept`.
-6. **Release**:
+6. **Release** (active → released):
    ```bash
    curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
      https://shadowai.example/api/legal-holds/{id}/release
    ```
-   200 + body с `is_active=false, released_at, released_by`. Event
-   `release_hold`. После release DSAR на этого user'а работает
-   штатно.
+   200 + body с `status:"released", is_active=false,
+   released_at, released_by`. Event `release_hold`. После release
+   DSAR на этого user'а работает штатно. Release на pending
+   возвращает 409 — для отмены pending используйте reject.
 
 ### 5.4 Конфликт DSAR vs Legal Hold
 
@@ -345,11 +401,14 @@ Requirement "заморозить" удаление данных конкрет�
 
 ### 5.5 Planned improvements (v2+)
 
-- `PurgeOlderThan` / `ScrubUserDataTx` учитывают active holds
-  (audit rows protected from retention purge).
-- Hold-scope шире: per-query, per-date-range.
-- Approver workflow (4-eyes) для apply и для release hold'а.
+- Hold-scope шире: per-query, per-date-range, per-conversation.
+- 4-eyes workflow для release (симметрично apply — на сейчас
+  release делает один admin).
+- SLA / escalation engine — pending hold старше N минут эскалируется
+  legal-on-call.
+- Bulk approvals — approve нескольких pending за один call.
 - Auto-release по external signal (webhook от legal CMS).
+- UI для approver queue (на сейчас — только API).
 
 ---
 
@@ -663,6 +722,20 @@ external tooling.
 
 ## 9. Change log
 
+- **1.17 (2026-04-22)** — PR-L2.3: 4-eyes approver workflow для legal
+  hold. Migration 015 добавляет `legal_holds.status` (pending /
+  active / released) + `approved_at/by`. Partial-unique index
+  расширен до `pending OR active` per user. Новые endpoints:
+  `POST /api/legal-holds/{id}/approve` (4-eyes, approver != creator
+  → 403 self_approval) и `.../reject` (cancel pending).
+  **Breaking (SIEM):** admin event action `apply_hold` переименован
+  в `apply_hold_requested` (на create) + добавлены
+  `apply_hold_approved` / `apply_hold_rejected`; error_code
+  `already_active` → `already_blocking`. Pending hold НЕ блокирует
+  DSAR и НЕ защищает audit от purge — только approve'нутый делает
+  hold effective. Retention-aware purge (`audit/retention_hold.go`)
+  переключён на `status = 'active'` вместо `is_active=true` (sync'ы
+  сохраняются по migration).
 - **1.16 (2026-04-22)** — PR-L4: PostgreSQL integration harness
   (testcontainers-go) для PR-L3 commit-order proof. Новый пакет
   `backend/integration/` под `//go:build enterprise && integration`.
