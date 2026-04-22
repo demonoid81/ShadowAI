@@ -1,3 +1,8 @@
+//go:build enterprise
+
+// Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
+// Compiled only under -tags enterprise.
+
 package adminaudit
 
 import (
@@ -7,27 +12,6 @@ import (
 
 	"github.com/shadowai/backend/internal/domain"
 )
-
-// Event — struct для сборки admin event'а в вызывающем коде.
-// Metadata принимает любой marshalable struct/map — сервис сам
-// выполняет JSON-encode и guarantees, что invalid JSON не ломает
-// request-path (фолбэк на empty metadata + log).
-type Event struct {
-	ActorUserID *string
-	Action      string
-	Resource    string
-	TargetID    string
-	Path        string
-	Method      string
-	StatusCode  int
-	Success     bool
-	Metadata    any
-}
-
-// Recorder — интерфейс для DI в handler'ах (mock'ается в тестах).
-type Recorder interface {
-	Record(ctx context.Context, ev Event)
-}
 
 // Service — синхронный writer admin events. Ошибка Insert логируется,
 // но не пропагирует в caller: admin-audit не должен ломать основной
@@ -49,7 +33,7 @@ func NewService(repo Repo) *Service {
 }
 
 // Record пишет один admin event. Sync. Не блокирует больше чем
-// один INSERT.
+// один INSERT. Satisfies core Recorder interface (types.go).
 func (s *Service) Record(ctx context.Context, ev Event) {
 	if s == nil || s.repo == nil {
 		return

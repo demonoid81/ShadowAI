@@ -1,3 +1,8 @@
+//go:build enterprise
+
+// Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
+// Compiled only under -tags enterprise.
+
 // Command audit-purge удаляет audit_logs старше TTL. Запускается
 // оператором вручную или scheduler'ом внутри backend (AUDIT_PURGE_INTERVAL).
 //

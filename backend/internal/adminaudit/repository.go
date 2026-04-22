@@ -1,3 +1,8 @@
+//go:build enterprise
+
+// Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
+// Compiled only under -tags enterprise.
+//
 // Package adminaudit реализует отдельный audit-trail для admin-read
 // операций и control-plane действий (PR-D).
 //

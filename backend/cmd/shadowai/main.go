@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/budget"
@@ -21,7 +20,6 @@ import (
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/embedding"
 	"github.com/shadowai/backend/internal/firewall"
-	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/internaldb"
 	"github.com/shadowai/backend/internal/metrics"
 	mw "github.com/shadowai/backend/internal/middleware"
@@ -267,48 +265,29 @@ func main() {
 		log.Printf("WARN: prod started with AUDIT_RETENTION_DAYS=0 under explicit override; audit rows will not expire automatically")
 	}
 
-	// Handlers
-	// PR-D: admin access audit (отдельная таблица admin_event_logs).
-	// Создаётся до handler'ов, потому что они принимают adminAuditSvc в DI.
-	adminAuditRepo := adminaudit.NewRepository(db)
-	adminAuditSvc := adminaudit.NewService(adminAuditRepo)
-	adminAuditHandler := adminaudit.NewHandler(adminAuditRepo)
+	// L-1: Enterprise bundle. Core-build — stub with nil services и
+	// no-op callbacks; Enterprise-build (-tags enterprise) — полный
+	// wiring в enterprise_wire.go.
+	entBundle := buildEnterpriseBundle(enterpriseDeps{
+		DB: db, Cfg: cfg, AuditRepo: auditRepo, BudgetRepo: budgetRepo, AuditSvc: auditSvc,
+	})
 
-	// PR-B: DSAR/erasure wiring. auditRepo + budgetRepo используются
-	// как AuditScrubber + BudgetDeleter через interface intersection.
-	erasureSvc := auth.NewErasureService(db, auditRepo, budgetRepo)
-	authHandler := auth.NewHandler(authSvc, erasureSvc, adminAuditSvc)
-	// schedulerEnabled ровно повторяет условие запуска goroutine ниже
-	// (cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0). Без
-	// этой согласованности /audit/status врал бы оператору.
+	// Handlers. Все принимают enterprise-интерфейсы опционально (nil-
+	// safe). В Core-билде entBundle.AdminAudit / Eraser / Governance
+	// равны nil, и соответствующие code paths в каждом handler'е
+	// деградируют корректно (recordAdmin* — no-op, EraseUser → 503).
+	authHandler := auth.NewHandler(authSvc, entBundle.Eraser, entBundle.AdminAudit)
+	// schedulerEnabled — для визуализации в /audit/status. Реальный
+	// запуск scheduler'ов делает entBundle.StartSchedulers.
 	auditSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0
 	adminEventsSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0
-	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled, adminAuditSvc, cfg.AdminAuditRetentionDays, adminEventsSchedulerEnabled)
+	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled, entBundle.AdminAudit, cfg.AdminAuditRetentionDays, adminEventsSchedulerEnabled)
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc)
-	dashHandler := dashboard.NewHandler(db, adminAuditSvc)
-	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, adminAuditSvc)
+	dashHandler := dashboard.NewHandler(db, entBundle.AdminAudit)
+	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, entBundle.AdminAudit)
 
-	// PR-G1: Provider/Model Governance wiring.
-	// Single-row storage (migration 012_create_provider_governance_policies.sql).
-	//
-	// ВАЖНО: migration 012 ОБЯЗАТЕЛЕН для корректной работы этого
-	// сервиса. Если таблица отсутствует, GetActive вернёт repo-error
-	// (не sql.ErrNoRows), и Evaluate корректно отправит fail-closed
-	// Deny на каждый запрос → proxy вернёт 403 для всех вызовов.
-	// Это сознательный выбор (compliance-control должен быть
-	// fail-closed). Для soft-disable через конфиг — установите
-	// Mode=disabled через admin API, а не пропускайте migration.
-	//
-	// Empty state (migration применён, но записей нет) обрабатывается
-	// корректно: repo возвращает (nil, nil) → governance_disabled.
-	// Seed-row в migration 012 создаёт default-запись в disabled mode
-	// при первом apply, чтобы UI видел валидный state с нуля.
-	governanceRepo := governance.NewPGRepository(db)
-	governanceSvc := governance.NewService(governanceRepo)
-	governanceHandler := governance.NewHandler(governanceSvc, adminAuditSvc)
-
-	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode, governanceSvc, adminAuditSvc)
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode, entBundle.Governance, entBundle.AdminAudit)
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
 	defer connectivityCancel()
@@ -340,107 +319,10 @@ func main() {
 		}()
 	}
 
-	// PR-A: audit-purge scheduler. Запускается, если явно задан
-	// AUDIT_PURGE_INTERVAL (>0) И AUDIT_RETENTION_DAYS (>0). Без обоих
-	// значений — scheduler не стартует (CLI остаётся основным путём).
-	if cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0 {
-		go func() {
-			log.Printf("audit-purge scheduler: interval=%s retention=%d days chunk=%d",
-				cfg.AuditPurgeInterval, cfg.AuditRetentionDays, cfg.AuditPurgeChunkSize)
-			ticker := time.NewTicker(cfg.AuditPurgeInterval)
-			defer ticker.Stop()
-			repo := auditSvc.GetRepo()
-			purge := func() {
-				cutoff := time.Now().UTC().Add(-time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour)
-				ctx, cancel := context.WithTimeout(connectivityCtx, 30*time.Minute)
-				defer cancel()
-				deleted, err := repo.PurgeOlderThan(ctx, cutoff, cfg.AuditPurgeChunkSize)
-				if err != nil {
-					log.Printf("audit-purge scheduler: err: %v", err)
-					// PR-D: фиксируем failed purge в admin-event-logs.
-					adminAuditSvc.Record(ctx, adminaudit.Event{
-						ActorUserID: nil, Action: "purge", Resource: "audit_logs",
-						Path: "scheduler", Method: "INTERNAL", Success: false,
-						Metadata: map[string]any{
-							"mode": "scheduler", "cutoff": cutoff.Format(time.RFC3339),
-							"error": err.Error(),
-						},
-					})
-					return
-				}
-				if err := repo.RecordPurgeRun(ctx, cutoff, deleted, audit.PurgeTargetAuditLogs); err != nil {
-					log.Printf("audit-purge scheduler: record run failed: %v", err)
-				}
-				log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
-				adminAuditSvc.Record(ctx, adminaudit.Event{
-					ActorUserID: nil, Action: "purge", Resource: "audit_logs",
-					Path: "scheduler", Method: "INTERNAL", Success: true,
-					Metadata: map[string]any{
-						"mode": "scheduler", "cutoff": cutoff.Format(time.RFC3339),
-						"rows_deleted": deleted,
-					},
-				})
-			}
-			for {
-				select {
-				case <-ticker.C:
-					purge()
-				case <-connectivityCtx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	// PR-D.1: scheduler для admin_event_logs. Отдельная retention
-	// (compliance-aware: admin events обычно хранятся дольше).
-	if cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0 {
-		go func() {
-			log.Printf("admin-events purge scheduler: interval=%s retention=%d days chunk=%d",
-				cfg.AuditPurgeInterval, cfg.AdminAuditRetentionDays, cfg.AuditPurgeChunkSize)
-			ticker := time.NewTicker(cfg.AuditPurgeInterval)
-			defer ticker.Stop()
-			auditRepoHandle := auditSvc.GetRepo()
-			purgeAdmin := func() {
-				cutoff := time.Now().UTC().Add(-time.Duration(cfg.AdminAuditRetentionDays) * 24 * time.Hour)
-				ctx, cancel := context.WithTimeout(connectivityCtx, 30*time.Minute)
-				defer cancel()
-				deleted, err := adminAuditRepo.PurgeOlderThan(ctx, cutoff, cfg.AuditPurgeChunkSize)
-				if err != nil {
-					log.Printf("admin-events purge scheduler: err: %v", err)
-					adminAuditSvc.Record(ctx, adminaudit.Event{
-						ActorUserID: nil, Action: "purge", Resource: adminaudit.PurgeTarget,
-						Path: "scheduler", Method: "INTERNAL", Success: false,
-						Metadata: map[string]any{
-							"mode": "scheduler", "target": adminaudit.PurgeTarget,
-							"cutoff": cutoff.Format(time.RFC3339), "error": err.Error(),
-						},
-					})
-					return
-				}
-				if err := auditRepoHandle.RecordPurgeRun(ctx, cutoff, deleted, adminaudit.PurgeTarget); err != nil {
-					log.Printf("admin-events purge scheduler: record run failed: %v", err)
-				}
-				log.Printf("admin-events purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
-				adminAuditSvc.Record(ctx, adminaudit.Event{
-					ActorUserID: nil, Action: "purge", Resource: adminaudit.PurgeTarget,
-					Path: "scheduler", Method: "INTERNAL", Success: true,
-					Metadata: map[string]any{
-						"mode": "scheduler", "target": adminaudit.PurgeTarget,
-						"cutoff": cutoff.Format(time.RFC3339), "rows_deleted": deleted,
-					},
-				})
-			}
-			for {
-				select {
-				case <-ticker.C:
-					purgeAdmin()
-				case <-connectivityCtx.Done():
-					return
-				}
-			}
-		}()
-	}
+	// PR-A / PR-D.1: retention/purge schedulers.
+	// Полная реализация в enterprise_wire.go (-tags enterprise).
+	// Core-build получает no-op функцию из enterprise_stubs.go.
+	entBundle.StartSchedulers(connectivityCtx, cfg)
 
 	r := mux.NewRouter()
 
@@ -471,15 +353,10 @@ func main() {
 	admin.HandleFunc("/users", authHandler.ListUsers).Methods("GET")
 	admin.HandleFunc("/users/{id}", authHandler.GetUser).Methods("GET")
 	admin.HandleFunc("/users/{id}", authHandler.UpdateUser).Methods("PUT")
-	// PR-B: DSAR erasure. Admin-only, идемпотентный (повторный вызов
-	// возвращает status=already_erased).
-	admin.HandleFunc("/users/{id}/erase", authHandler.EraseUser).Methods("POST")
 
 	// Audit logs
 	admin.HandleFunc("/audit/logs", auditHandler.List).Methods("GET")
 	admin.HandleFunc("/audit/status", auditHandler.Status).Methods("GET")
-	// PR-D: admin access audit.
-	admin.HandleFunc("/admin-events", adminAuditHandler.List).Methods("GET")
 
 	// Policies (admin)
 	admin.HandleFunc("/policies", policyHandler.List).Methods("GET")
@@ -487,9 +364,12 @@ func main() {
 	admin.HandleFunc("/policies/{id}", policyHandler.Update).Methods("PUT")
 	admin.HandleFunc("/policies/{id}", policyHandler.Delete).Methods("DELETE")
 
-	// PR-G1: Provider/Model Governance (admin-only).
-	admin.HandleFunc("/governance/policy", governanceHandler.GetPolicy).Methods("GET")
-	admin.HandleFunc("/governance/policy", governanceHandler.UpdatePolicy).Methods("PUT")
+	// L-1: enterprise-only admin routes (empty-set в Core-билде):
+	//   POST /users/{id}/erase        — DSAR
+	//   GET  /admin-events             — admin access audit
+	//   GET  /governance/policy        — Provider/Model Governance
+	//   PUT  /governance/policy
+	entBundle.RegisterRoutes(admin, authHandler)
 
 	// Budgets
 	budgets := api.PathPrefix("/budgets").Subrouter()

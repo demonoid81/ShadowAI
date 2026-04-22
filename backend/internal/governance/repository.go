@@ -1,3 +1,8 @@
+//go:build enterprise
+
+// Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
+// Compiled only under -tags enterprise.
+
 package governance
 
 import (

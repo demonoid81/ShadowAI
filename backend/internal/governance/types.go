@@ -3,6 +3,16 @@
 // allowlist моделей внутри провайдера + deny-by-default опция +
 // policy visibility. PR-G1 (phase 1).
 //
+// Licensing split (see ENTERPRISE.md):
+//
+//   - types.go (this file) — Apache License 2.0. Core proxy зависит
+//     только от Evaluator interface и Decision-типов.
+//   - service.go, repository.go, handler.go, *_test.go — covered by
+//     LICENSE.enterprise. Компилируются только с -tags enterprise.
+//
+// Core-only build передаёт nil Evaluator в proxy; proxy trivially
+// возвращает Allow (nil-safe).
+//
 // НЕ входит в v1:
 //   - role-based routing (PR-G2);
 //   - department/user policy matrix (PR-G2);
@@ -11,8 +21,16 @@
 package governance
 
 import (
+	"context"
 	"time"
 )
+
+// Evaluator — core interface, который proxy использует для
+// enforcement. Enterprise-реализация (*Service) satisfies его.
+// В Core-build передаётся nil — proxy обходит enforcement.
+type Evaluator interface {
+	Evaluate(ctx context.Context, provider, model string) (Decision, error)
+}
 
 // Mode — режим политики. Phase 1 поддерживает два значения.
 //

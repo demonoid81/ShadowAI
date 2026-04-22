@@ -36,13 +36,18 @@ The following paths are covered by [LICENSE.enterprise](LICENSE.enterprise):
 
 ### SQL migrations
 
-- `backend/migrations/009_create_user_erasure_runs.sql` — DSAR
-  tombstone table.
-- `backend/migrations/010_create_admin_event_logs.sql` — admin
-  event log storage.
-- `backend/migrations/011_add_target_to_audit_purge_runs.sql` —
-  retention target column for admin-events vs user-audit.
-- `backend/migrations/012_create_provider_governance_policies.sql`
+All enterprise migrations live in `backend/migrations-enterprise/`
+(separate from `backend/migrations/`). Core operators apply only
+`backend/migrations/` (001–008); enterprise operators additionally
+apply `backend/migrations-enterprise/` (009–012):
+
+- `backend/migrations-enterprise/009_create_user_erasure_runs.sql`
+  — DSAR tombstone table.
+- `backend/migrations-enterprise/010_create_admin_event_logs.sql`
+  — admin event log storage.
+- `backend/migrations-enterprise/011_add_target_to_audit_purge_runs.sql`
+  — retention target column for admin-events vs user-audit.
+- `backend/migrations-enterprise/012_create_provider_governance_policies.sql`
   — governance policy singleton table.
 
 ### Documentation
@@ -76,20 +81,35 @@ Anyone may clone this repository, read all files (Core and
 Enterprise), study the architecture, and discuss it.
 
 ### Running Core only
-You may build and run ShadowAI with the Enterprise Components
-excluded from the binary (for example, with `-tags noenterprise`
-build tags once such tags are added, or by manually removing
-enterprise imports). Running Core alone falls fully under Apache
-2.0 and requires no commercial agreement.
 
-A reference build configuration for Core-only will be documented
-separately as enterprise components mature. Until then, the
-straightforward path is to obtain a commercial license for the full
-build if you need the enterprise features.
+```bash
+go build ./backend/cmd/shadowai
+```
+
+This produces a binary with **zero enterprise code linked in**:
+no `admin_event_logs` writer, no DSAR orchestration, no Provider/
+Model Governance. The corresponding HTTP endpoints (`/api/admin-
+events`, `/api/governance/policy`, `POST /api/users/{id}/erase`) are
+not registered and return 404. Retention schedulers are no-ops.
+
+Database migrations to apply for Core: `backend/migrations/001–008`
+only. Do NOT apply `backend/migrations-enterprise/`.
+
+Running Core alone falls fully under Apache 2.0 and requires no
+commercial agreement.
 
 ### Running the full build (Core + Enterprise)
-Requires a commercial agreement (MSA + Order Form + Self-Hosted
-EULA). See `LICENSE.enterprise` and contact the maintainers.
+
+```bash
+go build -tags enterprise ./backend/cmd/shadowai
+```
+
+This links in all Enterprise Components. Requires a commercial
+agreement (MSA + Order Form + Self-Hosted EULA). See
+`LICENSE.enterprise`.
+
+Database migrations to apply: both `backend/migrations/001–008`
+and `backend/migrations-enterprise/009–012`.
 
 ### Providing a hosted "-as-a-service" offering
 - If it is Core-only (no Enterprise Components compiled in),

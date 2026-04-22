@@ -100,11 +100,13 @@ type Handler struct {
 	// PR-A: privacy. Applies to every audit_log write через h.auditLog().
 	auditPayloadMode audit.PayloadMode
 	// PR-G1: enforcement point для Provider/Model Governance. nil →
-	// governance не применяется (dev/tests). Evaluate вызывается после
-	// model resolve, до firewall — deny короткозамыкает запрос.
-	governanceSvc *governance.Service
+	// governance не применяется (Core build / dev). Evaluate
+	// вызывается после model resolve, до firewall — deny
+	// короткозамыкает запрос. Type — core interface (Evaluator);
+	// enterprise-реализация (*governance.Service) satisfies его.
+	governanceSvc governance.Evaluator
 	// PR-G1: admin-event writer для governance_deny / governance
-	// CRUD. nil → админ-события не пишутся (dev/tests).
+	// CRUD. nil → админ-события не пишутся (Core build / dev).
 	adminAudit adminaudit.Recorder
 }
 
@@ -126,7 +128,7 @@ func NewHandler(
 	maxCompletionTokens int,
 	firewallPipeline *firewall.Pipeline,
 	auditPayloadMode audit.PayloadMode,
-	governanceSvc *governance.Service,
+	governanceSvc governance.Evaluator,
 	adminAudit adminaudit.Recorder,
 ) *Handler {
 	transport := &http.Transport{
@@ -225,20 +227,22 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	// Evaluate стоит после isModelSupported (чтобы провайдер вообще
 	// понимал модель) и ДО firewall/budget/DLP — governance-deny
 	// короткозамыкает запрос, не тратя токены на firewall-scan.
-	// nil governanceSvc (dev/tests) возвращает Allow.
-	if dec, _ := h.governanceSvc.Evaluate(r.Context(), providerName, model); dec.Kind == governance.DecisionDeny {
-		h.recordGovernanceDeny(r, claims, providerName, model, dec)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error":     "model denied by governance policy",
-			"code":      dec.Code,
-			"reason":    dec.Reason,
-			"provider":  providerName,
-			"model":     model,
-			"policy_id": dec.PolicyID,
-		})
-		return
+	// nil governanceSvc (Core build / dev) обходит enforcement.
+	if h.governanceSvc != nil {
+		if dec, _ := h.governanceSvc.Evaluate(r.Context(), providerName, model); dec.Kind == governance.DecisionDeny {
+			h.recordGovernanceDeny(r, claims, providerName, model, dec)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":     "model denied by governance policy",
+				"code":      dec.Code,
+				"reason":    dec.Reason,
+				"provider":  providerName,
+				"model":     model,
+				"policy_id": dec.PolicyID,
+			})
+			return
+		}
 	}
 
 	// Extract all text for PII scanning

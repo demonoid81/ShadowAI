@@ -1,3 +1,8 @@
+//go:build enterprise
+
+// Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
+// Compiled only under -tags enterprise.
+
 package auth
 
 import (
@@ -7,24 +12,10 @@ import (
 	"fmt"
 )
 
-// ErasureStatus — фиксированное множество возможных исходов EraseUser.
-// Клиент (admin UI) ориентируется именно на это поле, не на HTTP status code.
-type ErasureStatus string
-
-const (
-	ErasureCompleted     ErasureStatus = "completed"
-	ErasureAlreadyErased ErasureStatus = "already_erased"
-	ErasureNotFound      ErasureStatus = "not_found"
-)
-
-// ErasureResult — итог выполнения EraseUser.
-// AuditRowsScrubbed/BudgetsDeleted валидны только при Completed.
-type ErasureResult struct {
-	UserID            string        `json:"user_id"`
-	Status            ErasureStatus `json:"status"`
-	AuditRowsScrubbed int           `json:"audit_rows_scrubbed,omitempty"`
-	BudgetsDeleted    int           `json:"budgets_deleted,omitempty"`
-}
+// ErasureStatus, ErasureResult и константы перенесены в erasure_types.go
+// (core Apache 2.0). Остальные типы (ErasureService, AuditScrubber,
+// BudgetDeleter) и логика EraseUser остаются здесь под
+// //go:build enterprise.
 
 // AuditScrubber — интерфейс для scrubbing audit_logs по user_id
 // (в рамках переданной *sql.Tx). Реализован audit.Repository.
