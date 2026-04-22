@@ -9,18 +9,26 @@ see LICENSE file for terms.
 
 ---
 
-ShadowAI is a dual-project with two lines:
+ShadowAI is distributed as a **single dual-licensed repository**:
 
-- **ShadowAI Core** (this repository) — Apache License 2.0.
-  Includes: proxy, firewall engine, inspectors (including semantic_v2),
-  benchmark harness, basic policy engine, basic auth, basic dashboard.
+- **ShadowAI Core** — most of the tree, licensed under the
+  Apache License 2.0 (see LICENSE). Includes: proxy, firewall
+  engine, inspectors (including semantic_v2), benchmark harness,
+  basic policy engine, basic auth, basic dashboard.
 
-- **ShadowAI Enterprise** (separate, non-public repository) —
-  proprietary commercial license. Includes: privacy/audit hardening
-  (AUDIT_PAYLOAD_MODE, retention, DSAR, admin_event_logs, user-read
-  access audit, dashboard masking), provider/model governance, SIEM
-  integration, SSO/SCIM, legal hold, tenant isolation, compliance
-  control mappings, and premium support.
+- **ShadowAI Enterprise Components** — a set of directories and
+  files enumerated in ENTERPRISE.md, licensed under a proprietary
+  commercial license (see LICENSE.enterprise). Includes: privacy/
+  audit hardening (AUDIT_PAYLOAD_MODE, retention, DSAR,
+  admin_event_logs, user-read access audit, dashboard masking),
+  provider/model governance, and documentation of privacy ops
+  runbooks. Planned: SIEM integration, SSO/SCIM, legal hold,
+  tenant isolation, compliance control mappings, premium support.
+
+Reading the source of Enterprise Components is free. Using them in
+production requires a commercial agreement with the ShadowAI
+Contributors. See ENTERPRISE.md for the scope list and the rules
+that apply.
 
 See TRADEMARK.md for the ShadowAI trademark and branding policy.
 

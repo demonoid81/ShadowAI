@@ -1,0 +1,67 @@
+ShadowAI Enterprise License
+
+Copyright 2026 ShadowAI Contributors
+All Rights Reserved.
+
+This file and the other source files, SQL migrations, documentation,
+and binaries enumerated in ENTERPRISE.md at the root of this
+repository (collectively, the "Enterprise Components") are part of
+the ShadowAI Enterprise distribution and are NOT licensed under the
+Apache License 2.0 that governs the rest of this repository.
+
+The Enterprise Components are proprietary software. No license,
+express or implied, is granted by publishing this source code. You
+may read the source code for the purpose of evaluating, auditing,
+reviewing, and discussing it in the context of a commercial
+relationship with ShadowAI Contributors or for security research
+purposes. You may NOT:
+
+    (a) use the Enterprise Components in production, in internal
+        business operations, or in any environment where the
+        Enterprise Components provide value to you or your
+        organization, without a valid written agreement with the
+        ShadowAI Contributors (typically an MSA + Order Form +
+        Self-Hosted EULA);
+
+    (b) provide the Enterprise Components, or any derivative
+        work thereof, as a hosted, managed, or "as-a-service"
+        offering to third parties;
+
+    (c) remove, alter, or obscure any copyright, trademark,
+        attribution, or licensing notices in the Enterprise
+        Components;
+
+    (d) sublicense, sell, rent, lease, or otherwise transfer the
+        Enterprise Components or any rights thereto without
+        written consent from the ShadowAI Contributors.
+
+Contributing to the Enterprise Components
+-----------------------------------------
+Pull requests that modify any of the Enterprise Components listed in
+ENTERPRISE.md are accepted only from contributors who have signed a
+Contributor License Agreement (CLA) with the ShadowAI Contributors,
+separate from the DCO-based workflow used for the Apache-licensed
+Core. A PR-level bot or CI check will indicate when a CLA signature
+is required.
+
+Discontinuation / refund
+------------------------
+Rights granted to you under a commercial agreement survive only for
+the duration of that agreement and are subject to its termination
+and refund provisions. Nothing in this file grants rights beyond
+what is stated in that commercial agreement.
+
+Contact
+-------
+For commercial licensing terms, pricing, and evaluation access,
+open an issue in this repository titled "[commercial]" or contact
+the maintainers directly.
+
+Legal note
+----------
+This file describes the position of the ShadowAI Contributors
+regarding the Enterprise Components. It is not legal advice and
+does not constitute a binding contract on its own; the binding
+terms for your use of the Enterprise Components are those of the
+commercial agreement that you sign. If you have questions about
+permitted use, consult a lawyer.
