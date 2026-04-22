@@ -123,13 +123,31 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 		cfg.AuditPurgeInterval, cfg.AuditRetentionDays, cfg.AuditPurgeChunkSize)
 	ticker := time.NewTicker(cfg.AuditPurgeInterval)
 	defer ticker.Stop()
-	repo := auditSvc.GetRepo()
+	// PR-L2.1: type-assert к concrete *audit.Repository, нужен для
+	// доступа к PurgeOlderThanRespectingHolds (enterprise-only
+	// метод, не в audit.Repo interface).
+	repoIface := auditSvc.GetRepo()
+	repo, ok := repoIface.(*audit.Repository)
+	if !ok {
+		log.Printf("audit-purge scheduler: unexpected repo type %T — not *audit.Repository, cannot start scheduler", repoIface)
+		return
+	}
 	purge := func() {
 		cutoff := time.Now().UTC().Add(-time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour)
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
 
-		// PR-L2: hold snapshot до purge — atomicity на read-level.
+		// PR-L2.1: race-free retention-aware purge через single SQL
+		// statement. `PurgeOlderThanRespectingHolds` делает DELETE
+		// с NOT EXISTS(...FROM legal_holds) — consults legal_holds
+		// непосредственно в delete-statement, а не через отдельный
+		// snapshot. PG MVCC гарантирует consistent view: hold,
+		// applied между началом statement'а и row-scan'ом, защитит
+		// свои rows без user-level race.
+		//
+		// heldUserIDs-snapshot продолжаем брать ТОЛЬКО для
+		// metadata.holds_excluded (для forensics UI / SIEM). Race
+		// в этом числе acceptable — correctness-impact нет.
 		heldUserIDs, err := legalHoldSvc.ActiveUserIDs(rctx)
 		if err != nil {
 			log.Printf("audit-purge scheduler: hold lookup failed (skip tick): %v", err)
@@ -144,7 +162,7 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 			return
 		}
 
-		deleted, err := repo.PurgeOlderThanExcept(rctx, cutoff, cfg.AuditPurgeChunkSize, heldUserIDs)
+		deleted, err := repo.PurgeOlderThanRespectingHolds(rctx, cutoff, cfg.AuditPurgeChunkSize)
 		if err != nil {
 			log.Printf("audit-purge scheduler: err: %v", err)
 			adminAuditSvc.Record(rctx, adminaudit.Event{

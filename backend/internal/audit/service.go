@@ -25,6 +25,11 @@ type Repo interface {
 	// user_id in exceptUserIDs, НЕ удаляются (защита evidence для
 	// users'ов под active legal hold). nil/empty exceptUserIDs →
 	// идентично PurgeOlderThan.
+	//
+	// PR-L2.1: scheduler перешёл на enterprise-only
+	// PurgeOlderThanRespectingHolds (single-SQL, race-free). Этот
+	// метод остаётся в interface для backward-compat с Core CLI и
+	// внешними consumer'ами, которые передают свой snapshot.
 	PurgeOlderThanExcept(ctx context.Context, cutoff time.Time, chunkSize int, exceptUserIDs []string) (int, error)
 	// PR-D.1: target parameter разделяет purge-runs по таблицам
 	// (audit_logs vs admin_event_logs). target="" → audit_logs (BC).

@@ -305,9 +305,18 @@ Requirement "заморозить" удаление данных конкрет�
    блок сработал".
 4. **Backup freeze** (`[manual]`): infra excludes snapshot'ы с
    held data из eviction.
-5. **Audit-retention** (`[manual]`): если hold длиннее
-   `AUDIT_RETENTION_DAYS`, приостановить scheduler
-   (`AUDIT_PURGE_INTERVAL=0` + restart) на период hold'а.
+5. **Audit-retention**:
+   - **Enterprise build + scheduler** (`[implemented]`, PR-L2.1):
+     in-process scheduler использует single-SQL race-free
+     `PurgeOlderThanRespectingHolds` — rows под active hold
+     автоматически исключаются из каждого purge-tick'а, пока hold
+     remains active. Manual pause НЕ требуется.
+   - **Core-only CLI** (`cmd/audit-purge` без enterprise tag
+     или внешний cron-wrapper вокруг CLI): `[manual]`. CLI не
+     консультирует legal_holds (Core scope без enterprise
+     таблицы). Operator обязан остановить CLI-cron / установить
+     `AUDIT_PURGE_INTERVAL=0` на время hold'а либо предоставить
+     собственный exclusion-wrapper вокруг `PurgeOlderThanExcept`.
 6. **Release**:
    ```bash
    curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -509,14 +518,16 @@ external tooling.
   `ValidateStartupConfig` требует >=32 chars). Без secret
   guessable case-IDs (SEC-2026-NNN) можно было бы brute-force'ить
   из mirror dump.
-- **[implemented]** (PR-L2) Retention-aware purge для enterprise
-  `runAuditPurgeScheduler`: перед каждым purge-tick'ом scheduler
-  берёт snapshot `target_user_id`s всех active hold'ов и передаёт
-  их в `PurgeOlderThanExcept`. Rows под active hold НЕ удаляются
-  даже если старше cutoff'а. `holds_excluded` count попадает в
-  admin_event_logs.metadata → SIEM mirror. Fail-closed: если
-  hold-lookup падает, purge-tick пропускается (evidence сохраняется
-  > availability).
+- **[implemented]** (PR-L2 / PR-L2.1) Retention-aware purge для
+  enterprise `runAuditPurgeScheduler`. PR-L2.1 устранил
+  snapshot-delete race: `PurgeOlderThanRespectingHolds` делает
+  single-SQL DELETE с `NOT EXISTS (... FROM legal_holds ...)` —
+  PG MVCC консультирует legal_holds в момент row-scan'а, hold
+  создаётся atomically защищает свои rows без user-level race.
+  `holds_excluded` count (snapshot) остаётся в admin_event_logs.
+  metadata для forensic UI / SIEM; race в этом числе acceptable
+  (correctness не зависит). Fail-closed: если hold-lookup падает,
+  purge-tick пропускается (evidence preservation > availability).
 - **[gap]** Core-only build'а `cmd/audit-purge` CLI не имеет
   доступа к legal_holds (package enterprise-only) — использует
   backward-compat `PurgeOlderThan`. Для Core operator ожидается
@@ -628,6 +639,13 @@ external tooling.
 
 ## 9. Change log
 
+- **1.13 (2026-04-22)** — PR-L2.1: race-fix. Scheduler переключён
+  с snapshot→delete two-step на single-SQL
+  `PurgeOlderThanRespectingHolds` (NOT EXISTS ... FROM legal_holds).
+  Устранено snapshot-delete race-window (hold applied между
+  snapshot'ом и delete'ом теперь защищает rows). Runbook §5.3
+  уточнён: автоматическое retention-aware scope only для
+  enterprise scheduler; core-only CLI остаётся `[manual]`.
 - **1.12 (2026-04-22)** — PR-L2: retention-aware audit purge.
   Enterprise scheduler `runAuditPurgeScheduler` теперь вызывает
   `PurgeOlderThanExcept(cutoff, chunk, heldUserIDs)`, где
