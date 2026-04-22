@@ -31,6 +31,8 @@ The following paths are covered by [LICENSE.enterprise](LICENSE.enterprise):
 - `backend/internal/legalhold/` — Legal hold groundwork
   (per-user judicial/regulatory holds, blocks DSAR erasure
   pre-transaction, admin-only CRUD).
+- `backend/internal/legalholdcoord/` — PR-L3 shared advisory
+  lock helper между apply_hold и retention-aware audit purge.
 
 ### Individual Go files
 

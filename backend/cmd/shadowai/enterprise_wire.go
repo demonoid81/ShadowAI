@@ -124,32 +124,27 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 		cfg.AuditPurgeInterval, cfg.AuditRetentionDays, cfg.AuditPurgeChunkSize)
 	ticker := time.NewTicker(cfg.AuditPurgeInterval)
 	defer ticker.Stop()
-	// PR-L2.2: structural interface assertion вместо concrete
-	// *audit.Repository. Если в будущем repo будет обёрнут
-	// декоратором (metrics/tracing), decorator сам должен
-	// forward'ить PurgeOlderThanRespectingHolds → assertion
-	// всё ещё пройдёт. В случае несовместимой обёртки scheduler
-	// не просто log-и-выйти, а пишет admin_event для operator'а.
-	// Интерфейс объединяет оба метода scheduler'а: hold-aware
-	// purge + RecordPurgeRun (последний есть в audit.Repo, но
-	// мы декларируем его явно чтобы decorator был обязан
-	// forward'ить оба).
-	type holdAwarePurger interface {
-		PurgeOlderThanRespectingHolds(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)
-		RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error
+	// PR-L3: coordinated purge + record-run в одной tx под
+	// advisory lock. Structural interface — decorator-friendly
+	// (metrics/tracing wrapper проходит проверку если forward'ит
+	// метод). Mismatch → admin-event + SIEM mirror (не silent
+	// log). `RecordPurgeRun` больше не вызывается scheduler'ом
+	// отдельно — он входит в coordinated method.
+	type coordinatedHoldPurger interface {
+		PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)
 	}
 	repoIface := auditSvc.GetRepo()
-	repo, ok := repoIface.(holdAwarePurger)
+	repo, ok := repoIface.(coordinatedHoldPurger)
 	if !ok {
-		log.Printf("audit-purge scheduler: audit.Repo does not implement holdAwarePurger (%T) — scheduler not started", repoIface)
+		log.Printf("audit-purge scheduler: audit.Repo does not implement coordinatedHoldPurger (%T) — scheduler not started", repoIface)
 		adminAuditSvc.Record(ctx, adminaudit.Event{
 			ActorUserID: nil, Action: "scheduler_init_failed",
 			Resource: "audit_logs",
 			Path:     "scheduler", Method: "INTERNAL", Success: false,
 			Metadata: map[string]any{
-				"error":          "repo_missing_hold_aware_method",
-				"repo_concrete":  fmt.Sprintf("%T", repoIface),
-				"component":      "runAuditPurgeScheduler",
+				"error_code":    "repo_missing_coordinated_hold_purger",
+				"repo_concrete": fmt.Sprintf("%T", repoIface),
+				"component":     "runAuditPurgeScheduler",
 			},
 		})
 		return
@@ -187,7 +182,10 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 			return
 		}
 
-		deleted, err := repo.PurgeOlderThanRespectingHolds(rctx, cutoff, cfg.AuditPurgeChunkSize)
+		// PR-L3: coordinated purge + record-run в одной tx под
+		// advisory lock. RecordPurgeRun больше не вызывается
+		// отдельно — это часть того же atomic method.
+		deleted, err := repo.PurgeOlderThanRespectingHoldsAndRecordRun(rctx, cutoff, cfg.AuditPurgeChunkSize)
 		if err != nil {
 			log.Printf("audit-purge scheduler: err: %v", err)
 			adminAuditSvc.Record(rctx, adminaudit.Event{
@@ -199,9 +197,6 @@ func runAuditPurgeScheduler(ctx context.Context, cfg *config.Config, auditSvc *a
 				},
 			})
 			return
-		}
-		if err := repo.RecordPurgeRun(rctx, cutoff, deleted, audit.PurgeTargetAuditLogs); err != nil {
-			log.Printf("audit-purge scheduler: record run failed: %v", err)
 		}
 		log.Printf("audit-purge scheduler: deleted %d rows (cutoff=%s, holds_excluded=%d)",
 			deleted, cutoff.Format(time.RFC3339), len(heldUserIDs))

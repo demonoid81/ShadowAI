@@ -306,23 +306,23 @@ Requirement "заморозить" удаление данных конкрет�
 4. **Backup freeze** (`[manual]`): infra excludes snapshot'ы с
    held data из eviction.
 5. **Audit-retention**:
-   - **Enterprise build + scheduler** (`[implemented, partial]`,
-     PR-L2/L2.1/L2.2): in-process scheduler использует single-SQL
-     `PurgeOlderThanRespectingHolds`. Rows под active hold
-     исключаются автоматически на каждом tick'е, **за
-     исключением узкого race-window внутри одного DELETE
-     statement'а** (hold, applied ПОСЛЕ начала DELETE, не
-     защитит rows на этом tick'е; на следующем — защитит).
-     Для большинства сценариев это acceptable. Для строгого
-     compliance — apply_hold ДО `cutoff - AUDIT_PURGE_INTERVAL`
-     времени, либо ждать PR-L3 (true race-free через
-     advisory lock).
+   - **Enterprise build + scheduler** (`[implemented]`,
+     PR-L3): in-process scheduler использует coordinated
+     `PurgeOlderThanRespectingHoldsAndRecordRun`. Apply_hold и
+     purge берут shared `pg_advisory_xact_lock`. Commit-order
+     guarantee: если apply_hold commit раньше purge commit —
+     rows защищены. Если apply_hold позже — rows того tick'а
+     уже удалены (допустимо: hold не существовал в момент
+     purge).
+   - **Manual pause НЕ требуется** для enterprise scheduler'а.
    - **Core-only CLI** (`cmd/audit-purge` без enterprise tag
      или внешний cron-wrapper вокруг CLI): `[manual]`. CLI не
      консультирует legal_holds (Core scope без enterprise
-     таблицы). Operator обязан остановить CLI-cron / установить
-     `AUDIT_PURGE_INTERVAL=0` на время hold'а либо предоставить
-     собственный exclusion-wrapper вокруг `PurgeOlderThanExcept`.
+     таблицы) и не участвует в advisory lock coordination.
+     Operator обязан остановить CLI-cron / установить
+     `AUDIT_PURGE_INTERVAL=0` на время hold'а либо
+     предоставить собственный exclusion-wrapper вокруг
+     `PurgeOlderThanExcept`.
 6. **Release**:
    ```bash
    curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -524,32 +524,34 @@ external tooling.
   `ValidateStartupConfig` требует >=32 chars). Без secret
   guessable case-IDs (SEC-2026-NNN) можно было бы brute-force'ить
   из mirror dump.
-- **[implemented, partial]** (PR-L2 / PR-L2.1 / PR-L2.2)
-  Retention-aware purge для enterprise
-  `runAuditPurgeScheduler`. PR-L2.1 СУЖАЕТ (не устраняет)
-  snapshot-delete race через single-SQL DELETE с `NOT EXISTS
-  (... FROM legal_holds ...)`.
-  - **Важно**: PostgreSQL default **READ COMMITTED**
-    даёт statement-level snapshot в начале DELETE. Hold,
-    applied ПОСЛЕ старта statement'а, ещё не виден этому
-    statement'у — его rows могут удалиться на текущем tick'е.
-    На следующем tick'е уже защищены.
-  - **Residual race-window**: миллисекунды (длина одного
-    DELETE-chunk'а для chunkSize=1000). Acceptable для
-    большинства compliance-рамок, но **не строгий race-free
-    guarantee**.
-  - **Mitigation сейчас**: hold рекомендовано apply'ить ЗА
-    ДОЛГО до cutoff времени. Operator workflow:
-    получить hold-order → apply_hold immediately → через
-    `AUDIT_PURGE_INTERVAL` rows уже защищены.
-  - **True race-free — roadmap PR-L3**: SERIALIZABLE
-    isolation + advisory lock (`pg_advisory_lock` на shared
-    namespace между apply_hold и purge).
-  - **Fail-closed на hold-lookup**: если scheduler не может
-    прочитать active-hold list — purge пропускается целиком
-    (evidence preservation > availability).
-  - `holds_excluded` count в admin_event_logs — forensic
-    display (snapshot, race acceptable там).
+- **[implemented]** (PR-L2 → PR-L2.2 → **PR-L3**)
+  Retention-aware audit purge с coordination-based race closure
+  для enterprise `runAuditPurgeScheduler`:
+  - **Commit-order guarantee**: и `apply_hold`, и coordinated
+    purge берут shared `pg_advisory_xact_lock(4201, 1)` внутри
+    своих tx. Если `apply_hold` закоммитился раньше purge-commit'а,
+    purge не может удалить audit_logs этого user'а. Если
+    purge закоммитился раньше apply_hold — удаление допустимо
+    (hold ещё не существовал на момент purge-commit'а).
+  - **Atomic purge+record**: `PurgeOlderThanRespectingHoldsAndRecordRun`
+    делает DELETE + INSERT into `audit_purge_runs` в одной tx
+    под тем же lock'ом. RecordPurgeRun больше не вызывается
+    scheduler'ом отдельно.
+  - **Fail-closed**: ошибка begin-tx / lock / delete / record
+    → rollback, purge-tick не засчитывается, admin-event +
+    SIEM mirror.
+  - `holds_excluded` snapshot count остаётся в admin_event_logs
+    для forensic display (race в count acceptable, correctness
+    уже защищена lock'ом).
+  - **НЕ гарантия "magically по времени начала запроса"**:
+    если apply_hold начат ПОСЛЕ purge-commit'а, его rows на
+    том tick'е уже удалены. Operator mitigation: apply_hold
+    сразу при получении hold-order — любые rows по user'у,
+    которые на этот момент существуют в audit_logs, защищены
+    на всех следующих tick'ах.
+  - **Core-only CLI** `cmd/audit-purge` в coordination НЕ
+    участвует (Core scope не имеет legal_holds) — остаётся
+    `[manual]`.
 - **[gap]** Core-only build'а `cmd/audit-purge` CLI не имеет
   доступа к legal_holds (package enterprise-only) — использует
   backward-compat `PurgeOlderThan`. Для Core operator ожидается
@@ -661,6 +663,11 @@ external tooling.
 
 ## 9. Change log
 
+- **1.15 (2026-04-22)** — PR-L3: coordination-based race closure.
+  apply_hold и retention-aware purge синхронизируются через shared
+  `pg_advisory_xact_lock(4201, 1)`. Atomic purge+record-run в
+  одной tx под lock'ом. Commit-order guarantee заменяет prev
+  "narrows race-window". §5.3/§8.2 обновлены на новую семантику.
 - **1.14 (2026-04-22)** — PR-L2.2: честные формулировки race-
   properties. Формулировки "race-free" заменены на "narrows
   race-window" в retention_hold.go комментарии, enterprise_wire.go

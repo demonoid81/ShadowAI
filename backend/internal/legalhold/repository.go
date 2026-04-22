@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shadowai/backend/internal/legalholdcoord"
 )
 
 // ErrAlreadyActive — DB unique violation при попытке создать
@@ -36,10 +38,31 @@ func NewPGRepository(db *sql.DB) *PGRepository {
 // Create вставляет новую active запись. Если у user уже есть
 // active hold — возвращает ErrAlreadyActive (DB partial-unique
 // violation).
+//
+// PR-L3: выполняется в tx под
+// `legalholdcoord.AcquireHoldPurgeLock`. Это даёт commit-order
+// guarantee с retention-aware audit purge:
+//   - apply_hold commit → purge commit: purge видит hold, rows
+//     защищены.
+//   - purge commit → apply_hold commit: rows user'а могли
+//     удалиться (hold ещё не существовал на момент purge-commit'а —
+//     допустимое поведение).
 func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("legalhold: repo not configured")
 	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: begin tx: %w", err)
+	}
+	// Defensive rollback. Commit ниже; defer rollback на уже
+	// committed tx — no-op в lib/pq.
+	defer func() { _ = tx.Rollback() }()
+
+	if err := legalholdcoord.AcquireHoldPurgeLock(ctx, tx); err != nil {
+		return nil, err
+	}
+
 	const q = `INSERT INTO legal_holds
 	    (target_user_id, case_ref, reason, created_by, is_active)
 	    VALUES ($1, $2, $3, $4, true)
@@ -52,13 +75,15 @@ func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
 	if h.CreatedBy != nil && *h.CreatedBy != "" {
 		actor = *h.CreatedBy
 	}
-	err := r.db.QueryRowContext(ctx, q, h.TargetUserID, h.CaseRef, h.Reason, actor).
-		Scan(&id, &createdAt)
-	if err != nil {
+	if err := tx.QueryRowContext(ctx, q, h.TargetUserID, h.CaseRef, h.Reason, actor).
+		Scan(&id, &createdAt); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyActive
 		}
 		return nil, fmt.Errorf("legalhold: insert: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("legalhold: commit: %w", err)
 	}
 	h.ID = id
 	h.CreatedAt = createdAt

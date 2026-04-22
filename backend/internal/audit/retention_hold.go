@@ -35,7 +35,89 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/shadowai/backend/internal/legalholdcoord"
 )
+
+// PurgeOlderThanRespectingHoldsAndRecordRun — PR-L3 coordinated
+// purge. Выполняет всё в одной tx под `legalholdcoord.
+// AcquireHoldPurgeLock`, включая INSERT в audit_purge_runs.
+// Commit-order guarantee с apply_hold (см. legalholdcoord package
+// comment):
+//
+//   - apply_hold commit → purge commit: purge видит hold, rows
+//     защищены.
+//   - purge commit → apply_hold commit: rows могут удалиться
+//     (hold ещё не существовал на момент purge-commit'а).
+//
+// Chunked DELETE выполняется в рамках одной tx: lock держится
+// всё время purge. Это acceptable для редкого scheduler'а
+// (AUDIT_PURGE_INTERVAL обычно >= минуты). Apply_hold может
+// подождать один purge-tick — редкое событие.
+//
+// target — параметр для audit_purge_runs (PurgeTargetAuditLogs).
+//
+// Error на любом шаге (tx/lock/delete/record) → rollback,
+// возврат err. Caller (scheduler) пишет admin_event на failure.
+func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Context, cutoff time.Time, chunkSize int) (int, error) {
+	if chunkSize <= 0 {
+		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("purge: begin tx: %w", err)
+	}
+	// Defensive rollback; commit ниже — duplicate rollback no-op.
+	defer func() { _ = tx.Rollback() }()
+
+	if err := legalholdcoord.AcquireHoldPurgeLock(ctx, tx); err != nil {
+		return 0, err
+	}
+
+	const delQ = `DELETE FROM audit_logs WHERE id IN (
+	    SELECT id FROM audit_logs
+	    WHERE created_at < $1
+	      AND (user_id IS NULL
+	           OR NOT EXISTS (
+	             SELECT 1 FROM legal_holds lh
+	             WHERE lh.is_active = true
+	               AND lh.target_user_id = audit_logs.user_id
+	           ))
+	    LIMIT $2
+	)`
+	total := 0
+	for {
+		res, err := tx.ExecContext(ctx, delQ, cutoff, chunkSize)
+		if err != nil {
+			return total, fmt.Errorf("purge exec: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("purge RowsAffected: %w", err)
+		}
+		total += int(n)
+		if n < int64(chunkSize) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		default:
+		}
+	}
+
+	const recordQ = `INSERT INTO audit_purge_runs
+	    (cutoff, rows_deleted, completed_at, target)
+	    VALUES ($1, $2, now(), $3)`
+	if _, err := tx.ExecContext(ctx, recordQ, cutoff, total, PurgeTargetAuditLogs); err != nil {
+		return total, fmt.Errorf("purge record run: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return total, fmt.Errorf("purge commit: %w", err)
+	}
+	return total, nil
+}
 
 // PurgeOlderThanRespectingHolds — retention-aware purge audit_logs,
 // напрямую консультирующий legal_holds в DELETE statement'е. Этот
