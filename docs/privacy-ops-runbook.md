@@ -502,8 +502,16 @@ external tooling.
   клиентов не дублируются (response body уже их содержит). Failure
   path (repo error → 500) тоже пишет event с `success=false`.
   Реализовано в `authHandler.recordUsersList` (PR-G0.1).
-- **[gap]** `UpdateUser` (PUT `/api/users/{id}`) пока НЕ покрыт —
-  см. PR-G0.2 roadmap.
+- **[implemented]** PUT `/api/users/{id}` (UpdateUser) → запись в
+  `admin_event_logs` (resource=`user`, action=`update`,
+  target_id=`{id}`). Metadata содержит diff: `changed_fields`
+  (подмножество из `email`, `role`, `is_active`), а также `old_*`/
+  `new_*` значения для `role` и `is_active`. Для email пишется
+  только флаг `email_changed: true/false` (raw email-адрес в
+  metadata запрещён privacy-контрактом). Failure paths (404 user
+  not found, 400 invalid JSON/role, 500 repo error) тоже пишут
+  event с `success=false`. Реализовано в
+  `authHandler.recordUserUpdate` (PR-G0.2).
 
 ### 8.6 4-eyes policy для destructive ops
 
@@ -543,6 +551,11 @@ external tooling.
 
 ## 9. Change log
 
+- **1.3 (2026-04-22)** — PR-G0.2: §8.5 дополнен UpdateUser audit.
+  `authHandler.recordUserUpdate` пишет `admin_event_logs` с
+  `resource=user, action=update` + diff в metadata (changed_fields,
+  old/new для role/is_active, email_changed flag). Закрыт весь
+  admin user-governance trail (read / list / update / erase).
 - **1.2 (2026-04-22)** — PR-G0.1: §8.5 дополнен ListUsers audit.
   `authHandler.recordUsersList` пишет admin_event_logs с
   `resource=users, action=list`. UpdateUser остаётся `[gap]` (PR-G0.2).

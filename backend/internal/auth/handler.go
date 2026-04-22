@@ -242,6 +242,9 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	existing, err := h.service.GetRepo().GetByID(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "user not found"})
+		h.recordUserUpdate(r, id, http.StatusNotFound, false, map[string]any{
+			"error": "user not found",
+		})
 		return
 	}
 
@@ -252,16 +255,31 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		h.recordUserUpdate(r, id, http.StatusBadRequest, false, map[string]any{
+			"error": "invalid_json",
+		})
 		return
 	}
 
-	if req.Email != "" {
+	// Захватываем before-snapshot для diff'а. Email не дублируем в
+	// metadata (PII); только флаг «менялся ли».
+	oldRole := existing.Role
+	oldActive := existing.IsActive
+	oldEmailNonEmpty := existing.Email != ""
+	emailChanged := false
+
+	if req.Email != "" && req.Email != existing.Email {
 		existing.Email = req.Email
+		emailChanged = true
 	}
 	if req.Role != "" {
 		role, err := NormalizeRole(req.Role)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid role"})
+			h.recordUserUpdate(r, id, http.StatusBadRequest, false, map[string]any{
+				"error":          "invalid_role",
+				"attempted_role": req.Role,
+			})
 			return
 		}
 		existing.Role = role
@@ -272,11 +290,64 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.service.GetRepo().UpdateUser(r.Context(), existing); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		h.recordUserUpdate(r, id, http.StatusInternalServerError, false, map[string]any{
+			"error": "repo_failure",
+		})
 		return
 	}
 
 	existing.APIKey = ""
 	writeJSON(w, http.StatusOK, existing)
+
+	// PR-G0.2: success audit. Metadata содержит diff — ровно то, что
+	// нужно forensics'у («admin X поменял role на admin»), без
+	// дублирования самих email'ов.
+	changed := make([]string, 0, 3)
+	meta := map[string]any{}
+	if emailChanged {
+		changed = append(changed, "email")
+		meta["email_changed"] = true
+		// Флаг «старый email был пустой» помогает различать fix'ы
+		// неполного аккаунта vs переназначение существующего.
+		meta["old_email_empty"] = !oldEmailNonEmpty
+	}
+	if existing.Role != oldRole {
+		changed = append(changed, "role")
+		meta["old_role"] = oldRole
+		meta["new_role"] = existing.Role
+	}
+	if existing.IsActive != oldActive {
+		changed = append(changed, "is_active")
+		meta["old_is_active"] = oldActive
+		meta["new_is_active"] = existing.IsActive
+	}
+	meta["changed_fields"] = changed
+	h.recordUserUpdate(r, id, http.StatusOK, true, meta)
+}
+
+// recordUserUpdate — PR-G0.2: admin update audit для
+// PUT /api/users/{id}. Nil-safe. Privacy-контракт: emails/passwords
+// в metadata НЕ попадают (max — bool email_changed flag).
+func (h *Handler) recordUserUpdate(r *http.Request, targetID string, status int, success bool, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if claims := GetClaims(r.Context()); claims != nil {
+		id := claims.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "update",
+		Resource:    "user",
+		TargetID:    targetID,
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  status,
+		Success:     success,
+		Metadata:    metadata,
+	})
 }
 
 func (h *Handler) RevokeTokens(w http.ResponseWriter, r *http.Request) {
