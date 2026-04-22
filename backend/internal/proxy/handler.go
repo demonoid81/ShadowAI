@@ -229,7 +229,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	// короткозамыкает запрос, не тратя токены на firewall-scan.
 	// nil governanceSvc (Core build / dev) обходит enforcement.
 	if h.governanceSvc != nil {
-		if dec, _ := h.governanceSvc.Evaluate(r.Context(), providerName, model); dec.Kind == governance.DecisionDeny {
+		if dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, providerName, model); dec.Kind == governance.DecisionDeny {
 			h.recordGovernanceDeny(r, claims, providerName, model, dec)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -1368,7 +1368,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			if cm == "" {
 				cm = cand.Provider.DefaultModel()
 			}
-			dec, _ := h.governanceSvc.Evaluate(r.Context(), cand.Name, cm)
+			dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, cand.Name, cm)
 			if dec.Kind == governance.DecisionAllow {
 				allowed = append(allowed, cand)
 				continue

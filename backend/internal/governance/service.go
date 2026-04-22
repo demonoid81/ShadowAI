@@ -12,6 +12,35 @@ import (
 	"strings"
 )
 
+// normalizeRoleRules — PR-G2 аналог normalizeRules для role-scoped
+// rules: lowercase роли, merge duplicate-role entries (union rules),
+// внутри каждого role применяет normalizeRules, сортирует по role
+// для детерминизма.
+func normalizeRoleRules(in []RoleRule) []RoleRule {
+	merged := make(map[string][]ProviderRule)
+	order := make([]string, 0, len(in))
+	for _, rr := range in {
+		role := strings.ToLower(strings.TrimSpace(rr.Role))
+		if role == "" {
+			continue
+		}
+		if _, ok := merged[role]; !ok {
+			merged[role] = []ProviderRule{}
+			order = append(order, role)
+		}
+		merged[role] = append(merged[role], rr.Rules...)
+	}
+	sort.Strings(order)
+	out := make([]RoleRule, 0, len(order))
+	for _, role := range order {
+		out = append(out, RoleRule{
+			Role:  role,
+			Rules: normalizeRules(merged[role]),
+		})
+	}
+	return out
+}
+
 // normalizeRules приводит Rules к canonical form:
 //   - provider names trim+lowercase, пустые отсекаются;
 //   - modeли trim+lowercase, пустые и дубликаты схлопываются;
@@ -107,25 +136,29 @@ func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy,
 		return nil, fmt.Errorf("governance: invalid mode %q", p.Mode)
 	}
 	p.Rules = normalizeRules(p.Rules)
+	p.RoleRules = normalizeRoleRules(p.RoleRules)
 	return s.repo.Upsert(ctx, p, actor)
 }
 
 // Evaluate — основной entrypoint для proxy. Проверяет, разрешена ли
-// (provider, model)-пара текущей active policy.
+// (role, provider, model)-тройка текущей active policy.
 //
 // Decision matrix:
 //
-//	nil Service                  → Allow (governance_disabled)
-//	repo err                     → Deny  (policy_read_failure) + err
-//	policy == nil                → Allow (governance_disabled)
-//	Mode == disabled             → Allow (governance_disabled)
-//	Mode == allowlist_strict:
-//	  provider не в Rules        → Deny (unknown_provider)
-//	  provider в Rules, model не → Deny (unknown_model)
-//	  оба матч                   → Allow (allowed)
+//	nil Service                      → Allow (governance_disabled)
+//	repo err                         → Deny  (policy_read_failure) + err
+//	policy == nil                    → Allow (governance_disabled)
+//	Mode == disabled                 → Allow (governance_disabled)
+//	Mode == allowlist_strict         → role ignored; strict-evaluate Rules
+//	Mode == role_based (PR-G2)       → find RoleRule by role:
+//	   role не в RoleRules            → Deny (unknown_role)
+//	   провайдер не в role's rules   → Deny (unknown_provider)
+//	   провайдер в, model не         → Deny (unknown_model)
+//	   оба match                     → Allow (allowed)
 //
-// Сравнение case-insensitive (OpenAI vs openai, GPT-4 vs gpt-4).
-func (s *Service) Evaluate(ctx context.Context, provider, model string) (Decision, error) {
+// Сравнение case-insensitive (OpenAI vs openai, GPT-4 vs gpt-4,
+// admin vs Admin).
+func (s *Service) Evaluate(ctx context.Context, role, provider, model string) (Decision, error) {
 	if s == nil || s.repo == nil {
 		return Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled}, nil
 	}
@@ -138,21 +171,34 @@ func (s *Service) Evaluate(ctx context.Context, provider, model string) (Decisio
 		}, err
 	}
 	if p == nil || p.Mode == ModeDisabled {
-		// Для ModeDisabled прикрепляем PolicyID, чтобы audit-trail
-		// видел, какая именно политика находится в disabled-состоянии.
 		dec := Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled}
 		if p != nil {
 			dec.PolicyID = p.ID
 		}
 		return dec, nil
 	}
-	// ModeAllowlistStrict. Обходим ВСЕ matching provider rules
-	// (не останавливаемся на первом) — защита от duplicate rules,
-	// которые могли попасть прямым SQL до того, как normalizeRules
-	// стал gateway'ем. При любом match — Allow. Флаг matchedProvider
-	// различает unknown_model vs unknown_provider в финальном deny.
+	switch p.Mode {
+	case ModeAllowlistStrict:
+		return evaluateRules(p.Rules, provider, model, p.ID), nil
+	case ModeAllowlistRoleBased:
+		return evaluateRoleRules(p.RoleRules, role, provider, model, p.ID), nil
+	}
+	// Неизвестный mode — fail-closed (IsValid отсеял бы на Upsert,
+	// но direct-SQL мог внести невалидный value).
+	return Decision{
+		Kind:     DecisionDeny,
+		Code:     CodePolicyReadFailure,
+		Reason:   fmt.Sprintf("unknown policy mode %q", p.Mode),
+		PolicyID: p.ID,
+	}, nil
+}
+
+// evaluateRules — общая логика allowlist-match для плоского списка
+// ProviderRule. Используется и в strict, и в role-based (через
+// role-specific rules).
+func evaluateRules(rules []ProviderRule, provider, model, policyID string) Decision {
 	matchedProvider := false
-	for _, r := range p.Rules {
+	for _, r := range rules {
 		if !strings.EqualFold(r.Provider, provider) {
 			continue
 		}
@@ -162,8 +208,8 @@ func (s *Service) Evaluate(ctx context.Context, provider, model string) (Decisio
 				return Decision{
 					Kind:     DecisionAllow,
 					Code:     CodeAllowed,
-					PolicyID: p.ID,
-				}, nil
+					PolicyID: policyID,
+				}
 			}
 		}
 	}
@@ -172,13 +218,31 @@ func (s *Service) Evaluate(ctx context.Context, provider, model string) (Decisio
 			Kind:     DecisionDeny,
 			Code:     CodeUnknownModel,
 			Reason:   fmt.Sprintf("модель %q не в allowlist провайдера %q", model, provider),
-			PolicyID: p.ID,
-		}, nil
+			PolicyID: policyID,
+		}
 	}
 	return Decision{
 		Kind:     DecisionDeny,
 		Code:     CodeUnknownProvider,
 		Reason:   fmt.Sprintf("провайдер %q не в governance-allowlist", provider),
-		PolicyID: p.ID,
-	}, nil
+		PolicyID: policyID,
+	}
+}
+
+// evaluateRoleRules — PR-G2. Находит RoleRule для caller'а и
+// применяет evaluateRules внутри. Если role отсутствует —
+// deny-by-default с CodeUnknownRole.
+func evaluateRoleRules(roleRules []RoleRule, role, provider, model, policyID string) Decision {
+	for _, rr := range roleRules {
+		if !strings.EqualFold(rr.Role, role) {
+			continue
+		}
+		return evaluateRules(rr.Rules, provider, model, policyID)
+	}
+	return Decision{
+		Kind:     DecisionDeny,
+		Code:     CodeUnknownRole,
+		Reason:   fmt.Sprintf("роль %q не в role_based-policy", role),
+		PolicyID: policyID,
+	}
 }

@@ -33,7 +33,7 @@ func (m *memRepo) Upsert(ctx context.Context, p *Policy, actor string) (*Policy,
 // Важно: nil-safe call через метод-receiver-pattern.
 func TestEvaluate_NilService_AllowsAll(t *testing.T) {
 	var s *Service // nil
-	dec, err := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, err := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -52,7 +52,7 @@ func TestEvaluate_NilService_AllowsAll(t *testing.T) {
 // политики с Mode=allowlist_strict.
 func TestEvaluate_NoPolicyInRepo_AllowsAll(t *testing.T) {
 	s := NewService(&memRepo{policy: nil})
-	dec, err := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, err := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -72,7 +72,7 @@ func TestEvaluate_ModeDisabled_AllowsAll(t *testing.T) {
 	s := NewService(&memRepo{policy: &Policy{
 		ID: "p-1", Mode: ModeDisabled, IsActive: true,
 	}})
-	dec, err := s.Evaluate(context.Background(), "anthropic", "claude-3-opus")
+	dec, err := s.Evaluate(context.Background(), "", "anthropic", "claude-3-opus")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -91,7 +91,7 @@ func TestEvaluate_Strict_AllowsKnownPair(t *testing.T) {
 			{Provider: "anthropic", Models: []string{"claude-3-opus"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow, decision=%+v", dec.Kind, dec)
 	}
@@ -113,7 +113,7 @@ func TestEvaluate_Strict_DeniesUnknownProvider(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "gemini", "gemini-pro")
+	dec, _ := s.Evaluate(context.Background(), "", "gemini", "gemini-pro")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny, decision=%+v", dec.Kind, dec)
 	}
@@ -136,7 +136,7 @@ func TestEvaluate_Strict_DeniesUnknownModelForKnownProvider(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o-mini"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny", dec.Kind)
 	}
@@ -155,7 +155,7 @@ func TestEvaluate_Strict_EmptyRules_DeniesAll(t *testing.T) {
 		ID: "p-1", Mode: ModeAllowlistStrict, IsActive: true,
 		Rules: nil,
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny", dec.Kind)
 	}
@@ -175,7 +175,7 @@ func TestEvaluate_Strict_EmptyModelsInRule_DeniesAllModels(t *testing.T) {
 			{Provider: "openai", Models: []string{}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny", dec.Kind)
 	}
@@ -195,7 +195,7 @@ func TestEvaluate_Strict_CaseInsensitiveMatch(t *testing.T) {
 			{Provider: "OpenAI", Models: []string{"GPT-4"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow (case-insensitive)", dec.Kind)
 	}
@@ -212,7 +212,7 @@ func TestEvaluate_Strict_CaseInsensitiveMatch(t *testing.T) {
 // Fail-open для availability недопустим.
 func TestEvaluate_RepoError_FailClosed(t *testing.T) {
 	s := NewService(&memRepo{err: errors.New("connection lost")})
-	dec, err := s.Evaluate(context.Background(), "openai", "gpt-4")
+	dec, err := s.Evaluate(context.Background(), "", "openai", "gpt-4")
 	if err == nil {
 		t.Error("err = nil, want non-nil (caller должен видеть root cause)")
 	}
@@ -242,7 +242,7 @@ func TestEvaluate_DuplicateProviderCaseVariants_MergesMatches(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o-mini"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4o-mini")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4o-mini")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow (модель присутствует во втором matching rule), decision=%+v", dec.Kind, dec)
 	}
@@ -259,7 +259,7 @@ func TestEvaluate_DuplicateProviderExact_MergesMatches(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4o")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow для модели из второго rule", dec.Kind)
 	}
@@ -276,7 +276,7 @@ func TestEvaluate_DuplicateProvider_ModelInNeitherRule(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "openai", "gpt-5-beta")
+	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-5-beta")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
 		t.Errorf("got %+v, want Deny/unknown_model", dec)
 	}
@@ -410,13 +410,185 @@ func TestMode_IsValid(t *testing.T) {
 	}{
 		{ModeDisabled, true},
 		{ModeAllowlistStrict, true},
+		{ModeAllowlistRoleBased, true}, // PR-G2
 		{"", false},
-		{"role_based", false}, // G2 mode, пока не реализован
+		{"device_scope", false}, // G3+ не реализован
 		{"ALLOWLIST_STRICT", false}, // case-sensitive для хранимого значения
 	}
 	for _, c := range cases {
 		if got := c.in.IsValid(); got != c.want {
 			t.Errorf("IsValid(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// --- PR-G2: Role-based Evaluate tests ---
+
+func TestEvaluate_RoleBased_AllowsKnownTriple(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []RoleRule{
+			{Role: "admin", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o"}},
+			}},
+			{Role: "analyst", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o-mini"}},
+			}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4o")
+	if dec.Kind != DecisionAllow || dec.Code != CodeAllowed {
+		t.Errorf("admin/openai/gpt-4o: %+v, want Allow/allowed", dec)
+	}
+	dec, _ = s.Evaluate(context.Background(), "analyst", "openai", "gpt-4o-mini")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("analyst/openai/gpt-4o-mini: %+v, want Allow", dec)
+	}
+}
+
+// TestEvaluate_RoleBased_DeniesPrivilegedModelForLesserRole —
+// ключевой role-based scenario: analyst пытается admin-only модель.
+func TestEvaluate_RoleBased_DeniesPrivilegedModelForLesserRole(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []RoleRule{
+			{Role: "admin", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o"}},
+			}},
+			{Role: "analyst", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o-mini"}},
+			}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "analyst", "openai", "gpt-4o")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
+		t.Errorf("analyst privileged model: %+v, want Deny/unknown_model", dec)
+	}
+}
+
+// TestEvaluate_RoleBased_UnknownRole_Denied — role не в RoleRules
+// → Deny/unknown_role (deny-by-default).
+func TestEvaluate_RoleBased_UnknownRole_Denied(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []RoleRule{
+			{Role: "admin", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o"}},
+			}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "intern", "openai", "gpt-4o")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownRole {
+		t.Errorf("unknown role: %+v, want Deny/unknown_role", dec)
+	}
+}
+
+// TestEvaluate_RoleBased_EmptyRoleRules_DeniesAll — misconfigured
+// policy (Mode=role_based, RoleRules=[]) → любой запрос deny.
+func TestEvaluate_RoleBased_EmptyRoleRules_DeniesAll(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+	}})
+	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4o")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownRole {
+		t.Errorf("empty role_rules: %+v, want Deny/unknown_role", dec)
+	}
+}
+
+// TestEvaluate_RoleBased_UnknownProvider — role matched, provider
+// outside role's scope → unknown_provider.
+func TestEvaluate_RoleBased_UnknownProvider(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []RoleRule{
+			{Role: "admin", Rules: []ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o"}},
+			}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "admin", "anthropic", "claude-3")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownProvider {
+		t.Errorf("unknown provider in role scope: %+v", dec)
+	}
+}
+
+// TestEvaluate_RoleBased_CaseInsensitive — Admin/admin,
+// OpenAI/openai, GPT-4/gpt-4 все match'аются.
+func TestEvaluate_RoleBased_CaseInsensitive(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []RoleRule{
+			{Role: "Admin", Rules: []ProviderRule{
+				{Provider: "OpenAI", Models: []string{"GPT-4"}},
+			}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("case-insensitive triple: %+v, want Allow", dec)
+	}
+}
+
+// TestEvaluate_StrictMode_IgnoresRole — backward compat с PR-G1.
+// Mode=allowlist_strict не использует role.
+func TestEvaluate_StrictMode_IgnoresRole(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-1", Mode: ModeAllowlistStrict, IsActive: true,
+		Rules: []ProviderRule{
+			{Provider: "openai", Models: []string{"gpt-4o"}},
+		},
+	}})
+	dec, _ := s.Evaluate(context.Background(), "intern", "openai", "gpt-4o")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("strict mode should ignore role: %+v", dec)
+	}
+}
+
+// TestUpsert_RoleBased_NormalizesRoleNames — roles lowercase,
+// duplicate-role merge с union моделей, alphabetical sort.
+func TestUpsert_RoleBased_NormalizesRoleNames(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistRoleBased,
+		RoleRules: []RoleRule{
+			{Role: "Admin", Rules: []ProviderRule{{Provider: "openai", Models: []string{"gpt-4"}}}},
+			{Role: "admin", Rules: []ProviderRule{{Provider: "openai", Models: []string{"gpt-4o"}}}},
+			{Role: "analyst", Rules: []ProviderRule{{Provider: "openai", Models: []string{"gpt-4o-mini"}}}},
+		},
+	}
+	saved, err := s.Upsert(context.Background(), p, "u-admin")
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// Admin + admin → merged в один с union models.
+	if len(saved.RoleRules) != 2 {
+		t.Fatalf("role_rules count = %d, want 2, got %+v", len(saved.RoleRules), saved.RoleRules)
+	}
+	if saved.RoleRules[0].Role != "admin" || saved.RoleRules[1].Role != "analyst" {
+		t.Errorf("role sort: %+v", saved.RoleRules)
+	}
+	if len(saved.RoleRules[0].Rules) != 1 {
+		t.Errorf("admin provider rules: %+v", saved.RoleRules[0].Rules)
+	}
+	if len(saved.RoleRules[0].Rules[0].Models) != 2 {
+		t.Errorf("admin union models: %+v", saved.RoleRules[0].Rules[0].Models)
+	}
+}
+
+// TestUpsert_RoleBased_SkipsEmptyRoleName.
+func TestUpsert_RoleBased_SkipsEmptyRoleName(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	p := &Policy{
+		Mode: ModeAllowlistRoleBased,
+		RoleRules: []RoleRule{
+			{Role: "", Rules: []ProviderRule{{Provider: "x", Models: []string{"y"}}}},
+			{Role: "admin", Rules: []ProviderRule{{Provider: "openai", Models: []string{"gpt-4o"}}}},
+		},
+	}
+	saved, _ := s.Upsert(context.Background(), p, "u-admin")
+	if len(saved.RoleRules) != 1 || saved.RoleRules[0].Role != "admin" {
+		t.Errorf("empty role не отсечён: %+v", saved.RoleRules)
 	}
 }

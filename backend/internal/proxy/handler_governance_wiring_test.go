@@ -268,3 +268,96 @@ func TestProxyChat_NilGovernanceSvc_Backward(t *testing.T) {
 	}()
 	h.ProxyChat(w, req)
 }
+
+// TestProxyChat_RoleBased_AdminAllowedAnalystDenied — PR-G2 wiring.
+// Проверяет, что claims.Role пробрасывается в Evaluate.
+// Одна (provider, model) пара разрешена admin'у, но не analyst'у.
+func TestProxyChat_RoleBased_AdminAllowedAnalystDenied(t *testing.T) {
+	policy := &governance.Policy{
+		ID: "p-1", Mode: governance.ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []governance.RoleRule{
+			{Role: "admin", Rules: []governance.ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o"}},
+			}},
+			{Role: "analyst", Rules: []governance.ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o-mini"}},
+			}},
+		},
+	}
+
+	// Analyst → privileged model → deny.
+	h, rec := setupGovernanceProxy(t, policy)
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/proxy/openai/v1/chat/completions",
+		bytes.NewBufferString(body))
+	req = mux.SetURLVars(req, map[string]string{"provider": "openai"})
+	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
+		UserID: "u-analyst", Role: auth.RoleAnalyst,
+	}))
+	w := httptest.NewRecorder()
+	h.ProxyChat(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("analyst/gpt-4o status = %d, want 403, body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["code"] != governance.CodeUnknownModel {
+		t.Errorf("code = %v, want unknown_model", resp["code"])
+	}
+	if len(rec.events) != 1 || rec.events[0].Action != "policy_deny" {
+		t.Errorf("events = %+v, want 1 policy_deny", rec.events)
+	}
+
+	// Admin той же модели → allow (deny event НЕ создаётся).
+	h2, rec2 := setupGovernanceProxy(t, policy)
+	req2 := httptest.NewRequest(http.MethodPost, "/proxy/openai/v1/chat/completions",
+		bytes.NewBufferString(body))
+	req2 = mux.SetURLVars(req2, map[string]string{"provider": "openai"})
+	req2 = req2.WithContext(auth.WithClaims(req2.Context(), &auth.Claims{
+		UserID: "u-admin", Role: auth.RoleAdmin,
+	}))
+	w2 := httptest.NewRecorder()
+	h2.ProxyChat(w2, req2)
+
+	for _, ev := range rec2.events {
+		if ev.Action == "policy_deny" {
+			t.Errorf("admin/gpt-4o получил deny event: %+v", ev)
+		}
+	}
+}
+
+// TestProxyChat_RoleBased_UnknownRoleDenied — role caller'а
+// отсутствует в RoleRules → 403 + code=unknown_role.
+func TestProxyChat_RoleBased_UnknownRoleDenied(t *testing.T) {
+	policy := &governance.Policy{
+		ID: "p-1", Mode: governance.ModeAllowlistRoleBased, IsActive: true,
+		RoleRules: []governance.RoleRule{
+			{Role: "admin", Rules: []governance.ProviderRule{
+				{Provider: "openai", Models: []string{"gpt-4o"}},
+			}},
+		},
+	}
+	h, rec := setupGovernanceProxy(t, policy)
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/proxy/openai/v1/chat/completions",
+		bytes.NewBufferString(body))
+	req = mux.SetURLVars(req, map[string]string{"provider": "openai"})
+	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
+		UserID: "u-user", Role: "user", // не в RoleRules
+	}))
+	w := httptest.NewRecorder()
+	h.ProxyChat(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unknown role status = %d, want 403", w.Code)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["code"] != governance.CodeUnknownRole {
+		t.Errorf("code = %v, want unknown_role", resp["code"])
+	}
+	if len(rec.events) != 1 || rec.events[0].Action != "policy_deny" {
+		t.Errorf("events = %+v", rec.events)
+	}
+}

@@ -28,8 +28,12 @@ import (
 // Evaluator — core interface, который proxy использует для
 // enforcement. Enterprise-реализация (*Service) satisfies его.
 // В Core-build передаётся nil — proxy обходит enforcement.
+//
+// role — auth.Claims.Role caller'а. Используется только при
+// Mode=role_based (PR-G2); в других modes ignored. Proxy всегда
+// передаёт, чтобы signature не менялся при switch mode оператором.
 type Evaluator interface {
-	Evaluate(ctx context.Context, provider, model string) (Decision, error)
+	Evaluate(ctx context.Context, role, provider, model string) (Decision, error)
 }
 
 // Mode — режим политики. Phase 1 поддерживает два значения.
@@ -48,8 +52,14 @@ const (
 	// ModeAllowlistStrict — разрешены ТОЛЬКО те (provider, model)
 	// пары, которые явно перечислены в Rules. Всё остальное — deny.
 	// Это и есть deny-by-default, сформулированное как
-	// «default = not in allowlist = denied».
+	// «default = not in allowlist = denied». Role игнорируется.
 	ModeAllowlistStrict Mode = "allowlist_strict"
+
+	// ModeAllowlistRoleBased — PR-G2. Allowlist применяется per role.
+	// Каждая роль получает свой список разрешённых (provider, model)
+	// пар из Policy.RoleRules. Если role caller'а отсутствует в
+	// RoleRules — deny с code=unknown_role (deny-by-default).
+	ModeAllowlistRoleBased Mode = "role_based"
 )
 
 // IsValid — проверка входного значения mode перед сохранением в БД.
@@ -57,7 +67,7 @@ const (
 // который этот backend не умеет обрабатывать).
 func (m Mode) IsValid() bool {
 	switch m {
-	case ModeDisabled, ModeAllowlistStrict:
+	case ModeDisabled, ModeAllowlistStrict, ModeAllowlistRoleBased:
 		return true
 	}
 	return false
@@ -76,13 +86,26 @@ type ProviderRule struct {
 	Models   []string `json:"models"`
 }
 
-// Policy — активная governance-политика. В phase 1 система singleton:
+// RoleRule — PR-G2: список ProviderRule для одной роли. Role string
+// хранится lowercase (normalizeRoleRules приводит).
+type RoleRule struct {
+	Role  string         `json:"role"`
+	Rules []ProviderRule `json:"rules"`
+}
+
+// Policy — активная governance-политика. Singleton-модель:
 // ровно одна IsActive=true строка в provider_governance_policies.
+//
+// Rules используется при Mode=allowlist_strict (PR-G1).
+// RoleRules используется при Mode=role_based (PR-G2). Поля могут
+// сосуществовать в одной row — применяется только то, что
+// соответствует активному Mode.
 type Policy struct {
 	ID        string
 	Name      string
 	Mode      Mode
 	Rules     []ProviderRule
+	RoleRules []RoleRule
 	UpdatedAt time.Time
 	UpdatedBy *string
 	IsActive  bool
@@ -111,9 +134,12 @@ type Decision struct {
 // Коды Decision.Code — стабильны, используются в admin_event_logs и
 // в unit-тестах. Менять с осторожностью.
 const (
-	CodeAllowed             = "allowed"
-	CodeGovernanceDisabled  = "governance_disabled"
-	CodeUnknownProvider     = "unknown_provider"
-	CodeUnknownModel        = "unknown_model"
-	CodePolicyReadFailure   = "policy_read_failure"
+	CodeAllowed            = "allowed"
+	CodeGovernanceDisabled = "governance_disabled"
+	CodeUnknownProvider    = "unknown_provider"
+	CodeUnknownModel       = "unknown_model"
+	CodePolicyReadFailure  = "policy_read_failure"
+	// CodeUnknownRole — PR-G2: caller.Role отсутствует в Policy.RoleRules
+	// при Mode=role_based. Deny-by-default для unspecified roles.
+	CodeUnknownRole = "unknown_role"
 )

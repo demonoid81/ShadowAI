@@ -619,6 +619,11 @@ external tooling.
 
 ## 9. Change log
 
+- **1.10 (2026-04-22)** — PR-G2: role-based governance.
+  `Mode=role_based` + `Policy.RoleRules` в Policy model. Proxy
+  передаёт `claims.Role` в `Evaluate`; unknown role → 403 +
+  `code=unknown_role`. Deny-by-default для не-перечисленных ролей.
+  Migration 014 (добавляет `role_rules_json` column).
 - **1.9 (2026-04-22)** — PR-L1.3: scope fix для PR-L1.2 startup
   validation. `LEGAL_HOLD_TOKEN_SECRET` теперь enforce'ится ТОЛЬКО
   в enterprise build (через `//go:build enterprise` split в

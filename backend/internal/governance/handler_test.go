@@ -126,12 +126,13 @@ func TestUpdatePolicy_Unauthenticated(t *testing.T) {
 }
 
 // TestUpdatePolicy_InvalidMode_Rejected — unknown mode → 400 +
-// admin-event с attempted_mode для forensics.
+// admin-event с attempted_mode для forensics. После PR-G2
+// role_based стал валидным → используем device_scope как unknown.
 func TestUpdatePolicy_InvalidMode_Rejected(t *testing.T) {
 	h, repo, rec := newTestHandler(t, &Policy{
 		ID: "p-1", Mode: ModeDisabled, IsActive: true,
 	})
-	body := `{"mode":"role_based","rules":[]}` // G2 mode, не поддержан
+	body := `{"mode":"device_scope","rules":[]}` // не поддержан (G3+)
 	req := httptest.NewRequest(http.MethodPut, "/api/governance/policy",
 		bytes.NewBufferString(body))
 	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
@@ -143,15 +144,15 @@ func TestUpdatePolicy_InvalidMode_Rejected(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
-	if repo.policy.Mode == "role_based" {
+	if repo.policy.Mode == "device_scope" {
 		t.Error("invalid mode был сохранён")
 	}
 	if len(rec.events) == 0 {
 		t.Fatal("admin event не записан для rejected update")
 	}
 	meta := rec.events[0].Metadata.(map[string]any)
-	if meta["attempted_mode"] != "role_based" {
-		t.Errorf("attempted_mode = %v, want role_based", meta["attempted_mode"])
+	if meta["attempted_mode"] != "device_scope" {
+		t.Errorf("attempted_mode = %v, want device_scope", meta["attempted_mode"])
 	}
 }
 

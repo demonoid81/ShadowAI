@@ -57,6 +57,8 @@ apply `backend/migrations-enterprise/` (009–012):
   — governance policy singleton table.
 - `backend/migrations-enterprise/013_create_legal_holds.sql` —
   legal holds table with partial-unique index for active-per-user.
+- `backend/migrations-enterprise/014_add_role_rules_to_governance_policies.sql`
+  — role-based governance column (Mode=role_based, PR-G2).
 
 ### Documentation
 

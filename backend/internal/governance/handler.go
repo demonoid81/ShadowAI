@@ -39,6 +39,7 @@ type policyResponse struct {
 	Name      string         `json:"name"`
 	Mode      Mode           `json:"mode"`
 	Rules     []ProviderRule `json:"rules"`
+	RoleRules []RoleRule     `json:"role_rules"`
 	UpdatedAt string         `json:"updated_at"`
 	UpdatedBy *string        `json:"updated_by,omitempty"`
 	IsActive  bool           `json:"is_active"`
@@ -53,9 +54,10 @@ type errorResponse struct {
 }
 
 type upsertRequest struct {
-	Name  string         `json:"name"`
-	Mode  Mode           `json:"mode"`
-	Rules []ProviderRule `json:"rules"`
+	Name      string         `json:"name"`
+	Mode      Mode           `json:"mode"`
+	Rules     []ProviderRule `json:"rules"`
+	RoleRules []RoleRule     `json:"role_rules"`
 }
 
 // GetPolicy — current active. Если ни одной политики нет (сырой
@@ -113,9 +115,10 @@ func (h *Handler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := &Policy{
-		Name:  req.Name,
-		Mode:  req.Mode,
-		Rules: req.Rules,
+		Name:      req.Name,
+		Mode:      req.Mode,
+		Rules:     req.Rules,
+		RoleRules: req.RoleRules,
 	}
 	saved, err := h.svc.Upsert(r.Context(), p, claims.UserID)
 	if err != nil {
@@ -127,8 +130,9 @@ func (h *Handler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, policyToResp(saved))
 	h.recordAdmin(r, "update", saved.ID, http.StatusOK, true, map[string]any{
-		"mode":       saved.Mode,
-		"rule_count": len(saved.Rules),
+		"mode":            saved.Mode,
+		"rule_count":      len(saved.Rules),
+		"role_rule_count": len(saved.RoleRules),
 	})
 }
 
@@ -163,11 +167,16 @@ func policyToResp(p *Policy) policyResponse {
 	if rules == nil {
 		rules = []ProviderRule{}
 	}
+	roleRules := p.RoleRules
+	if roleRules == nil {
+		roleRules = []RoleRule{}
+	}
 	return policyResponse{
 		ID:        p.ID,
 		Name:      p.Name,
 		Mode:      p.Mode,
 		Rules:     rules,
+		RoleRules: roleRules,
 		UpdatedAt: updatedAt,
 		UpdatedBy: p.UpdatedBy,
 		IsActive:  p.IsActive,
