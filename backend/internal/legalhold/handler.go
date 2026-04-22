@@ -5,6 +5,8 @@
 package legalhold
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -14,6 +16,17 @@ import (
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/auth"
 )
+
+// caseRefHash — PR-L1.1: не пишем raw case_ref в admin_event_logs
+// (→ SIEM mirror). Вместо этого truncated SHA-256 для SIEM-side
+// correlation ("все события для case с hash X"). 16 hex = 64 bit,
+// коллизии крайне редкие. Raw case_ref остаётся в legal_holds
+// table для legal audit (доступен только admin через GET
+// /api/legal-holds).
+func caseRefHash(caseRef string) string {
+	sum := sha256.Sum256([]byte(caseRef))
+	return hex.EncodeToString(sum[:8])
+}
 
 // Handler обслуживает admin-only CRUD для legal holds.
 //
@@ -77,28 +90,43 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	hold, err := h.svc.CreateHold(r.Context(), req.TargetUserID, req.CaseRef, req.Reason, claims.UserID)
 	if err != nil {
-		if IsAlreadyActive(err) {
+		// PR-L1.1: split error paths. Validation → 400 (generic);
+		// not configured → 503; already active → 409; всё остальное
+		// (repo/runtime) → 500 generic. Raw err.Error() НЕ уходит
+		// клиенту; admin audit получает machine-readable error_code.
+		switch {
+		case IsAlreadyActive(err):
 			writeJSON(w, http.StatusConflict, errorResponse{Error: "user already has active hold"})
 			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusConflict, false, map[string]any{
-				"error":    "already_active",
-				"case_ref": req.CaseRef,
+				"error_code":     "already_active",
+				"case_ref_hash":  caseRefHash(req.CaseRef),
 			})
-			return
+		case IsValidation(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
+			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+				"error_code": "validation_failed",
+			})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusServiceUnavailable, false, map[string]any{
+				"error_code": "not_configured",
+			})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold creation failed"})
+			h.recordAdmin(r, "apply_hold", req.TargetUserID, http.StatusInternalServerError, false, map[string]any{
+				"error_code": "internal_error",
+			})
 		}
-		// Валидационные ошибки (пустые поля) или repo failure.
-		status := http.StatusBadRequest
-		if err.Error() == "legalhold: service not configured" {
-			status = http.StatusServiceUnavailable
-		}
-		writeJSON(w, status, errorResponse{Error: err.Error()})
-		h.recordAdmin(r, "apply_hold", req.TargetUserID, status, false, map[string]any{"error": err.Error()})
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, toResponse(hold))
+	// PR-L1.1: case_ref_hash вместо raw case_ref в metadata. Raw
+	// остаётся в legal_holds table (доступен через GET), но не
+	// дублируется в admin_event_logs / SIEM.
 	h.recordAdmin(r, "apply_hold", hold.ID, http.StatusCreated, true, map[string]any{
 		"target_user_id": hold.TargetUserID,
-		"case_ref":       hold.CaseRef,
+		"case_ref_hash":  caseRefHash(hold.CaseRef),
 	})
 }
 
@@ -122,12 +150,14 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 
 	hold, err := h.svc.ReleaseHold(r.Context(), id, claims.UserID)
 	if err != nil {
-		if IsNotFound(err) {
+		// PR-L1.1: machine-readable error_code в metadata.
+		switch {
+		case IsNotFound(err):
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "hold not found"})
-			h.recordAdmin(r, "release_hold", id, http.StatusNotFound, false, map[string]any{"error": "not_found"})
-			return
-		}
-		if IsNotActive(err) {
+			h.recordAdmin(r, "release_hold", id, http.StatusNotFound, false, map[string]any{
+				"error_code": "not_found",
+			})
+		case IsNotActive(err):
 			// Идемпотентность: already-released — 200 с маркером.
 			writeJSON(w, http.StatusOK, map[string]any{
 				"id":     id,
@@ -136,19 +166,30 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 			h.recordAdmin(r, "release_hold", id, http.StatusOK, true, map[string]any{
 				"status": "already_released",
 			})
-			return
+		case IsValidation(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
+			h.recordAdmin(r, "release_hold", id, http.StatusBadRequest, false, map[string]any{
+				"error_code": "validation_failed",
+			})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "release_hold", id, http.StatusServiceUnavailable, false, map[string]any{
+				"error_code": "not_configured",
+			})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold release failed"})
+			h.recordAdmin(r, "release_hold", id, http.StatusInternalServerError, false, map[string]any{
+				"error_code": "internal_error",
+			})
 		}
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
-		h.recordAdmin(r, "release_hold", id, http.StatusInternalServerError, false, map[string]any{
-			"error": "release_failed",
-		})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, toResponse(hold))
+	// PR-L1.1: case_ref_hash вместо raw case_ref.
 	h.recordAdmin(r, "release_hold", hold.ID, http.StatusOK, true, map[string]any{
 		"target_user_id": hold.TargetUserID,
-		"case_ref":       hold.CaseRef,
+		"case_ref_hash":  caseRefHash(hold.CaseRef),
 	})
 }
 
@@ -167,8 +208,17 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	holds, err := h.svc.List(r.Context())
 	if err != nil {
+		if IsNotConfigured(err) {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "read", "", http.StatusServiceUnavailable, false, map[string]any{
+				"error_code": "not_configured",
+			})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
-		h.recordAdmin(r, "read", "", http.StatusInternalServerError, false, map[string]any{"error": "list_failed"})
+		h.recordAdmin(r, "read", "", http.StatusInternalServerError, false, map[string]any{
+			"error_code": "internal_error",
+		})
 		return
 	}
 	out := make([]holdResponse, 0, len(holds))

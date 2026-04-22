@@ -606,6 +606,12 @@ external tooling.
 
 ## 9. Change log
 
+- **1.7 (2026-04-22)** — PR-L1.1: privacy+error-split hardening для
+  legal hold. `case_ref` больше не дублируется в `admin_event_logs`
+  / SIEM — только `case_ref_hash` (SHA-256 truncated к 16 hex).
+  Handler error paths разведены на validation (400)/not-configured
+  (503)/internal (500) generic responses; machine-readable
+  `error_code` в admin-event вместо raw error string.
 - **1.6 (2026-04-22)** — PR-L1: §5 переведён в `[implemented]`.
   Legal hold получил полноценную application-layer automation
   (`legal_holds` table, admin endpoints, pre-tx enforcement в

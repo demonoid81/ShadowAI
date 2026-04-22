@@ -211,6 +211,173 @@ func TestList_HappyPath(t *testing.T) {
 	}
 }
 
+// TestCreate_MetadataHasHashNotRawCaseRef — PR-L1.1 privacy
+// regression guard. admin_event metadata должна содержать
+// case_ref_hash, а case_ref (raw) должен отсутствовать.
+func TestCreate_MetadataHasHashNotRawCaseRef(t *testing.T) {
+	h, _, rec := setupHandler(t)
+	rawCaseRef := "SEC-INTERNAL-2026-SECRET-42"
+	body := `{"target_user_id":"u-1","case_ref":"` + rawCaseRef + `","reason":"r"}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+	h.Create(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+
+	// Правильный ключ присутствует.
+	hash, ok := meta["case_ref_hash"].(string)
+	if !ok || hash == "" {
+		t.Errorf("case_ref_hash missing/empty in metadata: %+v", meta)
+	}
+	// Длина hash = 16 hex chars (truncated SHA-256, 64 bit).
+	if len(hash) != 16 {
+		t.Errorf("case_ref_hash len = %d, want 16", len(hash))
+	}
+
+	// Raw case_ref НЕ должен присутствовать ни под одним ключом.
+	for k, v := range meta {
+		if s, ok := v.(string); ok && s == rawCaseRef {
+			t.Errorf("raw case_ref leak through metadata[%q] = %q", k, s)
+		}
+	}
+	if _, has := meta["case_ref"]; has {
+		t.Error("metadata содержит raw 'case_ref' ключ")
+	}
+}
+
+// TestCreate_ConflictEventHasHashNotRawCaseRef — privacy guard
+// для 409 path: conflict event тоже должен содержать hash, не raw.
+func TestCreate_ConflictEventHasHashNotRawCaseRef(t *testing.T) {
+	h, _, rec := setupHandler(t)
+	rawCaseRef := "DOJ-LEAKED-REFERENCE"
+	body := `{"target_user_id":"u-1","case_ref":"` + rawCaseRef + `","reason":"r"}`
+	// First create succeeds.
+	h.Create(httptest.NewRecorder(), adminCtx(
+		httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin"))
+	// Second → 409 conflict.
+	w := httptest.NewRecorder()
+	h.Create(w, adminCtx(
+		httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin"))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("second create status = %d, want 409", w.Code)
+	}
+	if len(rec.events) != 2 {
+		t.Fatalf("events = %d", len(rec.events))
+	}
+	conflictMeta := rec.events[1].Metadata.(map[string]any)
+	if conflictMeta["error_code"] != "already_active" {
+		t.Errorf("error_code = %v, want already_active", conflictMeta["error_code"])
+	}
+	if _, has := conflictMeta["case_ref"]; has {
+		t.Error("conflict event содержит raw case_ref")
+	}
+	for k, v := range conflictMeta {
+		if s, ok := v.(string); ok && s == rawCaseRef {
+			t.Errorf("raw case_ref leak в conflict event metadata[%q]", k)
+		}
+	}
+}
+
+// TestCreate_ValidationError_GenericMessage — PR-L1.1 error split.
+// Client не должен получать raw err.Error() с internal path.
+func TestCreate_ValidationError_GenericMessage(t *testing.T) {
+	h, _, rec := setupHandler(t)
+	body := `{"target_user_id":"u-1","case_ref":"","reason":""}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+	h.Create(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+
+	// Response body не должен содержать "legalhold:" prefix —
+	// internal err string не должен leak'аться клиенту.
+	bodyStr := w.Body.String()
+	if bytes.Contains([]byte(bodyStr), []byte("legalhold:")) {
+		t.Errorf("response leaks internal error string: %s", bodyStr)
+	}
+
+	// Admin event metadata содержит error_code, не raw message.
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "validation_failed" {
+		t.Errorf("error_code = %v, want validation_failed", meta["error_code"])
+	}
+	if _, has := meta["error"]; has {
+		// Старый shape {"error": "legalhold: ..."} — не должен
+		// присутствовать после PR-L1.1.
+		t.Error("metadata содержит legacy 'error' key вместо error_code")
+	}
+}
+
+// TestCreate_NotConfigured_Returns503 — service без repo
+// (nil Service.repo) → 503 + error_code=not_configured.
+func TestCreate_NotConfigured_Returns503(t *testing.T) {
+	rec := &captureRecorder{}
+	h := NewHandler(&Service{repo: nil}, rec) // not configured
+	body := `{"target_user_id":"u-1","case_ref":"c","reason":"r"}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+	h.Create(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "not_configured" {
+		t.Errorf("error_code = %v, want not_configured", meta["error_code"])
+	}
+}
+
+// TestRelease_HappyPath_MetadataHasHashOnly — privacy guard для
+// release event.
+func TestRelease_HappyPath_MetadataHasHashOnly(t *testing.T) {
+	h, _, rec := setupHandler(t)
+	ctx := context.Background()
+	rawCaseRef := "CFPB-PRIVATE-MATTER"
+	seeded, _ := h.svc.CreateHold(ctx, "u-1", rawCaseRef, "r", "u-admin")
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	h.Release(httptest.NewRecorder(), req)
+
+	// seed через svc bypass handler, в rec только release event.
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if _, has := meta["case_ref"]; has {
+		t.Error("release event содержит raw case_ref")
+	}
+	hash, _ := meta["case_ref_hash"].(string)
+	if hash == "" || len(hash) != 16 {
+		t.Errorf("case_ref_hash malformed: %q", hash)
+	}
+}
+
+// TestCaseRefHash_Deterministic — одинаковый case_ref всегда даёт
+// одинаковый hash (SIEM может correlate events).
+func TestCaseRefHash_Deterministic(t *testing.T) {
+	a := caseRefHash("SEC-2026-042")
+	b := caseRefHash("SEC-2026-042")
+	if a != b {
+		t.Errorf("hash not deterministic: %q vs %q", a, b)
+	}
+	if a == caseRefHash("SEC-2026-043") {
+		t.Error("different case_refs produce same hash")
+	}
+}
+
 func actionsFromEvents(events []adminaudit.Event) []string {
 	out := make([]string, 0, len(events))
 	for _, e := range events {

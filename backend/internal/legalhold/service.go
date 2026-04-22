@@ -11,6 +11,26 @@ import (
 	"strings"
 )
 
+// Sentinel errors для различения validation / config / runtime
+// failures в handler'е. Caller мапит их в HTTP status codes:
+//
+//   ErrValidation    → 400 (bad request, generic message)
+//   ErrNotConfigured → 503 (service unavailable)
+//   everything else  → 500 (internal, generic message)
+//
+// Raw err.Error() строки НЕ должны уходить клиенту — admin event
+// metadata пишет machine-readable code вместо этого (PR-L1.1).
+var (
+	ErrValidation    = errors.New("legalhold: validation failed")
+	ErrNotConfigured = errors.New("legalhold: service not configured")
+)
+
+// IsValidation — handler helper для split validation vs runtime.
+func IsValidation(err error) bool { return errors.Is(err, ErrValidation) }
+
+// IsNotConfigured — handler helper.
+func IsNotConfigured(err error) bool { return errors.Is(err, ErrNotConfigured) }
+
 // Repository — persistence interface для Service. Реализация —
 // PGRepository. Тесты mock'ают через in-memory impl.
 type Repository interface {
@@ -42,16 +62,16 @@ func NewService(repo Repository) *Service {
 // из claims.
 func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason, createdBy string) (*Hold, error) {
 	if s == nil || s.repo == nil {
-		return nil, fmt.Errorf("legalhold: service not configured")
+		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(targetUserID) == "" {
-		return nil, fmt.Errorf("legalhold: target_user_id required")
+		return nil, fmt.Errorf("target_user_id required: %w", ErrValidation)
 	}
 	if strings.TrimSpace(caseRef) == "" {
-		return nil, fmt.Errorf("legalhold: case_ref required")
+		return nil, fmt.Errorf("case_ref required: %w", ErrValidation)
 	}
 	if strings.TrimSpace(reason) == "" {
-		return nil, fmt.Errorf("legalhold: reason required")
+		return nil, fmt.Errorf("reason required: %w", ErrValidation)
 	}
 	h := &Hold{
 		TargetUserID: targetUserID,
@@ -70,10 +90,10 @@ func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason,
 // "already_released" 200-ответ без ошибки.
 func (s *Service) ReleaseHold(ctx context.Context, id, releasedBy string) (*Hold, error) {
 	if s == nil || s.repo == nil {
-		return nil, fmt.Errorf("legalhold: service not configured")
+		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(id) == "" {
-		return nil, fmt.Errorf("legalhold: id required")
+		return nil, fmt.Errorf("id required: %w", ErrValidation)
 	}
 	return s.repo.Release(ctx, id, releasedBy)
 }
@@ -87,7 +107,7 @@ func (s *Service) HasActiveHold(ctx context.Context, userID string) (bool, error
 		// Fail-closed: если Service не сконфигурирован, считаем
 		// что hold есть — erasure отвергается. Compliance выше
 		// availability.
-		return true, fmt.Errorf("legalhold: service not configured")
+		return true, ErrNotConfigured
 	}
 	return s.repo.HasActiveHold(ctx, userID)
 }
@@ -95,7 +115,7 @@ func (s *Service) HasActiveHold(ctx context.Context, userID string) (bool, error
 // List возвращает все hold-ы, active first.
 func (s *Service) List(ctx context.Context) ([]Hold, error) {
 	if s == nil || s.repo == nil {
-		return nil, fmt.Errorf("legalhold: service not configured")
+		return nil, ErrNotConfigured
 	}
 	return s.repo.List(ctx)
 }
