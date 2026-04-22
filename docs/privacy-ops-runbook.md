@@ -663,6 +663,12 @@ external tooling.
 
 ## 9. Change log
 
+- **1.16 (2026-04-22)** — PR-L4: PostgreSQL integration harness
+  (testcontainers-go) для PR-L3 commit-order proof. Новый пакет
+  `backend/integration/` под `//go:build enterprise && integration`.
+  3 concurrency scenarios (hold-before-purge / purge-before-hold /
+  mixed-users) детерминистично воспроизводимы и passing. Обычный
+  `go test ./...` не требует Docker.
 - **1.15 (2026-04-22)** — PR-L3: coordination-based race closure.
   apply_hold и retention-aware purge синхронизируются через shared
   `pg_advisory_xact_lock(4201, 1)`. Atomic purge+record-run в

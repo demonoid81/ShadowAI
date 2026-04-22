@@ -33,6 +33,10 @@ The following paths are covered by [LICENSE.enterprise](LICENSE.enterprise):
   pre-transaction, admin-only CRUD).
 - `backend/internal/legalholdcoord/` — PR-L3 shared advisory
   lock helper между apply_hold и retention-aware audit purge.
+- `backend/integration/` — PR-L4 PostgreSQL concurrency harness
+  (testcontainers-go). Compile/run только под
+  `//go:build enterprise && integration`; обычный `go test` не
+  требует Docker.
 
 ### Individual Go files
 
