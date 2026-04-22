@@ -87,6 +87,7 @@ func TestProxyChatStreaming_UsesParseStreamUsageNotParseResponse(t *testing.T) {
 	h := NewHandler(
 		registry, policySvc, auditSvc, budgetSvc, dlp.NewService("audit"),
 		"", nil, nil, nil, 0, nil, audit.PayloadModeFull, // без firewall pipeline — фокус на accounting
+		nil, nil,
 	)
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
@@ -155,6 +156,7 @@ func TestUnifiedChatStreaming_UsesParseStreamUsage(t *testing.T) {
 	h := NewHandler(
 		registry, policySvc, auditSvc, budgetSvc, dlp.NewService("audit"),
 		"", router, nil, nil, 0, nil, audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
@@ -234,6 +236,7 @@ func TestProxyChatStreaming_NonSupportingProviderSoftFail(t *testing.T) {
 	h := NewHandler(
 		registry, policySvc, auditSvc, budgetSvc, dlp.NewService("audit"),
 		"", nil, nil, nil, 0, nil, audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`

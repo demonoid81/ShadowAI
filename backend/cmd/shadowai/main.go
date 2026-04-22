@@ -21,6 +21,7 @@ import (
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/embedding"
 	"github.com/shadowai/backend/internal/firewall"
+	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/internaldb"
 	"github.com/shadowai/backend/internal/metrics"
 	mw "github.com/shadowai/backend/internal/middleware"
@@ -287,7 +288,16 @@ func main() {
 	budgetHandler := budget.NewHandler(budgetSvc)
 	dashHandler := dashboard.NewHandler(db, adminAuditSvc)
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, adminAuditSvc)
-	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode)
+
+	// PR-G1: Provider/Model Governance wiring.
+	// Одно-таблица storage (migration 012_create_provider_governance_policies.sql)
+	// с singleton-строкой. nil-safe: при отсутствии таблицы GetActive
+	// вернёт (nil, nil) → governance_disabled.
+	governanceRepo := governance.NewPGRepository(db)
+	governanceSvc := governance.NewService(governanceRepo)
+	governanceHandler := governance.NewHandler(governanceSvc, adminAuditSvc)
+
+	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode, governanceSvc, adminAuditSvc)
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
 	defer connectivityCancel()
@@ -465,6 +475,10 @@ func main() {
 	admin.HandleFunc("/policies", policyHandler.Create).Methods("POST")
 	admin.HandleFunc("/policies/{id}", policyHandler.Update).Methods("PUT")
 	admin.HandleFunc("/policies/{id}", policyHandler.Delete).Methods("DELETE")
+
+	// PR-G1: Provider/Model Governance (admin-only).
+	admin.HandleFunc("/governance/policy", governanceHandler.GetPolicy).Methods("GET")
+	admin.HandleFunc("/governance/policy", governanceHandler.UpdatePolicy).Methods("PUT")
 
 	// Budgets
 	budgets := api.PathPrefix("/budgets").Subrouter()

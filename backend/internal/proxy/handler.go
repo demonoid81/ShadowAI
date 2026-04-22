@@ -18,12 +18,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/budget"
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/firewall"
+	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/metrics"
 	"github.com/shadowai/backend/internal/pii"
 	"github.com/shadowai/backend/internal/policy"
@@ -97,9 +99,20 @@ type Handler struct {
 	firewallPipeline *firewall.Pipeline
 	// PR-A: privacy. Applies to every audit_log write через h.auditLog().
 	auditPayloadMode audit.PayloadMode
+	// PR-G1: enforcement point для Provider/Model Governance. nil →
+	// governance не применяется (dev/tests). Evaluate вызывается после
+	// model resolve, до firewall — deny короткозамыкает запрос.
+	governanceSvc *governance.Service
+	// PR-G1: admin-event writer для governance_deny / governance
+	// CRUD. nil → админ-события не пишутся (dev/tests).
+	adminAudit adminaudit.Recorder
 }
 
 // NewHandler creates a new multi-provider proxy handler.
+//
+// governanceSvc / adminAudit — опциональные (nil = фича off).
+// Передача nil в тестах и dev'е безопасна и сохраняет исторический
+// proxy-flow без governance enforcement.
 func NewHandler(
 	registry *Registry,
 	policySvc *policy.Service,
@@ -113,6 +126,8 @@ func NewHandler(
 	maxCompletionTokens int,
 	firewallPipeline *firewall.Pipeline,
 	auditPayloadMode audit.PayloadMode,
+	governanceSvc *governance.Service,
+	adminAudit adminaudit.Recorder,
 ) *Handler {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -138,6 +153,8 @@ func NewHandler(
 		maxCompletionTokens: maxCompletionTokens,
 		firewallPipeline: firewallPipeline,
 		auditPayloadMode: auditPayloadMode,
+		governanceSvc:    governanceSvc,
+		adminAudit:       adminAudit,
 	}
 }
 
@@ -200,6 +217,26 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			"error":            "unsupported model",
 			"model":            model,
 			"supported_models": provider.SupportedModels(),
+		})
+		return
+	}
+
+	// 3.6. PR-G1: Provider/Model Governance enforcement.
+	// Evaluate стоит после isModelSupported (чтобы провайдер вообще
+	// понимал модель) и ДО firewall/budget/DLP — governance-deny
+	// короткозамыкает запрос, не тратя токены на firewall-scan.
+	// nil governanceSvc (dev/tests) возвращает Allow.
+	if dec, _ := h.governanceSvc.Evaluate(r.Context(), providerName, model); dec.Kind == governance.DecisionDeny {
+		h.recordGovernanceDeny(r, claims, providerName, model, dec)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":     "model denied by governance policy",
+			"code":      dec.Code,
+			"reason":    dec.Reason,
+			"provider":  providerName,
+			"model":     model,
+			"policy_id": dec.PolicyID,
 		})
 		return
 	}
@@ -1313,6 +1350,48 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 7.5. PR-G1: governance filter. Удаляем candidates, которые
+	// запрещены active policy. Если после фильтрации пусто —
+	// возвращаем 403 governance_deny (не 503), чтобы оператор чётко
+	// видел причину отказа. Первый denied candidate пишется в
+	// admin_event_logs как representative event.
+	if h.governanceSvc != nil {
+		allowed := candidates[:0]
+		var firstDeny governance.Decision
+		var firstDenyProvider, firstDenyModel string
+		for _, cand := range candidates {
+			cm := model
+			if cm == "" {
+				cm = cand.Provider.DefaultModel()
+			}
+			dec, _ := h.governanceSvc.Evaluate(r.Context(), cand.Name, cm)
+			if dec.Kind == governance.DecisionAllow {
+				allowed = append(allowed, cand)
+				continue
+			}
+			if firstDeny.Code == "" {
+				firstDeny = dec
+				firstDenyProvider = cand.Name
+				firstDenyModel = cm
+			}
+		}
+		candidates = allowed
+		if len(candidates) == 0 {
+			h.recordGovernanceDeny(r, claims, firstDenyProvider, firstDenyModel, firstDeny)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":     "model denied by governance policy",
+				"code":      firstDeny.Code,
+				"reason":    firstDeny.Reason,
+				"provider":  firstDenyProvider,
+				"model":     firstDenyModel,
+				"policy_id": firstDeny.PolicyID,
+			})
+			return
+		}
+	}
+
 	// 8. Fallback loop
 	cacheChecked := false
 	cacheMiss := false
@@ -2017,5 +2096,49 @@ func (h *Handler) FirewallStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"enabled":    true,
 		"inspectors": h.firewallPipeline.Status(),
+	})
+}
+
+// recordGovernanceDeny — PR-G1: пишет admin_event_logs при отказе
+// на уровне governance-политики. Nil-safe: при отсутствии adminAudit
+// (dev/test) превращается в no-op.
+//
+// Шаблон события:
+//
+//	action   = "policy_deny"
+//	resource = "provider_model"
+//	target   = "<provider>/<model>" — стабильный composite-id для
+//	           forensics-запросов "какие модели чаще всего блокируются".
+//	metadata = { provider, model, code, policy_id, reason }
+//
+// success=false (это именно denied event). actor=claims.UserID
+// (пользователь, чей запрос был отклонён), или nil если middleware
+// не прикрепил claims (edge case — отсутствие actor уже само по себе
+// forensic-сигнал).
+func (h *Handler) recordGovernanceDeny(r *http.Request, claims *auth.Claims, provider, model string, dec governance.Decision) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if claims != nil {
+		id := claims.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "policy_deny",
+		Resource:    "provider_model",
+		TargetID:    provider + "/" + model,
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  http.StatusForbidden,
+		Success:     false,
+		Metadata: map[string]any{
+			"provider":  provider,
+			"model":     model,
+			"code":      dec.Code,
+			"policy_id": dec.PolicyID,
+			"reason":    dec.Reason,
+		},
 	})
 }

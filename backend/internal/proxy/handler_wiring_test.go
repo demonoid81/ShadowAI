@@ -168,6 +168,7 @@ func TestProxyChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T) {
 		0,
 		pipeline,
 		audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	// 9. Запрос с email в content — DLP обязан санитизировать
@@ -267,6 +268,7 @@ func TestUnifiedChat_FirewallFlagPlusDLPSanitize_WiringIntegration(t *testing.T)
 		0,
 		pipeline,
 		audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	// 10. Request к /proxy/chat
@@ -348,6 +350,7 @@ func TestProxyChat_Streaming_FirewallFlagPlusResponseDLPSanitize(t *testing.T) {
 		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
 		"", nil, nil, nil, 0, pipeline,
 		audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	// stream: true активирует streaming branch
@@ -426,6 +429,7 @@ func TestUnifiedChat_Streaming_FirewallFlagPlusResponseDLPSanitize(t *testing.T)
 		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
 		"", router, nil, nil, 0, pipeline,
 		audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hello, need help"}]}`
