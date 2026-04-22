@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync/atomic"
+	"time"
 
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/metrics"
@@ -17,6 +18,14 @@ type Repo interface {
 	// shadow_decisions_json. "yes" → IS NOT NULL, "no" → IS NULL,
 	// пусто/"any" → без фильтра (backward compat для call-site'ов).
 	List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error)
+
+	// PR-A: retention/purge.
+	PurgeOlderThan(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)
+	// PR-D.1: target parameter разделяет purge-runs по таблицам
+	// (audit_logs vs admin_event_logs). target="" → audit_logs (BC).
+	RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error
+	LastPurgeRun(ctx context.Context, target string) (*domain.PurgeRun, error)
+	TotalRowsPurged(ctx context.Context, target string) (int, error)
 }
 
 type Service struct {

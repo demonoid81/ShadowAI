@@ -14,20 +14,54 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
+	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/pii"
 )
 
 type Handler struct {
-	manager  *Manager
-	repo     *Repository
-	auditSvc *audit.Service
+	manager          *Manager
+	repo             *Repository
+	auditSvc         *audit.Service
+	auditPayloadMode audit.PayloadMode
+	dlpSvc           *dlp.Service
+	// PR-D: admin access audit. CRUD sources → admin_event_logs
+	// (больше не дублируется в audit_logs через writeAudit).
+	adminAudit adminaudit.Recorder
 }
 
-func NewHandler(manager *Manager, repo *Repository, auditSvc *audit.Service) *Handler {
-	return &Handler{manager: manager, repo: repo, auditSvc: auditSvc}
+// NewHandler принимает audit privacy-config (PR-A) и adminaudit.Recorder
+// (PR-D). adminAudit=nil → CRUD admin operations не логируются
+// (dev/tests).
+func NewHandler(manager *Manager, repo *Repository, auditSvc *audit.Service, auditPayloadMode audit.PayloadMode, dlpSvc *dlp.Service, adminAudit adminaudit.Recorder) *Handler {
+	return &Handler{
+		manager:          manager,
+		repo:             repo,
+		auditSvc:         auditSvc,
+		auditPayloadMode: auditPayloadMode,
+		dlpSvc:           dlpSvc,
+		adminAudit:       adminAudit,
+	}
+}
+
+// writeAudit применяет AUDIT_PAYLOAD_MODE к raw bodies перед Insert.
+// Единая точка privacy-enforcement для internaldb (аналог handler.auditLog
+// в proxy). Пустой auditPayloadMode → fallback Full (backward compat для
+// редких test-fixture'ов без полной настройки).
+func (h *Handler) writeAudit(log *domain.AuditLog, piiFindings []pii.Finding) {
+	if h.auditSvc == nil {
+		return
+	}
+	mode := h.auditPayloadMode
+	if mode == "" {
+		mode = audit.PayloadModeFull
+	}
+	log.RequestBody, log.ResponseBody = audit.TransformBodies(
+		mode, log.RequestBody, log.ResponseBody, h.dlpSvc, piiFindings)
+	h.auditSvc.Log(log)
 }
 
 type sourceListResponse struct {
@@ -582,7 +616,7 @@ func (h *Handler) auditRequest(ctx context.Context, claims *auth.Claims, source,
 
 	req := auditRequestPayload(query)
 
-	h.auditSvc.Log(&domain.AuditLog{
+	h.writeAudit(&domain.AuditLog{
 		ID:           uuid.New().String(),
 		UserID:       claims.UserID,
 		RequestBody:  req,
@@ -594,7 +628,7 @@ func (h *Handler) auditRequest(ctx context.Context, claims *auth.Claims, source,
 		PIITypes:     pii.DetectedTypes(findings),
 		PolicyAction: policyAction,
 		DurationMs:   int(time.Since(start).Milliseconds()),
-	})
+	}, findings)
 }
 
 func (h *Handler) reloadManager(ctx context.Context) error {
@@ -604,34 +638,47 @@ func (h *Handler) reloadManager(ctx context.Context) error {
 	return h.manager.RefreshSources(ctx)
 }
 
+// auditAdminRequest — PR-D: переключён с audit_logs на admin_event_logs.
+// Admin CRUD над internal-db sources это control-plane действие,
+// а не user LLM-traffic. Сохраняем minimal-safe metadata: operation,
+// source, pii_detected — без raw payload (DSN/query может содержать
+// secrets). rawPayload теперь игнорируется: мы только отмечаем факт
+// попытки, а содержимое — не в scope admin event logs.
 func (h *Handler) auditAdminRequest(ctx context.Context, claims *auth.Claims, operation, source, endpoint string, status int, err error, start time.Time, rawPayload ...string) {
-	if h == nil || h.auditSvc == nil || claims == nil {
+	if h == nil || h.adminAudit == nil || claims == nil {
 		return
 	}
 
-	payload := ""
+	var piiDetected bool
 	if len(rawPayload) > 0 {
-		payload = rawPayload[0]
+		piiDetected = len(pii.Scan(rawPayload[0])) > 0
 	}
 
-	findings := pii.Scan(payload)
-	policyAction := "allowed"
+	method := "CONTROL"
+	resource := "internal_db_source"
+	action := operation
+
+	metadata := map[string]any{
+		"source":       source,
+		"operation":    operation,
+		"pii_detected": piiDetected,
+		"duration_ms":  int(time.Since(start).Milliseconds()),
+	}
 	if err != nil {
-		policyAction = "blocked"
+		metadata["error"] = err.Error()
 	}
 
-	h.auditSvc.Log(&domain.AuditLog{
-		ID:           uuid.New().String(),
-		UserID:       claims.UserID,
-		RequestBody:  payload,
-		Model:        "internal-db-admin",
-		Provider:     operation + ":" + source,
-		Endpoint:     endpoint,
-		StatusCode:   status,
-		PIIDetected:  len(findings) > 0,
-		PIITypes:     pii.DetectedTypes(findings),
-		PolicyAction: policyAction,
-		DurationMs:   int(time.Since(start).Milliseconds()),
+	actor := &claims.UserID
+	h.adminAudit.Record(ctx, adminaudit.Event{
+		ActorUserID: actor,
+		Action:      action,
+		Resource:    resource,
+		TargetID:    source,
+		Path:        endpoint,
+		Method:      method,
+		StatusCode:  status,
+		Success:     err == nil && status < 400,
+		Metadata:    metadata,
 	})
 }
 

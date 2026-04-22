@@ -45,6 +45,8 @@
     "activeUsers": "Активные пользователи",
     "topUsers": "Топ пользователей по стоимости",
     "email": "Email",
+    "emailMasked": "Email (маскированный)",
+    "userIdShort": "Пользователь",
     "requests": "Запросы",
     "cost": "Стоимость",
     "totalTokens": "Всего токенов"
