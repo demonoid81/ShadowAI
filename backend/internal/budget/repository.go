@@ -3,8 +3,24 @@ package budget
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"github.com/shadowai/backend/internal/domain"
 )
+
+// DeleteByUserIDTx удаляет budget-row для user'а в рамках переданной
+// транзакции (PR-B erasure). Возвращает число удалённых rows (обычно
+// 0 или 1 — UNIQUE constraint на user_id).
+func (r *Repository) DeleteByUserIDTx(ctx context.Context, tx *sql.Tx, userID string) (int, error) {
+	res, err := tx.ExecContext(ctx, `DELETE FROM budgets WHERE user_id = $1`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("delete budget for user: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete budget RowsAffected: %w", err)
+	}
+	return int(n), nil
+}
 
 type Repository struct {
 	db *sql.DB

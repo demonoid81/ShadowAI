@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -239,11 +240,11 @@ func TestCacheEnabledValues(t *testing.T) {
 
 func TestDurationEnvVars(t *testing.T) {
 	tests := []struct {
-		name    string
-		envKey  string
-		envVal  string
+		name     string
+		envKey   string
+		envVal   string
 		getField func(*Config) time.Duration
-		want    time.Duration
+		want     time.Duration
 	}{
 		{
 			"read timeout 30s",
@@ -296,6 +297,117 @@ func TestDurationEnvVars(t *testing.T) {
 			got := tt.getField(cfg)
 			if got != tt.want {
 				t.Errorf("%s = %v, want %v", tt.envKey, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigIsProduction(t *testing.T) {
+	tests := []struct {
+		env  string
+		want bool
+	}{
+		{"development", false},
+		{"dev", false},
+		{"prod", true},
+		{"production", true},
+		{" PRODUCTION ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			cfg := &Config{AppEnv: tt.env}
+			if got := cfg.IsProduction(); got != tt.want {
+				t.Fatalf("IsProduction(%q)=%v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateStartupConfig_DevAllowsUnsafeDefaults(t *testing.T) {
+	cfg := &Config{
+		AppEnv:             "development",
+		DatabaseURL:        "postgres://shadowai:shadowai_secret@localhost:5432/shadowai?sslmode=disable",
+		RedisURL:           "redis://localhost:6379/0",
+		JWTSecret:          "short",
+		AuditPayloadMode:   "full",
+		AuditRetentionDays: 0,
+	}
+
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("ValidateStartupConfig() unexpected error in dev: %v", err)
+	}
+}
+
+func TestValidateStartupConfig_ProdRejectsUnsafeConfig(t *testing.T) {
+	cfg := &Config{
+		AppEnv:             "production",
+		DatabaseURL:        "postgres://shadowai:shadowai_secret@localhost:5432/shadowai?sslmode=disable",
+		RedisURL:           "redis://127.0.0.1:6379/0",
+		JWTSecret:          "change-me-in-production-32chars!!",
+		AuditPayloadMode:   "full",
+		AuditRetentionDays: 0,
+	}
+
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("ValidateStartupConfig() expected error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"JWT_SECRET",
+		"DATABASE_URL",
+		"REDIS_URL",
+		"AUDIT_PAYLOAD_MODE=full",
+		"AUDIT_RETENTION_DAYS=0",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
+	cfg := &Config{
+		AppEnv:                      "production",
+		DatabaseURL:                 "postgres://shadowai:shadowai_secret@db.internal:5432/shadowai?sslmode=require",
+		RedisURL:                    "redis://redis.internal:6379/0",
+		JWTSecret:                   "super-secret-key-for-production-12345",
+		AuditPayloadMode:            "full",
+		AuditAllowFullInProd:        true,
+		AuditRetentionDays:          0,
+		AuditAllowNoRetentionInProd: true,
+	}
+
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("ValidateStartupConfig() unexpected error: %v", err)
+	}
+}
+
+func TestValidateStartupConfig_ProdRejectsLoopbackHosts(t *testing.T) {
+	tests := []struct {
+		name      string
+		dbURL     string
+		redisURL  string
+		expectSub string
+	}{
+		{"localhost db", "postgres://u:p@localhost:5432/db", "redis://redis.internal:6379/0", "DATABASE_URL"},
+		{"ipv4 db", "postgres://u:p@127.0.0.1:5432/db", "redis://redis.internal:6379/0", "DATABASE_URL"},
+		{"localhost redis", "postgres://u:p@db.internal:5432/db", "redis://localhost:6379/0", "REDIS_URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				AppEnv:             "production",
+				DatabaseURL:        tt.dbURL,
+				RedisURL:           tt.redisURL,
+				JWTSecret:          "super-secret-key-for-production-12345",
+				AuditPayloadMode:   "redacted",
+				AuditRetentionDays: 30,
+			}
+			err := cfg.ValidateStartupConfig()
+			if err == nil || !strings.Contains(err.Error(), tt.expectSub) {
+				t.Fatalf("ValidateStartupConfig()=%v, want substring %q", err, tt.expectSub)
 			}
 		})
 	}

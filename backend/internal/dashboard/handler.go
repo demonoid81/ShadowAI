@@ -1,17 +1,70 @@
 package dashboard
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strings"
+
+	"github.com/shadowai/backend/internal/adminaudit"
+	"github.com/shadowai/backend/internal/auth"
 )
 
-type Handler struct {
-	db *sql.DB
+// maskEmail — PR-D.1 privacy hardening. Screens admin UI/screenshots
+// от утечки полного email. Сохраняет domain (для recognition) и
+// первые 2 символа local part.
+//
+//	john.doe@example.com  → jo***@example.com
+//	a@example.com         → *@example.com
+//	""                     → ""
+//	no-@-sign              → *** (маркер: не-email)
+func maskEmail(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at <= 0 {
+		if email == "" {
+			return ""
+		}
+		return "***"
+	}
+	local := email[:at]
+	domain := email[at:]
+	if len(local) <= 2 {
+		return "*" + domain
+	}
+	return local[:2] + "***" + domain
 }
 
-func NewHandler(db *sql.DB) *Handler {
-	return &Handler{db: db}
+type Handler struct {
+	db         *sql.DB
+	adminAudit adminaudit.Recorder
+}
+
+// NewHandler принимает optional adminaudit.Recorder (nil → no-op).
+// Dashboard-endpoints — admin-only-reads, логируются как resource="dashboard".
+func NewHandler(db *sql.DB, adminAudit adminaudit.Recorder) *Handler {
+	return &Handler{db: db, adminAudit: adminAudit}
+}
+
+func (h *Handler) recordRead(ctx context.Context, path, method string, status int, metadata any) {
+	if h.adminAudit == nil {
+		return
+	}
+	var actor *string
+	if c := auth.GetClaims(ctx); c != nil {
+		id := c.UserID
+		actor = &id
+	}
+	h.adminAudit.Record(ctx, adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "read",
+		Resource:    "dashboard",
+		Path:        path,
+		Method:      method,
+		StatusCode:  status,
+		Success:     status < 400,
+		Metadata:    metadata,
+	})
 }
 
 type Stats struct {
@@ -39,6 +92,9 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s)
+	h.recordRead(r.Context(), r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"endpoint": "stats",
+	})
 }
 
 type UsagePoint struct {
@@ -76,13 +132,21 @@ func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(points)
+	h.recordRead(r.Context(), r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"endpoint":     "usage",
+		"points_count": len(points),
+	})
 }
 
+// TopUser — строка в /dashboard/top-users. PR-D.1: Email теперь
+// masked — скриншоты админки не должны раскрывать PII клиентов.
+// Primary identifier для lookup/UI — UserID. Полный email оператор
+// получает через GET /api/users/{id} (аудируется в admin_event_logs).
 type TopUser struct {
-	UserID   string  `json:"user_id"`
-	Email    string  `json:"email"`
-	Requests int     `json:"requests"`
-	Cost     float64 `json:"cost"`
+	UserID      string  `json:"user_id"`
+	EmailMasked string  `json:"email_masked"`
+	Requests    int     `json:"requests"`
+	Cost        float64 `json:"cost"`
 }
 
 func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
@@ -98,10 +162,12 @@ func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
 	var users []TopUser
 	for rows.Next() {
 		var u TopUser
-		if err := rows.Scan(&u.UserID, &u.Email, &u.Requests, &u.Cost); err != nil {
+		var rawEmail string
+		if err := rows.Scan(&u.UserID, &rawEmail, &u.Requests, &u.Cost); err != nil {
 			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 			return
 		}
+		u.EmailMasked = maskEmail(rawEmail)
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
@@ -113,4 +179,8 @@ func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
+	h.recordRead(r.Context(), r.URL.Path, r.Method, http.StatusOK, map[string]any{
+		"endpoint":    "top_users",
+		"users_count": len(users),
+	})
 }

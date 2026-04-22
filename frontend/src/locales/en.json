@@ -45,6 +45,8 @@
     "activeUsers": "Active Users",
     "topUsers": "Top Users by Cost",
     "email": "Email",
+    "emailMasked": "Email (masked)",
+    "userIdShort": "User",
     "requests": "Requests",
     "cost": "Cost",
     "totalTokens": "Total Tokens"

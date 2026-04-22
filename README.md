@@ -2,8 +2,10 @@
 
 AI Control Plane и LLM Firewall — единый reverse-proxy для LLM API с многоуровневой защитой, политиками, аудитом и бюджетированием.
 
-> **ShadowAI Core** (этот репозиторий) распространяется под [Apache License 2.0](LICENSE).
-> Enterprise-функции (privacy hardening, DSAR, admin access audit, provider/model governance, SSO/SCIM, SIEM integration, tenant isolation) поставляются отдельно как **ShadowAI Enterprise** под проприетарной commercial лицензией — см. [NOTICE](NOTICE) и раздел [License & Licensing](#license--licensing) в конце.
+> Этот репозиторий **dual-licensed**:
+> большая часть дерева — **ShadowAI Core** под [Apache License 2.0](LICENSE).
+> Выделенные директории и файлы — **ShadowAI Enterprise Components** — под проприетарной commercial лицензией ([LICENSE.enterprise](LICENSE.enterprise)); точный перечень путей в [ENTERPRISE.md](ENTERPRISE.md).
+> Читать исходники enterprise-компонентов свободно; **использовать в production — только по коммерческому соглашению**.
 
 ---
 
@@ -824,19 +826,24 @@ docker compose up -d --build backend
 
 ## License & Licensing
 
-ShadowAI распространяется как **dual-project**:
+ShadowAI — **single dual-licensed repository**:
 
-- **ShadowAI Core** — этот репозиторий, лицензия [Apache License 2.0](LICENSE).
+- **ShadowAI Core** — большая часть дерева под [Apache License 2.0](LICENSE).
   Включает: proxy, firewall engine, все 10 инспекторов (включая semantic_v2),
   benchmark harness, basic policy engine, Prometheus metrics, basic auth/JWT,
   basic dashboard.
-- **ShadowAI Enterprise** — отдельный приватный репозиторий под проприетарной
-  commercial self-host лицензией (MSA + Order Form + EULA).
-  Включает: `AUDIT_PAYLOAD_MODE` / retention / purge, DSAR erasure,
-  `admin_event_logs` + retention, user-read access audit, dashboard masking,
-  Provider/Model Governance, SIEM integration, SSO/SCIM, legal hold,
-  tenant isolation, compliance control mappings (SOC 2 / ISO 27001 /
-  ISO 42001 / EU AI Act), premium support SLA.
+- **ShadowAI Enterprise Components** — выделенные директории и файлы
+  (перечень в [ENTERPRISE.md](ENTERPRISE.md)) под проприетарной commercial
+  self-host лицензией ([LICENSE.enterprise](LICENSE.enterprise);
+  MSA + Order Form + EULA). Включает: `AUDIT_PAYLOAD_MODE` / retention /
+  purge, DSAR erasure, `admin_event_logs` + retention, user-read access
+  audit, dashboard masking, Provider/Model Governance. Планируется: SIEM
+  integration, SSO/SCIM, legal hold, tenant isolation, compliance control
+  mappings (SOC 2 / ISO 27001 / ISO 42001 / EU AI Act), premium support SLA.
+
+Читать исходники enterprise-компонентов можно свободно (audit, security
+research, обсуждение). **Использовать в production, в internal operations
+или как managed-as-a-service — только по commercial соглашению.**
 
 Для обсуждения коммерческой лицензии — открыть issue с тегом `[commercial]`
 либо связаться с maintainer'ом напрямую.
@@ -854,9 +861,10 @@ ShadowAI распространяется как **dual-project**:
 
 ### Контрибуция
 
-Вклад в Core принимается через **DCO sign-off** (`git commit -s`).
-Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md). CLA не требуется.
-
-Enterprise-функции не принимают pull request'ы в этом репозитории;
-если у вас есть идея enterprise-фичи — откройте issue для обсуждения
-scope и она может попасть в roadmap enterprise-репо.
+- Вклад в **Core** — через **DCO sign-off** (`git commit -s`).
+  Подробности — в [CONTRIBUTING.md](CONTRIBUTING.md). CLA не требуется.
+- Вклад в **Enterprise Components** (paths из [ENTERPRISE.md](ENTERPRISE.md))
+  дополнительно требует подписанного **CLA**. Причина: Enterprise код
+  лицензирован не под OSS-лицензией, и только копирайт-holder может её
+  выдавать. CLA гарантирует, что Enterprise линия остаётся
+  re-licensable.

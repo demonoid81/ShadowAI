@@ -82,7 +82,8 @@ func TestProxyChat_ShadowInspector_DoesNotBlock_WritesShadowDecisions(t *testing
 
 	h := NewHandler(
 		registry, policySvc, auditSvc, budgetSvc, dlpSvc,
-		"", nil, nil, nil, 0, pipeline,
+		"", nil, nil, nil, 0, pipeline, audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
@@ -172,7 +173,8 @@ func TestProxyChat_EnforceInspector_NoShadowInAudit(t *testing.T) {
 		registry, policySvc, auditSvc,
 		budget.NewService(unlimitedBudgetRepo{}, rdb),
 		dlp.NewService("off"),
-		"", nil, nil, nil, 0, pipeline,
+		"", nil, nil, nil, 0, pipeline, audit.PayloadModeFull,
+		nil, nil,
 	)
 
 	req := httptest.NewRequest("POST", "/proxy/openai/v1/chat/completions",

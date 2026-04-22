@@ -7,13 +7,20 @@ to all patches.
 
 ## Scope
 
-This repository contains **ShadowAI Core**, licensed under the
-Apache License, Version 2.0 (see `LICENSE`).
+This repository is **dual-licensed**:
 
-Contributions to enterprise-only features (see `NOTICE`) are handled
-through a separate private repository under a commercial license and are
-not accepted here. If you are unsure whether a feature belongs in Core or
-Enterprise, open an issue before writing code.
+- **ShadowAI Core** — most of the tree, licensed under the Apache
+  License 2.0 (see `LICENSE`). Contributions follow the **DCO**
+  workflow described below.
+- **ShadowAI Enterprise Components** — directories and files listed
+  in `ENTERPRISE.md`, licensed under a proprietary commercial license
+  (see `LICENSE.enterprise`). Contributions to these paths
+  additionally require a signed **Contributor License Agreement
+  (CLA)** in addition to the DCO sign-off.
+
+If you are unsure whether your contribution touches Enterprise
+Components, consult `ENTERPRISE.md` and compare the paths you are
+editing. When in doubt, open an issue before writing code.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -112,15 +119,26 @@ that document is published, email the maintainers directly with
 
 ## Licensing of contributions
 
-By submitting a contribution under DCO sign-off, you agree that your
-contribution is licensed under the Apache License, Version 2.0, the same
-license as the rest of ShadowAI Core. No separate Contributor License
-Agreement (CLA) is required for Core contributions.
+### Core paths (Apache 2.0)
 
-If a future need arises to dual-license specific modules (for example, to
-include community contributions in ShadowAI Enterprise), a separate CLA
-may be introduced at that time and will apply only going forward, never
-retroactively.
+By submitting a contribution that only touches Core paths under DCO
+sign-off, you agree that your contribution is licensed under the
+Apache License, Version 2.0. No separate CLA is required for pure
+Core contributions.
+
+### Enterprise paths (proprietary)
+
+By submitting a contribution that touches any path enumerated in
+`ENTERPRISE.md`, you additionally agree to the terms of a signed
+**Contributor License Agreement (CLA)** with the ShadowAI
+Contributors. The CLA grants the maintainers the right to
+distribute your contribution under `LICENSE.enterprise`
+(proprietary, commercial). Without a signed CLA, PRs touching
+Enterprise paths will not be merged.
+
+This split is not retroactive: contributions accepted under DCO
+before an ENTERPRISE.md path was introduced remain under Apache 2.0
+in their original form.
 
 ## Trademark
 
