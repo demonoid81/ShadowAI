@@ -17,6 +17,7 @@ import (
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/governance"
+	"github.com/shadowai/backend/internal/legalhold"
 	"github.com/shadowai/backend/internal/siem"
 )
 
@@ -48,9 +49,18 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		}
 	}
 
+	// PR-L1: Legal hold (migration 013). Wired до erasureSvc чтобы
+	// сразу передать HoldChecker.
+	legalHoldRepo := legalhold.NewPGRepository(deps.DB)
+	legalHoldSvc := legalhold.NewService(legalHoldRepo)
+	legalHoldHandler := legalhold.NewHandler(legalHoldSvc, adminAuditRecorder)
+
 	// DSAR erasure (PR-B). auditRepo + budgetRepo используются как
 	// AuditScrubber + BudgetDeleter через interface intersection.
-	erasureSvc := auth.NewErasureService(deps.DB, deps.AuditRepo, deps.BudgetRepo)
+	// PR-L1: HoldChecker attached через chainable setter — erasure
+	// pre-tx проверяет hold и возвращает ErasureHoldActive.
+	erasureSvc := auth.NewErasureService(deps.DB, deps.AuditRepo, deps.BudgetRepo).
+		WithHoldChecker(legalHoldSvc)
 
 	// Provider/Model Governance (PR-G1). Singleton via migration 012.
 	governanceRepo := governance.NewPGRepository(deps.DB)
@@ -70,6 +80,10 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			// PR-G1: Provider/Model Governance CRUD.
 			admin.HandleFunc("/governance/policy", governanceHandler.GetPolicy).Methods("GET")
 			admin.HandleFunc("/governance/policy", governanceHandler.UpdatePolicy).Methods("PUT")
+			// PR-L1: Legal holds (admin-only).
+			admin.HandleFunc("/legal-holds", legalHoldHandler.Create).Methods("POST")
+			admin.HandleFunc("/legal-holds", legalHoldHandler.List).Methods("GET")
+			admin.HandleFunc("/legal-holds/{id}/release", legalHoldHandler.Release).Methods("POST")
 		},
 
 		StartSchedulers: func(ctx context.Context, cfg *config.Config) {

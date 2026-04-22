@@ -43,11 +43,31 @@ type ErasureService struct {
 	db         *sql.DB
 	auditScrub AuditScrubber
 	budgetDel  BudgetDeleter
+	// PR-L1: optional legal-hold check. nil → check пропускается
+	// (unit tests / dev без legalhold таблицы). В prod bundle всегда
+	// передаёт non-nil.
+	holdChecker HoldChecker
 }
 
-// NewErasureService — DI constructor. Все три dep'а обязательны.
+// HoldChecker — interface для pre-erasure legal-hold check. Satisfies
+// в enterprise-сборке через legalhold.Service; в core — unreachable
+// (erasure сам под enterprise tag).
+type HoldChecker interface {
+	HasActiveHold(ctx context.Context, userID string) (bool, error)
+}
+
+// NewErasureService — DI constructor. auditScrub + budgetDel
+// обязательны; holdChecker опционален (nil OK для старых деплоев
+// без legalhold таблицы).
 func NewErasureService(db *sql.DB, auditScrub AuditScrubber, budgetDel BudgetDeleter) *ErasureService {
 	return &ErasureService{db: db, auditScrub: auditScrub, budgetDel: budgetDel}
+}
+
+// WithHoldChecker — chainable setter. Возвращает тот же ErasureService
+// для удобства wiring. Использовать из enterprise_wire.go.
+func (s *ErasureService) WithHoldChecker(hc HoldChecker) *ErasureService {
+	s.holdChecker = hc
+	return s
 }
 
 // EraseUser выполняет полный erasure-workflow для targetUserID.
@@ -62,6 +82,19 @@ func NewErasureService(db *sql.DB, auditScrub AuditScrubber, budgetDel BudgetDel
 func (s *ErasureService) EraseUser(ctx context.Context, actorUserID, targetUserID string) (*ErasureResult, error) {
 	if targetUserID == "" {
 		return nil, errors.New("erasure: targetUserID required")
+	}
+
+	// PR-L1: legal hold check ДО открытия транзакции. Fail-closed:
+	// если holdChecker возвращает err (недоступна legal_holds
+	// таблица), мы отвергаем erasure — compliance выше availability.
+	if s.holdChecker != nil {
+		hasHold, err := s.holdChecker.HasActiveHold(ctx, targetUserID)
+		if err != nil {
+			return nil, fmt.Errorf("erasure: hold check: %w", err)
+		}
+		if hasHold {
+			return &ErasureResult{UserID: targetUserID, Status: ErasureHoldActive}, nil
+		}
 	}
 
 	// Начинаем транзакцию — все операции atomic.

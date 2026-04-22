@@ -82,6 +82,52 @@ func TestEraseUser_Completed(t *testing.T) {
 	}
 }
 
+// TestEraseUser_HoldActive_Returns409 — PR-L1: user под active
+// legal hold → 409 (не 500). Response body содержит status=hold_active;
+// admin event recorded с blocked_by_hold=true + success=false.
+func TestEraseUser_HoldActive_Returns409(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{
+		UserID: "u-target", Status: ErasureHoldActive,
+	}}
+	rec := &captureRecorder{}
+	h := NewHandler(nil, eraser, rec)
+
+	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
+	w := httptest.NewRecorder()
+	h.EraseUser(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	var body ErasureResult
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != ErasureHoldActive {
+		t.Errorf("body.status = %q, want hold_active", body.Status)
+	}
+
+	// Admin event: success=false (block — НЕ successful erase),
+	// metadata.blocked_by_hold=true, status в metadata.
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	ev := rec.events[0]
+	if ev.Success {
+		t.Error("event success=true, want false для blocked erase")
+	}
+	if ev.StatusCode != http.StatusConflict {
+		t.Errorf("event status = %d, want 409", ev.StatusCode)
+	}
+	meta := ev.Metadata.(map[string]any)
+	if meta["blocked_by_hold"] != true {
+		t.Errorf("metadata.blocked_by_hold = %v, want true", meta["blocked_by_hold"])
+	}
+	if meta["status"] != "hold_active" {
+		t.Errorf("metadata.status = %v, want hold_active", meta["status"])
+	}
+}
+
 // TestEraseUser_AlreadyErased — идемпотентность: status 200 + already_erased,
 // без counters (omitempty).
 func TestEraseUser_AlreadyErased(t *testing.T) {

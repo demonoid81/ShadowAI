@@ -260,48 +260,81 @@ Requirement "заморозить" удаление данных конкрет�
 
 ### 5.2 Implementation status
 
-**[gap]** Автоматизация отсутствует. ShadowAI не имеет:
-- flag'а `legal_hold` на user-row'е;
-- интерсепта в `ScrubUserDataTx` / `PurgeOlderThan`;
-- dedicated `legal_holds` таблицы.
+**[implemented]** PR-L1: автоматизация per-user legal holds.
+- Таблица `legal_holds` (migration
+  `backend/migrations-enterprise/013_create_legal_holds.sql`).
+- Admin-only endpoints:
+  - `POST /api/legal-holds` — apply hold (409 если уже active).
+  - `POST /api/legal-holds/{id}/release` — release (идемпотентно).
+  - `GET /api/legal-holds` — list active + released history.
+- `ErasureService.EraseUser` делает pre-tx `HasActiveHold` check.
+  User под hold → HTTP 409 + body `{status:"hold_active"}`.
+  Fail-closed при `legal_holds` DB error (compliance выше
+  availability).
+- Admin audit: `action=apply_hold | release_hold`,
+  `resource=legal_hold`. Blocked erasures пишутся с
+  `metadata.blocked_by_hold=true`.
 
-### 5.3 Manual процедура (рекомендованная)
+**[gap]** Что осталось вне scope PR-L1:
+- `PurgeOlderThan` / audit-retention scheduler не учитывает hold'ы
+  (automated purge не экранирует audit rows для held users). На v1
+  operator вручную приостанавливает `AUDIT_PURGE_INTERVAL=0` при
+  длинных hold'ах.
+- Backup-freeze — infra-уровня, остаётся manual.
+- Hold-scope шире user-level (query-window, date-range hold) —
+  roadmap.
 
-1. **Trigger**: legal/compliance получает hold-order. Фиксируется в
-   external system (ticket tracker, legal CMS).
-2. **Application-level block**:
-   - **[manual]** operator явно приостанавливает `cmd/audit-purge`
-     scheduler (`AUDIT_PURGE_INTERVAL=0` + restart).
-   - **[manual]** для конкретного user: перед DSAR operator проверяет
-     hold-registry (external); если user held — **отказывает в erase**
-     с HTTP 409/503 на operational level (сам endpoint код сейчас не
-     enforce'ит — admin обязан не запускать команду).
-3. **Backup freeze** (`[manual]`): infra-команда исключает snapshot'ы,
-   covered hold'ом, из rolling eviction.
-4. **Release**: когда hold снят, возобновить scheduler; при
-   необходимости запустить накопленный DSAR.
+### 5.3 Operator процедура (pr-L1)
+
+1. **Trigger**: legal/compliance получает hold-order, фиксируют
+   внешнее дело/запрос (ticket, subpoena ID).
+2. **Apply hold**:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"target_user_id":"u-target",
+          "case_ref":"SEC-2026-042",
+          "reason":"SEC inquiry, see ticket LEGAL-137"}' \
+     https://shadowai.example/api/legal-holds
+   ```
+   Response 201 с `id`. Event `apply_hold` + mirror в SIEM.
+3. **DSAR attempts блокируются автоматически**: запрос
+   `POST /api/users/{id}/erase` на held user вернёт 409 +
+   `{status:"hold_active"}`. Admin event `erase` + metadata
+   `blocked_by_hold=true` сохраняется как evidence "попытка была,
+   блок сработал".
+4. **Backup freeze** (`[manual]`): infra excludes snapshot'ы с
+   held data из eviction.
+5. **Audit-retention** (`[manual]`): если hold длиннее
+   `AUDIT_RETENTION_DAYS`, приостановить scheduler
+   (`AUDIT_PURGE_INTERVAL=0` + restart) на период hold'а.
+6. **Release**:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+     https://shadowai.example/api/legal-holds/{id}/release
+   ```
+   200 + body с `is_active=false, released_at, released_by`. Event
+   `release_hold`. После release DSAR на этого user'а работает
+   штатно.
 
 ### 5.4 Конфликт DSAR vs Legal Hold
 
-**Приоритет: Legal Hold > DSAR.** GDPR Article 17(3)(e) явно даёт
-исключение для "establishment, exercise, or defence of legal claims".
+**Приоритет: Legal Hold > DSAR.** GDPR Article 17(3)(b)/(c)/(e)
+прямо даёт carve-out для legal obligations и защиты claims.
 
-В ShadowAI:
-- [manual] operator должен проверять hold-статус **ДО** запуска
-  `/users/{id}/erase`.
-- Если пропустил — DSAR выполнится (код не enforce'ит); remediation
-  ограничен, т.к. erasure hard (`budgets` DELETE необратим без backup).
+В ShadowAI (PR-L1): enforcement работает на application-level.
+`/users/{id}/erase` отвергается с 409 до начала транзакции.
+Попытка записывается в `admin_event_logs` → SIEM mirror. Operator
+обязан **не исполнять** erasure вручную через DB в обход endpoint —
+это нарушает audit trail.
 
-### 5.5 Planned improvements
+### 5.5 Planned improvements (v2+)
 
-**[planned]** В roadmap:
-- таблица `legal_holds` (target_user_id, reason, active, created_by).
-- `ScrubUserDataTx` проверяет активный hold; отказывает с явной
-  ошибкой.
-- `/users/{id}/erase` — 409 если user held.
-- `admin_event_logs` фиксирует attempts на held user'ах.
-
-Пока не реализовано — процедура в §5.3 обязательна.
+- `PurgeOlderThan` / `ScrubUserDataTx` учитывают active holds
+  (audit rows protected from retention purge).
+- Hold-scope шире: per-query, per-date-range.
+- Approver workflow (4-eyes) для apply и для release hold'а.
+- Auto-release по external signal (webhook от legal CMS).
 
 ---
 
@@ -573,6 +606,11 @@ external tooling.
 
 ## 9. Change log
 
+- **1.6 (2026-04-22)** — PR-L1: §5 переведён в `[implemented]`.
+  Legal hold получил полноценную application-layer automation
+  (`legal_holds` table, admin endpoints, pre-tx enforcement в
+  ErasureService, admin-audit trail). Manual backup-freeze и
+  audit-retention pause остаются operator'ской ответственностью.
 - **1.5 (2026-04-22)** — PR-S1.1: §8.4 дополнен prod-guards для SIEM:
   empty endpoint / non-https / `InsecureSkipVerify` без override —
   rejected в `ValidateStartupConfig`. Защита от misconfigured

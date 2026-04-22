@@ -435,20 +435,30 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// not_found → 404 (нет user и нет прошлого run'а). Остальные —
-	// 200 с status в body (admin UI читает body).
+	// Status → HTTP code:
+	//   completed / already_erased → 200 (штатный путь)
+	//   not_found                  → 404
+	//   hold_active (PR-L1)        → 409 (business error, not 500)
 	status := http.StatusOK
-	if result.Status == ErasureNotFound {
+	switch result.Status {
+	case ErasureNotFound:
 		status = http.StatusNotFound
+	case ErasureHoldActive:
+		status = http.StatusConflict
 	}
 	writeJSON(w, status, result)
 	// success = HTTP 2xx. Идемпотентный повтор already_erased — штатная
-	// 200-операция, не failed erase.
-	h.recordErase(r, claims.UserID, targetID, status, status < 400, map[string]any{
+	// 200-операция. hold_active — **не** successful erasure (success=false),
+	// это осознанный block.
+	meta := map[string]any{
 		"status":              string(result.Status),
 		"audit_rows_scrubbed": result.AuditRowsScrubbed,
 		"budgets_deleted":     result.BudgetsDeleted,
-	})
+	}
+	if result.Status == ErasureHoldActive {
+		meta["blocked_by_hold"] = true
+	}
+	h.recordErase(r, claims.UserID, targetID, status, status < 400, meta)
 }
 
 // recordErase пишет admin-event о erasure (action=erase, resource=user).

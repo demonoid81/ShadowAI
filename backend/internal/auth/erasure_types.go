@@ -16,6 +16,9 @@ const (
 	ErasureCompleted     ErasureStatus = "completed"
 	ErasureAlreadyErased ErasureStatus = "already_erased"
 	ErasureNotFound      ErasureStatus = "not_found"
+	// ErasureHoldActive — PR-L1: user под legal hold; DSAR отвергнут
+	// (GDPR Art.17(3)b/c/e carve-out). Core handler мапит → 409.
+	ErasureHoldActive ErasureStatus = "hold_active"
 )
 
 // ErasureResult — итог выполнения EraseUser.

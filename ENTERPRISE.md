@@ -28,6 +28,9 @@ The following paths are covered by [LICENSE.enterprise](LICENSE.enterprise):
 - `backend/internal/siem/` — SIEM mirror: fan-out recorder + HTTP
   sink для внешнего append-only evidence stream
   (Splunk/Elastic/CloudTrail-like).
+- `backend/internal/legalhold/` — Legal hold groundwork
+  (per-user judicial/regulatory holds, blocks DSAR erasure
+  pre-transaction, admin-only CRUD).
 
 ### Individual Go files
 
@@ -52,6 +55,8 @@ apply `backend/migrations-enterprise/` (009–012):
   — retention target column for admin-events vs user-audit.
 - `backend/migrations-enterprise/012_create_provider_governance_policies.sql`
   — governance policy singleton table.
+- `backend/migrations-enterprise/013_create_legal_holds.sql` —
+  legal holds table with partial-unique index for active-per-user.
 
 ### Documentation
 
