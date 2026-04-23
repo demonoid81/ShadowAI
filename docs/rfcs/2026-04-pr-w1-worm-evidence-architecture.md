@@ -379,13 +379,44 @@ audit-verify --table audit_logs --from 2026-01-01 --to 2026-04-23
 - Reports: OK / CHAIN_BREAK(seq_no=X) / GAP(seq_no=X→Y) /
   ANCHOR_MISMATCH(epoch=T).
 
+**Chain write atomicity (design decision, review fix):**
+
+`prev_row_hash` = hash от предыдущей row в цепочке. Если два concurrent
+INSERT'а оба читают "current chain tip" до того, как один из них
+commit'ится — оба подпишутся под одним и тем же prev_hash, создав
+branch-конфликт. `seq_no` из PG SEQUENCE решает ordering, но НЕ решает
+атомарность чтения tip + hash + insert.
+
+**Решение**: `pg_advisory_xact_lock(chain_namespace, table_id)` перед
+каждым chain INSERT — та же техника, которую PR-L3 использует для
+`pg_advisory_xact_lock(4201, 1)` при apply_hold ↔ purge координации.
+Lock держится в рамках транзакции; all chain writes для одной таблицы
+сериализуются. Lock released on commit/rollback.
+
+```sql
+-- W2 chain write pseudo-code (одна транзакция):
+SELECT pg_advisory_xact_lock($chain_ns, $table_id);
+SELECT row_hash AS prev_hash FROM <table>
+    WHERE seq_no = (SELECT max(seq_no) FROM <table>)
+    FOR UPDATE;  -- дополнительный row-lock на tip
+INSERT INTO <table> (..., seq_no, row_hash)
+    VALUES (..., nextval('<table>_chain_seq'), hmac(prev_hash || canonical(data), secret));
+COMMIT;
+```
+
+Write amplification при advisory lock: acceptable — audit writes
+редкие относительно query reads, и lock scope ограничен одной
+транзакцией (milliseconds). Если потребуется throughput optimization,
+micro-batching (вместо per-row lock) — W3 design space.
+
 **Failure modes**:
 - INSERT fail (chain write): row не пишется. Caller получает error.
   Нет partial write.
 - Chain_secret not set: enterprise build → startup failure. Core build
   → chain disabled (явно логируется как reduced-guarantee mode).
-- Concurrent writes: seq_no assigned in DB-side sequence (PostgreSQL
-  `SEQUENCE`, atomic increment). Не application-side — no race.
+- Advisory lock contention: при высоком concurrent insert rate
+  это serialization bottleneck. Acceptable для compliance audit trail
+  (не hot-path для user-facing latency). Audit writes уже async-buffered.
 
 ### 7.3 Layer 2: Periodic Merkle anchor (W3 scope)
 
@@ -411,17 +442,30 @@ audit-verify --include-anchors --anchor-sink file:///var/audit-anchors.log
 Доказывает inclusion в Merkle tree для конкретной row. Auditor может
 проверить offline без доступа к БД.
 
-### 7.4 Legal hold interaction
+### 7.4 Legal hold interaction (W2 scope — included)
 
 Existing legal hold (PR-L2.3) уже обеспечивает retention-protection:
-rows под active hold не purge'аются. Chain / anchor добавляет:
+rows под active hold не purge'аются.
 
+**Решение (review fix)**: `legal_holds` table включается в W2 chain
+scope (не откладывается на W3+). Обоснование:
+
+- `legal_holds` — enterprise-only table (PR-L2.3), W2 уже enterprise-only.
+- Hold state machine (pending → active → released) с 4-eyes approval
+  (PR-L2.3) IS compliance evidence — его mutable state в W2 без
+  chain'а означает, что история одобрений/отзывов остаётся изменяемой
+  именно в том периоде, когда chain уже работает для audit_logs.
+- Low additional implementation cost: same seq_no + row_hash pattern,
+  одна дополнительная таблица.
+
+Chain / anchor для legal_holds добавляет:
 - Hold state (`status`, `approved_by`, `approved_at`) включается в
-  `row_hash` для `legal_holds` rows.
+  `row_hash` для каждой `legal_holds` mutation (create, approve, reject,
+  release).
 - Anchor log содержит count of active holds per epoch — auditor
-  видит что hold существовал.
+  видит что hold существовал в момент anchor'а.
 - Purge scheduler обязан писать в `audit_purge_runs` с chain entry
-  ДО удаления. Purge без anchor entry = compliance violation.
+  ДО удаления. Purge без chain entry = compliance violation.
 
 ### 7.5 Backup/restore behavior
 
@@ -495,14 +539,47 @@ audit-verify --table admin_event_logs \
   --output report.json
 ```
 
-### 8.4 What auditor can verify offline
+### 8.4 Verification tiers (W2/W3/W4+)
 
-With: row export, chain_secret (or public HMAC if we use asymmetric in W3+),
-anchor log exported independently:
-- Auditor computes Merkle tree from exported rows → compares root to
-  anchor log → detects any row modification/deletion.
-- Auditor checks seq_no gaps → detects row deletion.
-- No dependency on live DB access.
+Каждый tier даёт разный уровень offline verifiability. Это design
+decision, зафиксированный RFC (review fix: устраняет inconsistency
+между §8.4 и §11).
+
+**W2 — Internal integrity verification (requires chain_secret):**
+- Verifier использует тот же `AUDIT_CHAIN_SECRET`, что и signer.
+  HMAC verification = shared-secret: нет технической возможности
+  верифицировать без секрета.
+- Scope: compliance team / security team — не внешний аудитор.
+- Что detecteруется: chain break (row modification), seq_no gaps
+  (row deletion).
+- "Public HMAC" — некорректный термин, удалён.
+
+**W3 — Gap detection without secret (via Merkle anchor):**
+- Merkle root в anchor log не требует chain_secret для proof-of-inclusion.
+- Внешний аудитор с anchor log + row export может:
+  - Пересчитать Merkle tree из row_hash'ей.
+  - Сравнить root с anchored root.
+  - Обнаружить удалённые или добавленные rows (gap/addition).
+- **Ограничение**: аудитор видит row_hash, но не может проверить
+  соответствие hash → content без chain_secret. Он видит "rows
+  пропали" или "появились лишние", но не "content был изменён" —
+  для последнего нужен W4 asymmetric.
+
+**W4+ — True third-party verification (asymmetric signing, Ed25519):**
+- Signing key: private key (только app process / HSM).
+  Verification key: public key (freely distributable).
+- Аудитор НИКОГДА не получает signing secret — верифицирует
+  с public key.
+- Full content integrity + non-repudiation без secret sharing.
+- Требует PKI infrastructure. Scope W4+.
+
+**Summary table:**
+
+| Tier  | Secret needed | Detects modification | Detects deletion | Third-party verifiable |
+|-------|---------------|----------------------|------------------|------------------------|
+| W2    | Yes           | Yes                  | Yes              | No (internal only)     |
+| W3    | No            | No                   | Yes (gap)        | Partial (gaps only)    |
+| W4+   | No            | Yes                  | Yes              | Yes (full)             |
 
 ---
 
@@ -518,13 +595,18 @@ anchor log exported independently:
 ### W2 — Minimal chain + verifier
 
 Scope:
-- `seq_no` и `row_hash` columns в `audit_logs` + `admin_event_logs` (migration).
-- Chain write на INSERT — computed in DB function or Go layer with chain_secret.
+- `seq_no` и `row_hash` columns в следующих таблицах (migration):
+  - `audit_logs` (core)
+  - `admin_event_logs` (enterprise)
+  - `legal_holds` (enterprise) — включено по review fix §7.4
+- Chain write на INSERT — Go application layer + `pg_advisory_xact_lock`
+  per-table (§7.2). Chain_secret в env var, never in DB.
 - `audit_purge_runs` включает chain entry ДО purge.
 - `cmd/audit-verify` CLI: seq_no gap detection + chain continuity.
-- Enterprise-only. Core build без chain_secret = явный warning.
+  W2 verifier требует chain_secret (internal compliance только — §8.4).
+- Enterprise-only. Core build без chain_secret = явный warning в startup.
 
-Out of scope W2: Merkle anchor, external sink.
+Out of scope W2: Merkle anchor, external sink, Ed25519 asymmetric.
 
 ### W3 — Merkle anchor + external sink
 
@@ -549,11 +631,10 @@ Scope:
 
 ### Разрешить до W2 implementation kickoff:
 
-1. **Где вычислять row_hash**: Go application layer vs PostgreSQL GENERATED
-   column vs trigger? Go layer — точнее контролируем serialization; PG layer —
-   меньше risk race condition но требует SQL function management. **Recommendation**:
-   Go layer, chain_secret в memory, computed before INSERT. DB GENERATED =
-   не подходит (требует chain_secret в БД).
+1. **Chain write serialization**: RESOLVED в §7.2 — `pg_advisory_xact_lock`
+   per-table. Row hash вычисляется в Go application layer (секрет в memory,
+   не в DB) после получения advisory lock и до INSERT. Конкурентность
+   сериализуется на DB-уровне.
 
 2. **Canonical row serialization spec**: JSON (deterministic field order)?
    Protocol Buffers? Simple concatenation of typed fields? **Recommendation**:
@@ -591,13 +672,16 @@ Scope:
   secret, но требует PKI infrastructure.
 - **seq_no race**: PostgreSQL SEQUENCE atomic. Application не должна
   pre-allocate seq_no — он назначается сервером при INSERT.
-- **Verifier access**: verifier CLI с chain_secret = privileged tool.
-  Access должен быть ограничен compliance/security team. App process
-  chain_secret ≠ verifier chain_secret (или одинаковый, но доступ
-  к verifier должен быть audited самим собой).
-- **Legal hold rows в chain**: hold mutation (pending → active, release)
-  порождает chain entries для `legal_holds` table. Это обеспечивает
-  что hold state history tamper-evident, а не только payload data.
+- **Verifier access**: verifier CLI использует ТОТЖЕ `AUDIT_CHAIN_SECRET`
+  что и signer (HMAC = shared secret; верификация без секрета невозможна
+  в W2 — см. §8.4 verification tiers). Следствие: verifier CLI —
+  привилегированный инструмент, доступ должен быть ограничен compliance/
+  security team и auditеd через `admin_event_logs`. True third-party
+  verification (без secret) — W4+ с Ed25519.
+- **Legal hold rows в chain (W2 scope)**: `legal_holds` включена
+  в W2 chain scope (см. §7.4). hold mutation (create/approve/reject/
+  release) порождает chain entry — hold state history tamper-evident
+  с той же гарантией, что audit_logs и admin_event_logs, с W2.
 
 ---
 
