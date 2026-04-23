@@ -63,38 +63,44 @@ func TestClassifyBufferedOutcome_WarnedRecognized(t *testing.T) {
 
 func TestClassifyUsageSource(t *testing.T) {
 	boom := errors.New("parser fatal")
+	partial := StreamUsage{Found: true, Partial: true}
+	full := StreamUsage{Found: true, Partial: false}
+	notFound := StreamUsage{Found: false}
+	// F7.4: table covers all three UsageSource values.
 	cases := []struct {
-		name     string
-		found    bool
-		parseErr error
-		want     string
+		name      string
+		u         StreamUsage
+		parseErr  error
+		completed bool
+		want      string
 	}{
-		{"final_found_no_error", true, nil, UsageSourceFinal},
-		{"none_found_false", false, nil, UsageSourceNone},
-		{"none_parse_error", true, boom, UsageSourceNone},
-		{"none_found_false_with_error", false, boom, UsageSourceNone},
+		// Happy paths: normal completed stream.
+		{"final_completed", full, nil, true, UsageSourceFinal},
+		// Partial usage but stream completed normally → final (not partial).
+		// PR-F7.4 invariant: stream_completed overrides Partial flag.
+		{"partial_flag_but_completed", partial, nil, true, UsageSourceFinal},
+
+		// Interrupted stream + found.
+		{"final_interrupted", full, nil, false, UsageSourceFinal},
+		{"partial_interrupted", partial, nil, false, UsageSourcePartial},
+
+		// No usage found.
+		{"none_found_false", notFound, nil, true, UsageSourceNone},
+		{"none_found_false_incomplete", notFound, nil, false, UsageSourceNone},
+
+		// Parser error → none.
+		{"none_parse_error_found", full, boom, true, UsageSourceNone},
+		{"none_parse_error_partial", partial, boom, false, UsageSourceNone},
+		{"none_parse_error_notfound", notFound, boom, false, UsageSourceNone},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := classifyUsageSource(c.found, c.parseErr); got != c.want {
-				t.Errorf("classifyUsageSource(%v,%v) = %q, want %q", c.found, c.parseErr, got, c.want)
+			got := classifyUsageSource(c.u, c.parseErr, c.completed)
+			if got != c.want {
+				t.Errorf("classifyUsageSource(%+v, parseErr=%v, completed=%v) = %q, want %q",
+					c.u, c.parseErr, c.completed, got, c.want)
 			}
 		})
-	}
-}
-
-// TestClassifyUsageSource_PartialNotReachedInF73 — invariant guard:
-// F7.3 никогда не возвращает UsageSourcePartial (parsers не
-// различают partial vs final). F7.4 ослабит этот инвариант.
-func TestClassifyUsageSource_PartialNotReachedInF73(t *testing.T) {
-	// Exhaustive на двух осях (found, parseErr nil/non-nil).
-	for _, found := range []bool{true, false} {
-		for _, pe := range []error{nil, errors.New("x")} {
-			got := classifyUsageSource(found, pe)
-			if got == UsageSourcePartial {
-				t.Errorf("F7.3 не должен возвращать partial (found=%v, pe=%v)", found, pe)
-			}
-		}
 	}
 }
 

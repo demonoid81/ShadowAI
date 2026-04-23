@@ -213,3 +213,43 @@ func TestParseGeminiStreamUsage_NonJSONSentinel(t *testing.T) {
 		t.Error("non-JSON frame должен вернуть parser error (Gemini не использует [DONE])")
 	}
 }
+
+// TestParseGeminiStreamUsage_Partial_InterruptedBeforeFinishReason — PR-F7.4:
+// usageMetadata extracted but no candidate has finishReason → Partial=true.
+func TestParseGeminiStreamUsage_Partial_InterruptedBeforeFinishReason(t *testing.T) {
+	body := []byte(
+		`data: {"candidates":[{"content":{"parts":[{"text":"Partial"}]}}],"modelVersion":"gemini-1.5-pro","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n\n")
+	// No finishReason in any candidate.
+
+	usage, err := parseGeminiStreamUsage(body, "gemini-1.5-pro")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !usage.Found {
+		t.Fatal("expected Found=true")
+	}
+	if !usage.Partial {
+		t.Error("Partial=false; expected true (no finishReason in stream)")
+	}
+	if usage.TotalTokens != 15 {
+		t.Errorf("TotalTokens=%d, want 15", usage.TotalTokens)
+	}
+}
+
+// TestParseGeminiStreamUsage_NotPartial_WhenFinishReasonSeen — PR-F7.4:
+// finishReason present → Partial=false.
+func TestParseGeminiStreamUsage_NotPartial_WhenFinishReasonSeen(t *testing.T) {
+	body := []byte(
+		`data: {"candidates":[{"content":{"parts":[{"text":"Done"}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-1.5-pro","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n\n")
+
+	usage, err := parseGeminiStreamUsage(body, "gemini-1.5-pro")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !usage.Found {
+		t.Fatal("expected Found=true")
+	}
+	if usage.Partial {
+		t.Error("Partial=true; expected false (finishReason=STOP present)")
+	}
+}

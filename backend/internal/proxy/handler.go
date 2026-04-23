@@ -533,7 +533,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				PIIDetected: piiDetected, PIITypes: piiTypes,
 				PolicyAction:   auditPolicyAction,
 				Outcome:        auditOutcome,
-				UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+				UsageSource:    classifyUsageSource(streamUsage, parseErr, auditOutcome == OutcomeStreamCompleted),
 				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
 			return
@@ -673,7 +673,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				PolicyAction:   policyAction,
 				Outcome:        bufferedBudgetBlockOutcome(streamingFallbackReason != ""),
 				FallbackReason: streamingFallbackReason,
-				UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+				// Budget block = stream не завершился нормально → streamNormallyCompleted=false.
+				UsageSource:    classifyUsageSource(streamUsage, parseErr, false),
 				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
 			w.Header().Set("Content-Type", "application/json")
@@ -685,10 +686,9 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		// PR-F7.3: structured streaming fields для buffered path.
-		// policy_action остаётся чистым verdict'ом (block/flag/
-		// sanitize/allow); fallback/transport/usage перешли в
-		// отдельные поля.
+		// PR-F7.3 + F7.4: вычисляем auditOutcome один раз.
+		auditOutcomeBuffered := classifyBufferedOutcome(policyAction, streamingFallbackReason != "", parseErr)
+		auditUsageSource := classifyUsageSource(streamUsage, parseErr, auditOutcomeBuffered == OutcomeStreamCompleted)
 		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -699,11 +699,18 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			TotalTokens: totalTokens, CostUSD: cost,
 			PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
 			PolicyAction:   policyAction,
-			Outcome:        classifyBufferedOutcome(policyAction, streamingFallbackReason != "", parseErr),
+			Outcome:        auditOutcomeBuffered,
 			FallbackReason: streamingFallbackReason,
-			UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+			UsageSource:    auditUsageSource,
 			DurationMs:     int(time.Since(start).Milliseconds()),
 		})
+		// PR-F7.4: shadow compare. Только если mode=shadow; sequential
+		// (Q1: A) — запускается после buffered truth уже зафиксирована.
+		// Результат идёт только в metrics, не в audit и не к клиенту.
+		if h.streamingMode == "shadow" {
+			h.runShadowCompare(r.Context(), respBytes, providerName, model, claims.UserID, provider,
+				auditOutcomeBuffered, policyAction, auditUsageSource)
+		}
 		w.Write(responsePayload)
 		return
 	}
@@ -1650,7 +1657,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					PIIDetected: piiDetected, PIITypes: piiTypes,
 					PolicyAction:   auditPolicyAction,
 					Outcome:        auditOutcome,
-					UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+					UsageSource:    classifyUsageSource(streamUsage, parseErr, auditOutcome == OutcomeStreamCompleted),
 					DurationMs:     int(time.Since(start).Milliseconds()),
 				})
 				return
@@ -1772,7 +1779,8 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					PolicyAction:   policyAction,
 					Outcome:        bufferedBudgetBlockOutcome(streamingFallbackReason != ""),
 					FallbackReason: streamingFallbackReason,
-					UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+					// Budget block не является stream_completed.
+					UsageSource:    classifyUsageSource(streamUsage, parseErr, false),
 					DurationMs:     int(time.Since(start).Milliseconds()),
 				})
 				w.Header().Set("Content-Type", "application/json")
@@ -1782,7 +1790,9 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 			recordStreamUsage()
 
-			// PR-F7.3: structured streaming fields. См. ProxyChat аналог.
+			// PR-F7.3 + F7.4: вычисляем auditOutcome один раз — симметрично ProxyChat.
+			auditOutcomeBuffered := classifyBufferedOutcome(policyAction, streamingFallbackReason != "", parseErr)
+			auditUsageSource := classifyUsageSource(streamUsage, parseErr, auditOutcomeBuffered == OutcomeStreamCompleted)
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -1792,11 +1802,16 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
 				PolicyAction:   policyAction,
-				Outcome:        classifyBufferedOutcome(policyAction, streamingFallbackReason != "", parseErr),
+				Outcome:        auditOutcomeBuffered,
 				FallbackReason: streamingFallbackReason,
-				UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+				UsageSource:    auditUsageSource,
 				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
+			// PR-F7.4: shadow compare. Симметрично ProxyChat.
+			if h.streamingMode == "shadow" {
+				h.runShadowCompare(r.Context(), respBytes, candidate.Name, providerModel, claims.UserID, provider,
+					auditOutcomeBuffered, policyAction, auditUsageSource)
+			}
 			copyHeadersWithoutContentLength(w.Header(), resp.Header)
 			w.Header().Set("X-Provider", candidate.Name)
 			w.Header().Set("X-Cache", "MISS")

@@ -125,6 +125,26 @@ var (
 		Help: "Streaming transitions from incremental to buffered fallback.",
 	}, []string{"provider", "reason"})
 
+	// PR-F7.4: shadow compare metrics. Labels per Q3 decision:
+	//   streaming_shadow_compare_total{result} — без provider (aggregate).
+	//   streaming_shadow_mismatch_total{kind,provider} — с provider.
+	//   streaming_shadow_fallback_total{reason,provider} — с provider.
+
+	StreamingShadowCompareTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_shadow_compare_total",
+		Help: "Shadow mode comparisons between buffered and incremental results.",
+	}, []string{"result"})
+
+	StreamingShadowMismatchTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_shadow_mismatch_total",
+		Help: "Shadow mode mismatches by kind and provider.",
+	}, []string{"kind", "provider"})
+
+	StreamingShadowFallbackTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_shadow_fallback_total",
+		Help: "Shadow mode incremental fallback events by reason and provider.",
+	}, []string{"reason", "provider"})
+
 	// PR-F7.2: mid-stream block counter. Inspector велел прервать
 	// stream; alerting signal — сколько stream'ов было заблокировано
 	// каким inspector'ом. Cardinality: ≤ 7 providers × ≤ 6
@@ -290,6 +310,21 @@ func RecordStreamingDecoderFatal(provider string) {
 // вернул ActionBlock на delta, stream прерван.
 func RecordStreamingMidstreamBlock(provider, inspector string) {
 	StreamingMidstreamBlockTotal.WithLabelValues(provider, inspector).Inc()
+}
+
+// RecordStreamingShadowCompare — shadow compare outcome ("match"/"mismatch").
+func RecordStreamingShadowCompare(provider, result string) {
+	StreamingShadowCompareTotal.WithLabelValues(result).Inc()
+}
+
+// RecordStreamingShadowMismatch — детальный breakdown мисматча.
+func RecordStreamingShadowMismatch(provider, kind string) {
+	StreamingShadowMismatchTotal.WithLabelValues(kind, provider).Inc()
+}
+
+// RecordStreamingShadowFallback — incremental бы упал в fallback в shadow mode.
+func RecordStreamingShadowFallback(provider, reason string) {
+	StreamingShadowFallbackTotal.WithLabelValues(reason, provider).Inc()
 }
 
 // RecordStreamingFallback — incremental path downgraded в buffered.

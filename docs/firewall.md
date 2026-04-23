@@ -533,6 +533,105 @@ type PatternRule struct {
 
 ---
 
+## 11. Streaming Mode
+
+Поведение LLM Firewall в streaming-запросах (`"stream": true`)
+определяется env var `STREAMING_MODE`.
+
+### 11.1 Режимы
+
+| Режим         | Поведение                                                              |
+|---------------|------------------------------------------------------------------------|
+| `buffered`    | **Default.** Полная буферизация upstream response, затем inspection, затем emit. Сильная safety (never-leak), но клиент видит задержку = полное время генерации. |
+| `incremental` | Emit в real-time; response-side inspection на sliding window (8 KiB) через каждый `delta_text` event. Требует `STREAMING_ALLOW_INCREMENTAL_IN_PROD=true` в prod (§11.5). |
+| `shadow`      | Клиент получает buffered truth; incremental pipeline прогоняется in-memory (sequential, не goroutine) на тех же байтах. Расхождения → metrics. Рекомендован как первый шаг rollout (§11.7). |
+
+### 11.2 Supported providers (tier-1, PR-F7.1)
+
+| Provider                          | Format | Adapter                    |
+|-----------------------------------|--------|----------------------------|
+| OpenAI                            | SSE    | adapter_openai_compat.go   |
+| Groq / Mistral / OpenRouter       | SSE    | shared openai-compat alias |
+| Anthropic                         | SSE    | adapter_anthropic.go       |
+| Gemini                            | SSE    | adapter_gemini.go          |
+| Ollama                            | NDJSON | adapter_ollama.go          |
+
+Unsupported provider → `buffered_fallback`:
+metric `streaming_fallback_total{reason="unsupported_provider",provider}`.
+
+### 11.3 CM+judge → обязательный buffered_fallback (RFC §12.6)
+
+Если `ContentModerationInspector` сконфигурирован с
+`judge.Enabled=true`, deployment не поддерживает incremental inspection
+(judge call = отдельный LLM round-trip, вызываемый на каждом chunk'е →
+латентность × N chunks + recursion risk). Весь stream идёт через
+buffered path независимо от `STREAMING_MODE`.
+
+Диагностика:
+- Metric: `streaming_fallback_total{reason="judge_inspector",provider=...}`
+- Audit: `outcome=stream_buffered_fallback`, `fallback_reason=judge_inspector`
+
+### 11.4 Audit fields (streaming-only)
+
+| Поле              | Семантика                                                               |
+|-------------------|-------------------------------------------------------------------------|
+| `outcome`         | Transport-level итог stream'а. Словарь: stream_completed / stream_flagged / stream_blocked / stream_blocked_midflight / stream_buffered_fallback / stream_transport_error / stream_usage_parse_failed / stream_budget_exceeded_soft. Пусто = non-streaming. |
+| `fallback_reason` | Почему incremental не применён (`judge_inspector` / `unsupported_provider`). Пусто = нет fallback. |
+| `usage_source`    | Origin accounting: `final` = provider прислал полный usage; `partial` = interrupted stream + intermediate usage known; `none` = usage absent. Пусто = non-streaming. |
+
+Note: `policy_action` отвечает на вопрос "какой policy/security verdict был принят" (allowed/blocked/flagged/sanitized) — это не изменилось. `outcome` отвечает на вопрос "как завершился stream transport".
+
+### 11.5 Prod gate (STREAMING_ALLOW_INCREMENTAL_IN_PROD)
+
+`STREAMING_MODE=incremental` в `APP_ENV=production` требует
+`STREAMING_ALLOW_INCREMENTAL_IN_PROD=true`. Это explicit acknowledgement:
+
+1. Heuristic-based response inspector'ы работают (PII, DLP, OutputValidation,
+   ContentModeration без judge). CM+judge → buffered_fallback (§11.3).
+2. Post-call budget check — soft-record: клиент получает body даже
+   при budget exceed; audit: `outcome=stream_budget_exceeded_soft`.
+   Buffered path вернул бы 402 без body.
+
+Prod gate удаляется только по commit criterion из RFC §13.4.
+
+### 11.6 usage_source=partial
+
+`partial` означает: stream был прерван (block / transport-error) но
+provider уже прислал usable intermediate usage → accounting known.
+
+Сценарии по провайдерам:
+
+- **Anthropic**: `message_delta` с `output_tokens` получен, но `message_stop`
+  отсутствует → `Partial=true` в parser. Usage billable.
+- **Gemini**: `usageMetadata` из intermediate frame, ни у одного
+  candidate нет `finishReason` → `Partial=true`. Usage billable.
+- **OpenAI**: usage только в явном финальном usage frame. Interrupted
+  stream → `none`. Нормальный stream → `final`.
+
+Accounting policy: `usage_source=partial` → RecordUsage вызывается
+(best-effort billable). Оператор наблюдает через audit `usage_source`
+при неожиданно высоком billing rate в сценариях с mid-stream blocks.
+
+### 11.7 Shadow mode rollout (рекомендованная последовательность)
+
+1. **Настройте shadow**: `STREAMING_MODE=shadow` (без
+   `STREAMING_ALLOW_INCREMENTAL_IN_PROD`). Buffered-truth активна,
+   shadow compare наблюдает.
+2. **Мониторинг** (≥ 7 дней):
+   - `shadowai_streaming_shadow_mismatch_total` → должен быть 0.
+   - `shadowai_streaming_shadow_compare_total{result="match"}` → ~100%.
+   - `shadowai_streaming_shadow_fallback_total` → объясняет fallback rate.
+3. **Включите incremental**: `STREAMING_MODE=incremental` +
+   `STREAMING_ALLOW_INCREMENTAL_IN_PROD=true`.
+4. **Мониторинг incremental** (первые 24h):
+   - `shadowai_streaming_fallback_total{reason}`.
+   - `shadowai_streaming_midstream_block_total{provider,inspector}`.
+   - `shadowai_streaming_emit_fail_total{provider}`.
+5. **Stage 2** (PR-F7.5+): zero-fallback на tier-1 providers в течение
+   ≥ 30 дней → prod gate пересматривается.
+
+---
+
 ## LLM-as-Judge
 
 ### Поддерживаемые провайдеры

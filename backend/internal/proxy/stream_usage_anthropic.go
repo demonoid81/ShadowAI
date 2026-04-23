@@ -24,11 +24,16 @@ import (
 //   - Неизвестные event types игнорируются.
 func parseAnthropicStreamUsage(body []byte, requestModel string) (StreamUsage, error) {
 	var (
-		promptTokens    int
+		promptTokens     int
 		completionTokens int
-		respModel       string
-		haveInput       bool
-		haveOutput      bool
+		respModel        string
+		haveInput        bool
+		haveOutput       bool
+		// PR-F7.4: отслеживаем message_stop, чтобы установить Partial=true
+		// для interrupted stream'ов. Если message_delta seen (haveOutput)
+		// но message_stop NOT seen → stream завершился до финального
+		// терминирующего сигнала → Partial=true.
+		sawMessageStop bool
 	)
 
 	err := walkSSE(body, func(e sseEvent) error {
@@ -71,8 +76,12 @@ func parseAnthropicStreamUsage(body []byte, requestModel string) (StreamUsage, e
 					haveOutput = true
 				}
 			}
+		case "message_stop":
+			// PR-F7.4: финальный терминирующий сигнал Anthropic stream'а.
+			// Presence означает stream завершился нормально — usage НЕ partial.
+			sawMessageStop = true
 		case "ping", "content_block_start", "content_block_delta",
-			"content_block_stop", "message_stop":
+			"content_block_stop":
 			// Игнорируем — usage-данных не несут.
 		default:
 			// Unknown event type — не ошибка (forward compat с новыми типами событий).
@@ -96,6 +105,11 @@ func parseAnthropicStreamUsage(body []byte, requestModel string) (StreamUsage, e
 	cost := calculateProviderCost(anthropicPricing, anthropicFallbackPricing,
 		pricingModel, promptTokens, completionTokens)
 
+	// PR-F7.4: Partial=true если usage известен, но message_stop не получен.
+	// Типичный сценарий: mid-stream block после message_delta — handler уже
+	// имеет output_tokens, но провайдер не успел прислать message_stop.
+	partial := !sawMessageStop
+
 	return StreamUsage{
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
@@ -103,6 +117,7 @@ func parseAnthropicStreamUsage(body []byte, requestModel string) (StreamUsage, e
 		CostUSD:          cost,
 		Model:            respModel,
 		Found:            true,
+		Partial:          partial,
 	}, nil
 }
 

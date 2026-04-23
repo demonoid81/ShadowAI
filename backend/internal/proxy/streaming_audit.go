@@ -92,14 +92,32 @@ const (
 	UsageSourcePartial = "partial"
 )
 
-// classifyUsageSource — F7.3 implementation. Различает только
-// final vs none. Partial — reserved, см. const above.
-func classifyUsageSource(found bool, parseErr error) string {
+// classifyUsageSource — PR-F7.4: определяет origin accounting data.
+// Учитывает StreamUsage.Partial (PR-F7.4) и outcome-контекст.
+//
+// Правила (от высшего приоритета к низшему):
+//   1. parseErr != nil → none (parser упал, данным доверять нельзя).
+//   2. !u.Found → none (usage не был извлечён).
+//   3. streamNormallyCompleted (outcome=stream_completed):
+//      → final, даже если парсер видел только промежуточные events.
+//      Нормально завершённый stream не может быть partial.
+//   4. u.Partial == true (stream прерван до финального терминатора):
+//      → partial (PR-F7.4). Означает "provider прислал usable
+//      intermediate usage до прерывания".
+//   5. u.Found && !u.Partial → final (interrupted stream, но parser
+//      успел получить явный final chunk до прерывания).
+func classifyUsageSource(u StreamUsage, parseErr error, streamNormallyCompleted bool) string {
 	if parseErr != nil {
 		return UsageSourceNone
 	}
-	if !found {
+	if !u.Found {
 		return UsageSourceNone
+	}
+	if streamNormallyCompleted {
+		return UsageSourceFinal
+	}
+	if u.Partial {
+		return UsageSourcePartial
 	}
 	return UsageSourceFinal
 }
