@@ -60,6 +60,14 @@ type geminiUsage struct {
 }
 
 type geminiStreamChunk struct {
+	Candidates []struct {
+		// FinishReason — присутствует в финальном Gemini chunk'е когда
+		// candidate закончил генерацию (STOP, MAX_TOKENS, SAFETY и т.п.).
+		// PR-F7.4: используется для отслеживания partial-статуса: если
+		// stream обрезан до появления любого candidate с FinishReason,
+		// usage считается partial.
+		FinishReason string `json:"finishReason,omitempty"`
+	} `json:"candidates,omitempty"`
 	UsageMetadata *geminiUsage `json:"usageMetadata,omitempty"`
 	ModelVersion  string       `json:"modelVersion,omitempty"`
 }

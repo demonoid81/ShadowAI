@@ -10,10 +10,20 @@ import (
 )
 
 // memRepo — in-memory Repository для service-tests.
+//
+// PR-L2.3: обновлён под 4-eyes workflow.
+//   - Create ставит Status=pending, IsActive=false.
+//   - Approve: pending → active, проверка approver != creator.
+//   - Reject: pending → released.
+//   - Release: active → released.
+//   - HasActiveHold/ActiveUserIDs проверяют ИМЕННО Status=active
+//     (pending не блокирует DSAR / не защищает от purge).
+//   - "Blocking hold" для уникальности = pending OR active
+//     (partial-unique index в миграции 015).
 type memRepo struct {
 	holds   []Hold
 	nextID  int
-	failOn  string // "create"/"release"/"list"/"has" — искусственная ошибка
+	failOn  string // "create"/"release"/"list"/"has"/"active"/"approve"/"reject"
 	failErr error
 }
 
@@ -21,17 +31,73 @@ func (m *memRepo) Create(_ context.Context, h *Hold) (*Hold, error) {
 	if m.failOn == "create" {
 		return nil, m.failErr
 	}
+	// Blocking check: один pending ИЛИ active per user (матчит
+	// partial-unique index idx_legal_holds_blocking_per_user).
 	for _, ex := range m.holds {
-		if ex.TargetUserID == h.TargetUserID && ex.IsActive {
+		if ex.TargetUserID == h.TargetUserID &&
+			(ex.Status == StatusPending || ex.Status == StatusActive) {
 			return nil, ErrAlreadyActive
 		}
 	}
 	m.nextID++
 	h.ID = "h-" + itoa(m.nextID)
 	h.CreatedAt = time.Now().UTC()
-	h.IsActive = true
+	h.Status = StatusPending
+	h.IsActive = false
 	m.holds = append(m.holds, *h)
 	return h, nil
+}
+
+func (m *memRepo) Approve(_ context.Context, id, approverID string) (*Hold, error) {
+	if m.failOn == "approve" {
+		return nil, m.failErr
+	}
+	for i := range m.holds {
+		if m.holds[i].ID != id {
+			continue
+		}
+		if m.holds[i].Status != StatusPending {
+			return nil, ErrNotPending
+		}
+		// 4-eyes policy: approver != creator.
+		if m.holds[i].CreatedBy != nil && *m.holds[i].CreatedBy == approverID {
+			return nil, ErrSelfApproval
+		}
+		now := time.Now().UTC()
+		m.holds[i].Status = StatusActive
+		m.holds[i].IsActive = true
+		m.holds[i].ApprovedAt = &now
+		ap := approverID
+		m.holds[i].ApprovedBy = &ap
+		h := m.holds[i]
+		return &h, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memRepo) Reject(_ context.Context, id, rejectorID string) (*Hold, error) {
+	if m.failOn == "reject" {
+		return nil, m.failErr
+	}
+	for i := range m.holds {
+		if m.holds[i].ID != id {
+			continue
+		}
+		if m.holds[i].Status != StatusPending {
+			return nil, ErrNotPending
+		}
+		now := time.Now().UTC()
+		m.holds[i].Status = StatusReleased
+		m.holds[i].IsActive = false
+		m.holds[i].ReleasedAt = &now
+		if rejectorID != "" {
+			s := rejectorID
+			m.holds[i].ReleasedBy = &s
+		}
+		h := m.holds[i]
+		return &h, nil
+	}
+	return nil, ErrNotFound
 }
 
 func (m *memRepo) Release(_ context.Context, id, releasedBy string) (*Hold, error) {
@@ -40,10 +106,19 @@ func (m *memRepo) Release(_ context.Context, id, releasedBy string) (*Hold, erro
 	}
 	for i := range m.holds {
 		if m.holds[i].ID == id {
-			if !m.holds[i].IsActive {
+			switch m.holds[i].Status {
+			case StatusPending:
+				// PR-L2.3: pending нельзя release — только reject.
+				return nil, ErrPendingNotReleasable
+			case StatusReleased:
+				return nil, ErrNotActive
+			case StatusActive:
+				// ok, proceed below
+			default:
 				return nil, ErrNotActive
 			}
 			now := time.Now().UTC()
+			m.holds[i].Status = StatusReleased
 			m.holds[i].IsActive = false
 			m.holds[i].ReleasedAt = &now
 			if releasedBy != "" {
@@ -62,7 +137,7 @@ func (m *memRepo) HasActiveHold(_ context.Context, userID string) (bool, error) 
 		return false, m.failErr
 	}
 	for _, h := range m.holds {
-		if h.TargetUserID == userID && h.IsActive {
+		if h.TargetUserID == userID && h.Status == StatusActive {
 			return true, nil
 		}
 	}
@@ -73,7 +148,6 @@ func (m *memRepo) List(_ context.Context) ([]Hold, error) {
 	if m.failOn == "list" {
 		return nil, m.failErr
 	}
-	// Copy для изоляции.
 	out := make([]Hold, len(m.holds))
 	copy(out, m.holds)
 	return out, nil
@@ -85,7 +159,7 @@ func (m *memRepo) ActiveUserIDs(_ context.Context) ([]string, error) {
 	}
 	var ids []string
 	for _, h := range m.holds {
-		if h.IsActive {
+		if h.Status == StatusActive {
 			ids = append(ids, h.TargetUserID)
 		}
 	}
@@ -106,22 +180,50 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-// TestCreateHold_Happy — базовый flow.
-func TestCreateHold_Happy(t *testing.T) {
+// approveAs — helper для тестов: создать + approve другим admin'ом.
+// Позволяет писать сценарии "hold is active" компактно.
+func approveAs(t *testing.T, s *Service, h *Hold, approver string) *Hold {
+	t.Helper()
+	approved, err := s.Approve(context.Background(), h.ID, approver)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	return approved
+}
+
+// TestCreateHold_CreatesPending — PR-L2.3: create возвращает
+// pending, НЕ active. Hold ещё не блокирует DSAR / не защищает
+// от purge.
+func TestCreateHold_CreatesPending(t *testing.T) {
 	s := NewService(&memRepo{})
 	h, err := s.CreateHold(context.Background(), "u-1", "case-42", "litigation XYZ", "u-admin")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if h.TargetUserID != "u-1" || h.CaseRef != "case-42" || !h.IsActive {
+	if h.Status != StatusPending {
+		t.Errorf("status = %q, want pending", h.Status)
+	}
+	if h.IsActive {
+		t.Error("IsActive=true на fresh create; expected false (pending)")
+	}
+	if h.TargetUserID != "u-1" || h.CaseRef != "case-42" {
 		t.Errorf("hold shape: %+v", h)
 	}
 	if h.CreatedBy == nil || *h.CreatedBy != "u-admin" {
 		t.Errorf("created_by = %v", h.CreatedBy)
 	}
+
+	// pending hold НЕ должен блокировать DSAR / purge:
+	has, err := s.HasActiveHold(context.Background(), "u-1")
+	if err != nil {
+		t.Fatalf("HasActiveHold err: %v", err)
+	}
+	if has {
+		t.Error("pending hold блокирует DSAR — это нарушает L2.3 semantics")
+	}
 }
 
-// TestCreateHold_MissingFields — case_ref/reason обязательны.
+// TestCreateHold_MissingFields — case_ref/reason/user обязательны.
 func TestCreateHold_MissingFields(t *testing.T) {
 	s := NewService(&memRepo{})
 	cases := []struct{ user, cref, reason string }{
@@ -137,22 +239,35 @@ func TestCreateHold_MissingFields(t *testing.T) {
 	}
 }
 
-// TestCreateHold_DuplicateActive — second active hold на того же
-// user'а → ErrAlreadyActive.
-func TestCreateHold_DuplicateActive(t *testing.T) {
+// TestCreateHold_DuplicateBlocking — второй hold на того же user'а
+// (в pending ИЛИ active) → ErrAlreadyActive. Под L2.3 index покрывает
+// оба статуса, чтобы admin не мог создать второй pending поверх
+// существующего.
+func TestCreateHold_DuplicateBlocking(t *testing.T) {
 	s := NewService(&memRepo{})
+	// Сначала pending vs pending.
 	_, _ = s.CreateHold(context.Background(), "u-1", "case-1", "reason", "u-admin")
 	_, err := s.CreateHold(context.Background(), "u-1", "case-2", "reason", "u-admin")
 	if !IsAlreadyActive(err) {
-		t.Errorf("err = %v, want ErrAlreadyActive", err)
+		t.Errorf("pending+pending: err = %v, want ErrAlreadyActive", err)
+	}
+
+	// Теперь active vs pending: approve'нутый hold тоже блокирует.
+	s2 := NewService(&memRepo{})
+	h1, _ := s2.CreateHold(context.Background(), "u-2", "case-1", "reason", "u-admin")
+	_ = approveAs(t, s2, h1, "u-approver")
+	_, err = s2.CreateHold(context.Background(), "u-2", "case-2", "reason", "u-admin")
+	if !IsAlreadyActive(err) {
+		t.Errorf("active+pending: err = %v, want ErrAlreadyActive", err)
 	}
 }
 
-// TestCreateHold_AllowsAfterRelease — released hold не блокирует
-// новый apply.
-func TestCreateHold_AllowsAfterRelease(t *testing.T) {
+// TestCreateHold_AllowsAfterReleased — released hold не блокирует
+// новый apply (ни pending, ни subsequent approve).
+func TestCreateHold_AllowsAfterReleased(t *testing.T) {
 	s := NewService(&memRepo{})
 	h1, _ := s.CreateHold(context.Background(), "u-1", "case-1", "r1", "u-admin")
+	_ = approveAs(t, s, h1, "u-approver")
 	if _, err := s.ReleaseHold(context.Background(), h1.ID, "u-admin"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
@@ -160,29 +275,187 @@ func TestCreateHold_AllowsAfterRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second create after release: %v", err)
 	}
-	if !h2.IsActive {
-		t.Error("second hold not active")
+	if h2.Status != StatusPending {
+		t.Errorf("second hold status = %q, want pending", h2.Status)
 	}
 }
 
-// TestReleaseHold_Happy — release flow, second release → ErrNotActive.
-func TestReleaseHold_Happy(t *testing.T) {
+// TestCreateHold_AllowsAfterRejected — отклонённый pending hold
+// тоже освобождает user'а для нового apply.
+func TestCreateHold_AllowsAfterRejected(t *testing.T) {
+	s := NewService(&memRepo{})
+	h1, _ := s.CreateHold(context.Background(), "u-1", "case-1", "r1", "u-admin")
+	if _, err := s.Reject(context.Background(), h1.ID, "u-admin"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if _, err := s.CreateHold(context.Background(), "u-1", "case-2", "r2", "u-admin"); err != nil {
+		t.Fatalf("create after reject: %v", err)
+	}
+}
+
+// TestApprove_Happy — pending → active, подставляются approved_at/by.
+func TestApprove_Happy(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-creator")
+
+	approved, err := s.Approve(context.Background(), h.ID, "u-approver")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if approved.Status != StatusActive {
+		t.Errorf("status = %q, want active", approved.Status)
+	}
+	if !approved.IsActive {
+		t.Error("IsActive=false after approve")
+	}
+	if approved.ApprovedAt == nil {
+		t.Error("approved_at not set")
+	}
+	if approved.ApprovedBy == nil || *approved.ApprovedBy != "u-approver" {
+		t.Errorf("approved_by = %v, want u-approver", approved.ApprovedBy)
+	}
+
+	// После approve hold блокирует DSAR.
+	has, err := s.HasActiveHold(context.Background(), "u-1")
+	if err != nil {
+		t.Fatalf("HasActiveHold: %v", err)
+	}
+	if !has {
+		t.Error("approved hold не блокирует DSAR — contract нарушен")
+	}
+}
+
+// TestApprove_SelfApproval_Blocked — 4-eyes policy: approver ==
+// creator → ErrSelfApproval.
+func TestApprove_SelfApproval_Blocked(t *testing.T) {
 	s := NewService(&memRepo{})
 	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-admin")
 
-	released, err := s.ReleaseHold(context.Background(), h.ID, "u-admin")
+	_, err := s.Approve(context.Background(), h.ID, "u-admin")
+	if !IsSelfApproval(err) {
+		t.Errorf("err = %v, want ErrSelfApproval", err)
+	}
+
+	// Hold остаётся pending.
+	list, _ := s.List(context.Background())
+	if list[0].Status != StatusPending {
+		t.Errorf("status = %q after failed self-approval, want pending", list[0].Status)
+	}
+}
+
+// TestApprove_NotPending — approve на active → ErrNotPending.
+func TestApprove_NotPending(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-creator")
+	_ = approveAs(t, s, h, "u-approver1")
+
+	// Второй approve (even by another admin) → not pending.
+	_, err := s.Approve(context.Background(), h.ID, "u-approver2")
+	if !IsNotPending(err) {
+		t.Errorf("err = %v, want ErrNotPending", err)
+	}
+}
+
+// TestApprove_NotFound.
+func TestApprove_NotFound(t *testing.T) {
+	s := NewService(&memRepo{})
+	_, err := s.Approve(context.Background(), "h-missing", "u-approver")
+	if !IsNotFound(err) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestApprove_Validation — пустой id/approver → validation.
+func TestApprove_Validation(t *testing.T) {
+	s := NewService(&memRepo{})
+	if _, err := s.Approve(context.Background(), "", "u-approver"); !IsValidation(err) {
+		t.Errorf("empty id: err = %v, want validation", err)
+	}
+	if _, err := s.Approve(context.Background(), "h-1", ""); !IsValidation(err) {
+		t.Errorf("empty approver: err = %v, want validation", err)
+	}
+}
+
+// TestReject_Happy — pending → released, ReleasedBy = rejector.
+func TestReject_Happy(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-admin")
+
+	rejected, err := s.Reject(context.Background(), h.ID, "u-admin")
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if rejected.Status != StatusReleased {
+		t.Errorf("status = %q, want released", rejected.Status)
+	}
+	if rejected.IsActive {
+		t.Error("IsActive=true after reject")
+	}
+	if rejected.ReleasedAt == nil {
+		t.Error("released_at not set")
+	}
+}
+
+// TestReject_NotPending — reject на active → ErrNotPending (releases
+// должны идти через Release, а не Reject).
+func TestReject_NotPending(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-creator")
+	_ = approveAs(t, s, h, "u-approver")
+
+	_, err := s.Reject(context.Background(), h.ID, "u-admin")
+	if !IsNotPending(err) {
+		t.Errorf("err = %v, want ErrNotPending", err)
+	}
+}
+
+// TestReject_AllowsSelfRejection — rejector может быть = creator
+// (это cancellation собственного request'а, НЕ approval).
+func TestReject_AllowsSelfRejection(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-admin")
+	if _, err := s.Reject(context.Background(), h.ID, "u-admin"); err != nil {
+		t.Fatalf("self-reject should be allowed: %v", err)
+	}
+}
+
+// TestReleaseHold_PendingUseReject — PR-L2.3 regression guard:
+// Release на pending возвращает ErrPendingNotReleasable (distinct
+// from ErrNotActive), чтобы handler мог вернуть 409 вместо ошибочного
+// 200 already_released. Operator должен использовать /reject для
+// отмены pending.
+func TestReleaseHold_PendingUseReject(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-admin")
+
+	_, err := s.ReleaseHold(context.Background(), h.ID, "u-admin")
+	if !IsPendingNotReleasable(err) {
+		t.Errorf("release(pending): err = %v, want ErrPendingNotReleasable", err)
+	}
+	// Критично: НЕ должен collapse'ить в ErrNotActive (иначе
+	// handler трактует как идемпотентный 200 already_released).
+	if IsNotActive(err) {
+		t.Error("pending release collapsed в ErrNotActive — handler ложно вернёт 200")
+	}
+}
+
+// TestReleaseHold_AfterApprove — полный flow: create → approve →
+// release.
+func TestReleaseHold_AfterApprove(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-creator")
+	_ = approveAs(t, s, h, "u-approver")
+
+	released, err := s.ReleaseHold(context.Background(), h.ID, "u-releaser")
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if released.IsActive {
-		t.Error("hold still active after release")
-	}
-	if released.ReleasedAt == nil {
-		t.Error("released_at not set")
+	if released.Status != StatusReleased {
+		t.Errorf("status = %q, want released", released.Status)
 	}
 
 	// Idempotent: second release → ErrNotActive.
-	if _, err := s.ReleaseHold(context.Background(), h.ID, "u-admin"); !IsNotActive(err) {
+	if _, err := s.ReleaseHold(context.Background(), h.ID, "u-releaser"); !IsNotActive(err) {
 		t.Errorf("second release err = %v, want ErrNotActive", err)
 	}
 }
@@ -196,29 +469,38 @@ func TestReleaseHold_NotFound(t *testing.T) {
 	}
 }
 
-// TestHasActiveHold_ActiveAndReleased — активный hold возвращает true;
-// released — false.
-func TestHasActiveHold_ActiveAndReleased(t *testing.T) {
+// TestHasActiveHold_LifecyclePendingActiveReleased — PR-L2.3: только
+// active блокирует. Pending и released — не блокируют.
+func TestHasActiveHold_LifecyclePendingActiveReleased(t *testing.T) {
 	s := NewService(&memRepo{})
-	has, _ := s.HasActiveHold(context.Background(), "u-1")
-	if has {
+	ctx := context.Background()
+
+	// Fresh user — нет hold.
+	if has, _ := s.HasActiveHold(ctx, "u-1"); has {
 		t.Error("fresh user: expected no hold")
 	}
-	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-admin")
-	has, _ = s.HasActiveHold(context.Background(), "u-1")
-	if !has {
-		t.Error("expected active hold after create")
+
+	// Create pending — НЕ должен блокировать.
+	h, _ := s.CreateHold(ctx, "u-1", "case", "r", "u-creator")
+	if has, _ := s.HasActiveHold(ctx, "u-1"); has {
+		t.Error("pending hold блокирует DSAR — contract нарушен")
 	}
-	_, _ = s.ReleaseHold(context.Background(), h.ID, "u-admin")
-	has, _ = s.HasActiveHold(context.Background(), "u-1")
-	if has {
-		t.Error("released hold should not block")
+
+	// Approve — теперь блокирует.
+	_ = approveAs(t, s, h, "u-approver")
+	if has, _ := s.HasActiveHold(ctx, "u-1"); !has {
+		t.Error("active hold должен блокировать, but doesn't")
+	}
+
+	// Release — больше не блокирует.
+	_, _ = s.ReleaseHold(ctx, h.ID, "u-admin")
+	if has, _ := s.HasActiveHold(ctx, "u-1"); has {
+		t.Error("released hold всё ещё блокирует")
 	}
 }
 
-// TestHasActiveHold_RepoError_FailClosed — repo возвращает error.
-// Service НЕ маскирует её; caller (ErasureService) должен обрабатывать
-// как fail-closed.
+// TestHasActiveHold_RepoError — repo error prop'ается, caller
+// (ErasureService) интерпретирует как fail-closed.
 func TestHasActiveHold_RepoError(t *testing.T) {
 	boom := errors.New("db down")
 	s := NewService(&memRepo{failOn: "has", failErr: boom})
@@ -229,7 +511,6 @@ func TestHasActiveHold_RepoError(t *testing.T) {
 }
 
 // TestHasActiveHold_NilService_FailClosed — nil Service → (true, err).
-// Защищает ErasureService от случайного wire с nil checker'ом.
 func TestHasActiveHold_NilService_FailClosed(t *testing.T) {
 	var s *Service
 	has, err := s.HasActiveHold(context.Background(), "u-1")
@@ -241,35 +522,42 @@ func TestHasActiveHold_NilService_FailClosed(t *testing.T) {
 	}
 }
 
-// TestActiveUserIDs_HappyPath — PR-L2: scheduler получает только
-// active-hold target_user_ids.
-func TestActiveUserIDs_HappyPath(t *testing.T) {
+// TestActiveUserIDs_OnlyActive — scheduler получает только
+// active-hold target_user_ids; pending исключены.
+func TestActiveUserIDs_OnlyActive(t *testing.T) {
 	s := NewService(&memRepo{})
 	ctx := context.Background()
-	h1, _ := s.CreateHold(ctx, "u-active-1", "c1", "r", "u-admin")
-	_, _ = s.CreateHold(ctx, "u-active-2", "c2", "r", "u-admin")
-	h3, _ := s.CreateHold(ctx, "u-released", "c3", "r", "u-admin")
-	_ = h1
-	// Release third hold.
+	h1, _ := s.CreateHold(ctx, "u-active", "c1", "r", "u-creator")
+	_ = approveAs(t, s, h1, "u-approver")
+	// Pending hold (НЕ должен попасть в ActiveUserIDs).
+	_, _ = s.CreateHold(ctx, "u-pending", "c2", "r", "u-creator")
+	// Released hold (НЕ должен).
+	h3, _ := s.CreateHold(ctx, "u-released", "c3", "r", "u-creator")
+	_ = approveAs(t, s, h3, "u-approver")
 	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin")
+	// Rejected hold (НЕ должен).
+	h4, _ := s.CreateHold(ctx, "u-rejected", "c4", "r", "u-creator")
+	_, _ = s.Reject(ctx, h4.ID, "u-admin")
 
 	ids, err := s.ActiveUserIDs(ctx)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	// 2 active, released исключён.
-	if len(ids) != 2 {
-		t.Errorf("ids = %v, want 2 active", ids)
-	}
 	set := map[string]bool{}
 	for _, id := range ids {
 		set[id] = true
 	}
-	if !set["u-active-1"] || !set["u-active-2"] {
-		t.Errorf("expected u-active-1 and u-active-2 in %v", ids)
+	if !set["u-active"] {
+		t.Errorf("expected u-active in %v", ids)
+	}
+	if set["u-pending"] {
+		t.Error("pending leaked в ActiveUserIDs — защитный invariant нарушен")
 	}
 	if set["u-released"] {
-		t.Error("released hold's user_id leaked в active list")
+		t.Error("released leaked в ActiveUserIDs")
+	}
+	if set["u-rejected"] {
+		t.Error("rejected leaked в ActiveUserIDs")
 	}
 }
 
@@ -285,9 +573,7 @@ func TestActiveUserIDs_Empty(t *testing.T) {
 	}
 }
 
-// TestActiveUserIDs_NilService_FailClosed — fail-closed для
-// scheduler: если service не сконфигурирован, scheduler не
-// должен делать unrestricted purge.
+// TestActiveUserIDs_NilService_FailClosed.
 func TestActiveUserIDs_NilService_FailClosed(t *testing.T) {
 	var s *Service
 	_, err := s.ActiveUserIDs(context.Background())
@@ -296,31 +582,51 @@ func TestActiveUserIDs_NilService_FailClosed(t *testing.T) {
 	}
 }
 
-// TestList_Ordering — active first, released после. Пока repo
-// сохраняет insertion order, проверяем что List возвращает всё
-// и IsActive flag корректен.
-func TestList_IncludesAll(t *testing.T) {
+// TestList_AllStatusesVisible — List возвращает pending+active+released.
+func TestList_AllStatusesVisible(t *testing.T) {
 	s := NewService(&memRepo{})
-	h1, _ := s.CreateHold(context.Background(), "u-1", "c1", "r", "u-admin")
-	_, _ = s.CreateHold(context.Background(), "u-2", "c2", "r", "u-admin")
-	_, _ = s.ReleaseHold(context.Background(), h1.ID, "u-admin")
+	ctx := context.Background()
+	h1, _ := s.CreateHold(ctx, "u-1", "c1", "r", "u-creator")
+	_ = approveAs(t, s, h1, "u-approver")
+	_, _ = s.CreateHold(ctx, "u-2", "c2", "r", "u-creator") // pending
+	h3, _ := s.CreateHold(ctx, "u-3", "c3", "r", "u-creator")
+	_ = approveAs(t, s, h3, "u-approver")
+	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin")
 
-	list, err := s.List(context.Background())
+	list, err := s.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 2 {
-		t.Errorf("list len = %d, want 2", len(list))
+	if len(list) != 3 {
+		t.Errorf("list len = %d, want 3", len(list))
 	}
-	var activeSeen, releasedSeen bool
+	statusCount := map[Status]int{}
 	for _, h := range list {
-		if h.IsActive {
-			activeSeen = true
-		} else {
-			releasedSeen = true
-		}
+		statusCount[h.Status]++
 	}
-	if !activeSeen || !releasedSeen {
-		t.Errorf("expected both active and released in list, got active=%v released=%v", activeSeen, releasedSeen)
+	if statusCount[StatusActive] != 1 || statusCount[StatusPending] != 1 || statusCount[StatusReleased] != 1 {
+		t.Errorf("status distribution: %v, want 1/1/1", statusCount)
+	}
+}
+
+// TestService_NilRepo_AllMethods — защитный контракт: все методы
+// на nil Service возвращают ErrNotConfigured, не panic.
+func TestService_NilRepo_AllMethods(t *testing.T) {
+	var s *Service
+	ctx := context.Background()
+	if _, err := s.CreateHold(ctx, "u", "c", "r", "a"); !IsNotConfigured(err) {
+		t.Errorf("Create nil: %v", err)
+	}
+	if _, err := s.ReleaseHold(ctx, "id", "a"); !IsNotConfigured(err) {
+		t.Errorf("Release nil: %v", err)
+	}
+	if _, err := s.Approve(ctx, "id", "a"); !IsNotConfigured(err) {
+		t.Errorf("Approve nil: %v", err)
+	}
+	if _, err := s.Reject(ctx, "id", "a"); !IsNotConfigured(err) {
+		t.Errorf("Reject nil: %v", err)
+	}
+	if _, err := s.List(ctx); !IsNotConfigured(err) {
+		t.Errorf("List nil: %v", err)
 	}
 }

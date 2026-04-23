@@ -324,6 +324,75 @@ func TestConfigIsProduction(t *testing.T) {
 	}
 }
 
+// TestValidateStartupConfig_StreamingModeProdGuard — PR-F7.1 review
+// fix (#1): STREAMING_MODE=incremental в prod без opt-in'а
+// STREAMING_ALLOW_INCREMENTAL_IN_PROD=true должен ломать startup.
+// Обоснование: F7.1 incremental отключает response-side
+// firewall/DLP inspection и делает budget check soft-record —
+// operator обязан opt-in'ить осознанно.
+func TestValidateStartupConfig_StreamingModeProdGuard(t *testing.T) {
+	base := &Config{
+		AppEnv:                      "production",
+		DatabaseURL:                 "postgres://shadowai:shadowai_secret@db.internal:5432/shadowai?sslmode=require",
+		RedisURL:                    "redis://redis.internal:6379/0",
+		JWTSecret:                   "super-secret-key-for-production-12345",
+		AuditPayloadMode:            "redacted",
+		AuditRetentionDays:          30,
+		LegalHoldTokenSecret:        "super-secret-legal-hold-hmac-32!!!",
+	}
+
+	t.Run("incremental_without_override_rejected", func(t *testing.T) {
+		cfg := *base
+		cfg.StreamingMode = "incremental"
+		cfg.StreamingAllowIncrementalInProd = false
+		err := cfg.ValidateStartupConfig()
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "STREAMING_ALLOW_INCREMENTAL_IN_PROD") {
+			t.Errorf("error must name the required opt-in flag: %v", err)
+		}
+	})
+
+	t.Run("incremental_with_override_allowed", func(t *testing.T) {
+		cfg := *base
+		cfg.StreamingMode = "incremental"
+		cfg.StreamingAllowIncrementalInProd = true
+		if err := cfg.ValidateStartupConfig(); err != nil {
+			t.Fatalf("expected nil, got: %v", err)
+		}
+	})
+
+	t.Run("buffered_default_no_override_needed", func(t *testing.T) {
+		cfg := *base
+		cfg.StreamingMode = "buffered"
+		if err := cfg.ValidateStartupConfig(); err != nil {
+			t.Fatalf("buffered mode должен работать без override: %v", err)
+		}
+	})
+
+	t.Run("shadow_no_override_needed", func(t *testing.T) {
+		// shadow в F7.1 эквивалентен buffered — не требует opt-in'а.
+		cfg := *base
+		cfg.StreamingMode = "shadow"
+		if err := cfg.ValidateStartupConfig(); err != nil {
+			t.Fatalf("shadow mode должен работать без override: %v", err)
+		}
+	})
+
+	t.Run("invalid_enum_rejected", func(t *testing.T) {
+		cfg := *base
+		cfg.StreamingMode = "invalid-mode"
+		err := cfg.ValidateStartupConfig()
+		if err == nil {
+			t.Fatal("expected enum validation error")
+		}
+		if !strings.Contains(err.Error(), "STREAMING_MODE") {
+			t.Errorf("error must name STREAMING_MODE: %v", err)
+		}
+	})
+}
+
 func TestValidateStartupConfig_DevAllowsUnsafeDefaults(t *testing.T) {
 	cfg := &Config{
 		AppEnv:             "development",

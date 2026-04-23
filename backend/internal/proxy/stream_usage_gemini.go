@@ -24,8 +24,12 @@ import (
 //   - Malformed JSON → parser error (per StreamUsageProvider contract).
 func parseGeminiStreamUsage(body []byte, requestModel string) (StreamUsage, error) {
 	var (
-		lastUsage *geminiUsage
-		lastModel string
+		lastUsage      *geminiUsage
+		lastModel      string
+		// PR-F7.4: отслеживаем finishReason в любом candidate.
+		// Наличие finishReason = stream завершился нормально (STOP/
+		// MAX_TOKENS/SAFETY/etc) → usage NOT partial.
+		sawFinishReason bool
 	)
 
 	err := walkSSE(body, func(e sseEvent) error {
@@ -46,6 +50,11 @@ func parseGeminiStreamUsage(body []byte, requestModel string) (StreamUsage, erro
 		}
 		if chunk.ModelVersion != "" {
 			lastModel = chunk.ModelVersion
+		}
+		for _, c := range chunk.Candidates {
+			if c.FinishReason != "" {
+				sawFinishReason = true
+			}
 		}
 		return nil
 	})
@@ -72,6 +81,11 @@ func parseGeminiStreamUsage(body []byte, requestModel string) (StreamUsage, erro
 	cost := calculateProviderCost(geminiPricing, geminiFallbackPricing,
 		pricingModel, pt, ct)
 
+	// PR-F7.4: Partial=true если usageMetadata найдена, но ни у одного
+	// candidate не было finishReason. Типичный сценарий: Gemini шлёт
+	// usageMetadata в промежуточном frame, stream прерван до финального.
+	partial := !sawFinishReason
+
 	return StreamUsage{
 		PromptTokens:     pt,
 		CompletionTokens: ct,
@@ -79,6 +93,7 @@ func parseGeminiStreamUsage(body []byte, requestModel string) (StreamUsage, erro
 		CostUSD:          cost,
 		Model:            lastModel,
 		Found:            true,
+		Partial:          partial,
 	}, nil
 }
 

@@ -27,6 +27,19 @@ type StreamUsage struct {
 	// если провайдер не вернул model в stream.
 	Model string
 	Found bool
+	// Partial — PR-F7.4: parser видел usable usage из промежуточных
+	// (non-final) event'ов, но финальный терминирующий сигнал провайдера
+	// НЕ был получен.
+	//
+	// Для Anthropic: usage из message_delta seen, но message_stop absent.
+	// Для Gemini: usageMetadata из intermediate frame seen, но finishReason
+	// frame absent.
+	//
+	// Partial=true при Found=true означает "usage есть, но мы не дождались
+	// явного финального подтверждения провайдера". classifyUsageSource()
+	// переводит это в UsageSourcePartial только при interrupted stream
+	// (stream_completed → UsageSourceFinal всегда, даже при Partial=true).
+	Partial bool
 }
 
 // StreamUsageProvider — опциональный interface провайдера, умеющего

@@ -55,12 +55,17 @@ func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
 		shadowJSON = log.ShadowDecisionsJSON
 	}
 
+	// PR-F7.3: outcome/fallback_reason/usage_source добавляются к
+	// существующим 17 полям. Миграция 009 ставит их NOT NULL DEFAULT
+	// '' — empty string = "not applicable / non-streaming", что
+	// корректно для legacy non-streaming rows.
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
 		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
-		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs)
+		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
+		log.Outcome, log.FallbackReason, log.UsageSource)
 	return err
 }
 
@@ -99,8 +104,12 @@ func (r *Repository) List(ctx context.Context, limit, offset int, userID, model,
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM audit_logs WHERE %s", whereClause)
 	r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
 
+	// PR-F7.3: SELECT расширен на outcome/fallback_reason/usage_source.
+	// Миграция 009 гарантирует NOT NULL DEFAULT '' для них, так что
+	// sql.NullString wrapping не нужен — поля всегда возвращают
+	// string (возможно пустую).
 	query := fmt.Sprintf(`SELECT id, user_id, request_body, response_body, model, provider, endpoint, status_code,
-		prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, created_at
+		prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, created_at
 		FROM audit_logs WHERE %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, whereClause, argIdx, argIdx+1)
 	args = append(args, limit, offset)
 
@@ -125,7 +134,8 @@ func (r *Repository) List(ctx context.Context, limit, offset int, userID, model,
 		)
 		if err := rows.Scan(&l.ID, &userID, &requestBody, &respBody, &l.Model, &l.Provider, &l.Endpoint,
 			&l.StatusCode, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.CostUSD,
-			&l.PIIDetected, pq.Array(&l.PIITypes), &l.PolicyAction, &shadowJSON, &l.DurationMs, &l.CreatedAt); err != nil {
+			&l.PIIDetected, pq.Array(&l.PIITypes), &l.PolicyAction, &shadowJSON, &l.DurationMs,
+			&l.Outcome, &l.FallbackReason, &l.UsageSource, &l.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		if userID.Valid {

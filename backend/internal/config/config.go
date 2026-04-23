@@ -123,6 +123,47 @@ type Config struct {
 	FirewallEmbeddingAPIKey    string
 	FirewallEmbeddingDimension int
 	FirewallEmbeddingTimeout   time.Duration
+
+	// PR-F7.1 (streaming architecture, см. docs/rfcs/2026-04-pr-f7-*).
+	// StreamingMode: "buffered" | "incremental" | "shadow".
+	//   - buffered     — текущее поведение (full-buffer scan перед
+	//                    emit). Default, безопасный fallback.
+	//   - incremental  — F7.1 transport-only pass-through через
+	//                    streaming/* adapter layer (без новых
+	//                    security decisions — они придут в F7.2).
+	//   - shadow       — зарезервирован под F7.2+ shadow mode
+	//                    сравнения incremental vs buffered verdicts;
+	//                    в F7.1 эквивалентен buffered.
+	// Неизвестное значение → fallback "buffered" с startup warning
+	// (см. ValidateStartupConfig).
+	StreamingMode string
+
+	// PR-F7.1: explicit prod opt-in для STREAMING_MODE=incremental.
+	// F7.1 incremental mode имеет два известных compromise'а,
+	// которых нет в buffered:
+	//   1. response-side firewall / DLP / sanitize inspection
+	//      не выполняется (будет в F7.2);
+	//   2. post-call budget check становится soft-record-only:
+	//      audit помечает streaming_budget_exceeded_soft, но
+	//      клиент получает полный body (в buffered было бы 402
+	//      без body).
+	// Чтобы эти tradeoff'ы не включились молча в prod, требуется
+	// отдельный opt-in. По pattern с AUDIT_ALLOW_FULL_IN_PROD /
+	// AUDIT_ALLOW_NO_RETENTION_IN_PROD.
+	StreamingAllowIncrementalInProd bool
+}
+
+// NormalizeStreamingMode возвращает одно из "buffered"|"incremental"|
+// "shadow". Пустой/неизвестный input → "buffered" (безопасный default).
+// Используется handler-wiring слоем, чтобы prod-валидация (см.
+// ValidateStartupConfig) не дублировала mapping.
+func NormalizeStreamingMode(raw string) string {
+	switch raw {
+	case "incremental", "shadow":
+		return raw
+	default:
+		return "buffered"
+	}
 }
 
 func Load() *Config {
@@ -166,6 +207,10 @@ func Load() *Config {
 		ServerIdleTimeout:            idleTimeout,
 		ServerReadHeaderTimeout:      readHeaderTimeout,
 		ServerMaxHeaderBytes:         getEnvInt("SERVER_MAX_HEADER_BYTES", 1<<20),
+
+		// PR-F7.1: streaming transport mode.
+		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
+		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
 
 		// PR-A: audit privacy. Secure-by-default: redacted.
 		AuditPayloadMode:            getEnv("AUDIT_PAYLOAD_MODE", "redacted"),
@@ -266,6 +311,24 @@ func (c *Config) ValidateStartupConfig() error {
 	mode, err := audit.ParsePayloadMode(c.AuditPayloadMode)
 	if err == nil && mode == audit.PayloadModeFull && !c.AuditAllowFullInProd {
 		errs = append(errs, "AUDIT_PAYLOAD_MODE=full requires AUDIT_ALLOW_FULL_IN_PROD=true in prod")
+	}
+
+	// PR-F7.1: STREAMING_MODE должен быть известным enum-значением.
+	// Неизвестное значение в prod — явная ошибка (в dev
+	// NormalizeStreamingMode молча fallback'ит на buffered).
+	switch c.StreamingMode {
+	case "buffered", "incremental", "shadow", "":
+		// ok. Пустое значение = дефолт (buffered) уже применён в Load().
+	default:
+		errs = append(errs, fmt.Sprintf("STREAMING_MODE=%q invalid; must be buffered|incremental|shadow", c.StreamingMode))
+	}
+	// PR-F7.1 safety gate: incremental в prod требует explicit
+	// opt-in, потому что в F7.1 этот режим отключает response-side
+	// firewall/DLP inspection и конвертирует post-call budget check
+	// в soft-record (client получает full body даже при превышении).
+	// См. docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2.
+	if c.StreamingMode == "incremental" && !c.StreamingAllowIncrementalInProd {
+		errs = append(errs, "STREAMING_MODE=incremental requires STREAMING_ALLOW_INCREMENTAL_IN_PROD=true in prod (F7.1 incremental disables response-side firewall/DLP inspection and makes budget enforcement soft-record; see docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2)")
 	}
 	if c.AuditRetentionDays == 0 && !c.AuditAllowNoRetentionInProd {
 		errs = append(errs, "AUDIT_RETENTION_DAYS=0 requires AUDIT_ALLOW_NO_RETENTION_IN_PROD=true in prod")

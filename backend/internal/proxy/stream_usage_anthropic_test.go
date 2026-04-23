@@ -247,3 +247,48 @@ func TestParseAnthropicStreamUsage_UnknownEventIgnored(t *testing.T) {
 		t.Errorf("unknown event должен игнорироваться, got %d/%d", u.PromptTokens, u.CompletionTokens)
 	}
 }
+
+// TestParseAnthropicStreamUsage_Partial_InterruptedBeforeMessageStop — PR-F7.4:
+// message_delta received (output_tokens known) but message_stop absent.
+// Partial=true expected — stream was interrupted mid-flight.
+func TestParseAnthropicStreamUsage_Partial_InterruptedBeforeMessageStop(t *testing.T) {
+	body := []byte(
+		anthropicFrame("message_start", `{"type":"message_start","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":50,"output_tokens":0}}}`) +
+			anthropicFrame("content_block_delta", `{"type":"content_block_delta","delta":{"text":"Partial"}}`) +
+			anthropicFrame("message_delta", `{"type":"message_delta","usage":{"output_tokens":10}}`))
+	// No message_stop.
+
+	usage, err := parseAnthropicStreamUsage(body, "claude-3-5-sonnet")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !usage.Found {
+		t.Fatal("expected Found=true")
+	}
+	if !usage.Partial {
+		t.Error("Partial=false; expected true (no message_stop in stream)")
+	}
+	if usage.PromptTokens != 50 || usage.CompletionTokens != 10 {
+		t.Errorf("tokens: prompt=%d completion=%d, want 50/10", usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
+// TestParseAnthropicStreamUsage_NotPartial_WhenMessageStopSeen — PR-F7.4:
+// complete stream with message_stop → Partial=false (final usage).
+func TestParseAnthropicStreamUsage_NotPartial_WhenMessageStopSeen(t *testing.T) {
+	body := []byte(
+		anthropicFrame("message_start", `{"type":"message_start","message":{"model":"claude-3-5-sonnet","usage":{"input_tokens":50,"output_tokens":0}}}`) +
+			anthropicFrame("message_delta", `{"type":"message_delta","usage":{"output_tokens":10}}`) +
+			anthropicFrame("message_stop", `{"type":"message_stop"}`))
+
+	usage, err := parseAnthropicStreamUsage(body, "claude-3-5-sonnet")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !usage.Found {
+		t.Fatal("expected Found=true")
+	}
+	if usage.Partial {
+		t.Error("Partial=true; expected false (message_stop was received → final)")
+	}
+}

@@ -288,6 +288,13 @@ func main() {
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, entBundle.AdminAudit)
 
 	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode, entBundle.Governance, entBundle.AdminAudit)
+	// PR-F7.1: transport-level streaming mode. Default "buffered"
+	// сохраняет историческое поведение (full-buffer scan). "incremental"
+	// включает F7.1 transport pass-through через streaming/* adapter
+	// layer (response-side inspection придёт в F7.2 — в F7.1
+	// incremental означает transport-only). Normalize защищает от
+	// неизвестных значений (fallback buffered).
+	proxyHandler.SetStreamingMode(config.NormalizeStreamingMode(cfg.StreamingMode))
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
 	defer connectivityCancel()

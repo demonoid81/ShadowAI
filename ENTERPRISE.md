@@ -51,7 +51,7 @@ The following paths are covered by [LICENSE.enterprise](LICENSE.enterprise):
 All enterprise migrations live in `backend/migrations-enterprise/`
 (separate from `backend/migrations/`). Core operators apply only
 `backend/migrations/` (001–008); enterprise operators additionally
-apply `backend/migrations-enterprise/` (009–012):
+apply `backend/migrations-enterprise/` (009–015):
 
 - `backend/migrations-enterprise/009_create_user_erasure_runs.sql`
   — DSAR tombstone table.
@@ -65,6 +65,10 @@ apply `backend/migrations-enterprise/` (009–012):
   legal holds table with partial-unique index for active-per-user.
 - `backend/migrations-enterprise/014_add_role_rules_to_governance_policies.sql`
   — role-based governance column (Mode=role_based, PR-G2).
+- `backend/migrations-enterprise/015_legal_hold_status_four_eyes.sql`
+  — 4-eyes workflow для legal holds: `status` column
+  (pending/active/released), `approved_at/by`, расширенный
+  partial-unique index (PR-L2.3).
 
 ### Documentation
 
@@ -125,7 +129,7 @@ agreement (MSA + Order Form + Self-Hosted EULA). See
 `LICENSE.enterprise`.
 
 Database migrations to apply: both `backend/migrations/001–008`
-and `backend/migrations-enterprise/009–012`.
+and `backend/migrations-enterprise/009–015`.
 
 ### Providing a hosted "-as-a-service" offering
 - If it is Core-only (no Enterprise Components compiled in),

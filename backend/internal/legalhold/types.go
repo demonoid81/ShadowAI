@@ -13,15 +13,38 @@ import (
 	"time"
 )
 
-// Hold — одна запись в legal_holds. После release is_active=false,
-// released_at/released_by заполняются, row остаётся для audit.
+// Status — состояние legal hold в L2.3 4-eyes workflow.
+//   - Pending  — создан, ждёт approve (ещё НЕ блокирует DSAR).
+//   - Active   — approve'нут другим admin, блокирует DSAR и
+//     участвует в retention-aware purge.
+//   - Released — либо released после active, либо rejected из
+//     pending.
+//
+// Hot-path check (HasActiveHold, purge NOT EXISTS) использует
+// именно Status = 'active', не is_active.
+type Status string
+
+const (
+	StatusPending  Status = "pending"
+	StatusActive   Status = "active"
+	StatusReleased Status = "released"
+)
+
+// Hold — одна запись в legal_holds.
+//
+// L2.3: добавлены Status, ApprovedAt, ApprovedBy. IsActive
+// сохраняется как производное от Status (active ↔ true) для
+// backward compat.
 type Hold struct {
 	ID           string
 	TargetUserID string
 	CaseRef      string
 	Reason       string
+	Status       Status
 	CreatedBy    *string
 	CreatedAt    time.Time
+	ApprovedAt   *time.Time
+	ApprovedBy   *string
 	ReleasedAt   *time.Time
 	ReleasedBy   *string
 	IsActive     bool

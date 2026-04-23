@@ -37,7 +37,9 @@ func adminCtx(req *http.Request, actor string) *http.Request {
 	}))
 }
 
-// TestCreate_HappyPath — admin создаёт hold; event recorded.
+// TestCreate_HappyPath — PR-L2.3: admin создаёт pending hold;
+// event "apply_hold_requested" recorded. Hold ещё НЕ active — нужен
+// approve другим admin'ом.
 func TestCreate_HappyPath(t *testing.T) {
 	h, repo, rec := setupHandler(t)
 	body := `{"target_user_id":"u-target","case_ref":"case-42","reason":"litigation"}`
@@ -48,14 +50,19 @@ func TestCreate_HappyPath(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
-	if len(repo.holds) != 1 || !repo.holds[0].IsActive {
-		t.Errorf("repo state = %+v", repo.holds)
+	if len(repo.holds) != 1 || repo.holds[0].Status != StatusPending || repo.holds[0].IsActive {
+		t.Errorf("repo state = %+v (expected 1 pending+IsActive=false)", repo.holds)
 	}
-	if len(rec.events) != 1 || rec.events[0].Action != "apply_hold" {
-		t.Errorf("events = %+v", rec.events)
+	if len(rec.events) != 1 || rec.events[0].Action != "apply_hold_requested" {
+		t.Errorf("events = %+v (expected 1 apply_hold_requested)", rec.events)
 	}
 	if !rec.events[0].Success {
 		t.Error("admin event success=false на happy path")
+	}
+	// status в metadata для SIEM-фильтра.
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["status"] != "pending" {
+		t.Errorf("metadata.status = %v, want pending", meta["status"])
 	}
 }
 
@@ -85,7 +92,9 @@ func TestCreate_Unauthenticated(t *testing.T) {
 	}
 }
 
-// TestCreate_Duplicate_409.
+// TestCreate_Duplicate_409 — PR-L2.3: второй pending hold на того
+// же user'а → 409 (partial-unique index "blocking per user" покрывает
+// и pending, и active).
 func TestCreate_Duplicate(t *testing.T) {
 	h, _, rec := setupHandler(t)
 	body := `{"target_user_id":"u-1","case_ref":"c1","reason":"r"}`
@@ -99,7 +108,6 @@ func TestCreate_Duplicate(t *testing.T) {
 	if w2.Code != http.StatusConflict {
 		t.Errorf("second create status = %d, want 409", w2.Code)
 	}
-	// 2 events: первый success, второй failure с already_active.
 	if len(rec.events) != 2 {
 		t.Fatalf("events = %d, want 2", len(rec.events))
 	}
@@ -120,12 +128,15 @@ func TestCreate_ValidationError(t *testing.T) {
 	}
 }
 
-// TestRelease_HappyPath.
+// TestRelease_HappyPath — PR-L2.3: под новый workflow hold нужно
+// создать (pending) + approve (active) перед release.
 func TestRelease_HappyPath(t *testing.T) {
 	h, repo, rec := setupHandler(t)
-	// Seed через service → repo (сохранение нормального flow).
 	ctx := context.Background()
-	seeded, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-admin")
+	seeded, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-creator")
+	if _, err := h.svc.Approve(ctx, seeded.ID, "u-approver"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
 
 	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
 	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
@@ -135,11 +146,9 @@ func TestRelease_HappyPath(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
-	if repo.holds[0].IsActive {
-		t.Error("hold still active after release")
+	if repo.holds[0].IsActive || repo.holds[0].Status != StatusReleased {
+		t.Errorf("hold state after release = %+v", repo.holds[0])
 	}
-	// Seed был через svc.CreateHold (bypass handler), поэтому в rec
-	// только release_hold. Проверяем это явно.
 	actions := actionsFromEvents(rec.events)
 	if len(actions) != 1 || actions[0] != "release_hold" {
 		t.Errorf("actions = %v, want [release_hold]", actions)
@@ -151,7 +160,10 @@ func TestRelease_HappyPath(t *testing.T) {
 func TestRelease_Idempotent(t *testing.T) {
 	h, _, _ := setupHandler(t)
 	ctx := context.Background()
-	seeded, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-admin")
+	seeded, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-creator")
+	if _, err := h.svc.Approve(ctx, seeded.ID, "u-approver"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
 	// First release.
 	req1 := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
 	req1 = mux.SetURLVars(req1, map[string]string{"id": seeded.ID})
@@ -173,6 +185,42 @@ func TestRelease_Idempotent(t *testing.T) {
 	}
 }
 
+// TestRelease_PendingReturns409_NotIdempotent — PR-L2.3 regression
+// guard: release на pending НЕ должен возвращать 200 already_released
+// (это collapse семантики). Должен быть 409 + error_code=
+// pending_not_releasable с подсказкой operator'у использовать reject.
+func TestRelease_PendingReturns409_NotIdempotent(t *testing.T) {
+	h, _, rec := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-admin")
+	// НЕ approve. Release на pending должен 409.
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Release(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (pending not releasable)", w.Code)
+	}
+	// Guard: body не должен утверждать already_released.
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] == "already_released" {
+		t.Error("response заявляет already_released для pending hold — collapse семантики")
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "pending_not_releasable" {
+		t.Errorf("error_code = %v, want pending_not_releasable", meta["error_code"])
+	}
+	if rec.events[0].Success {
+		t.Error("event success=true на 409 pending release — ложная запись успеха в audit")
+	}
+}
+
 // TestRelease_NotFound.
 func TestRelease_NotFound(t *testing.T) {
 	h, _, _ := setupHandler(t)
@@ -185,12 +233,17 @@ func TestRelease_NotFound(t *testing.T) {
 	}
 }
 
-// TestList_HappyPath.
+// TestList_HappyPath — PR-L2.3: List возвращает active + pending +
+// released. Проверяем что counts в admin event разделены правильно.
 func TestList_HappyPath(t *testing.T) {
 	h, _, rec := setupHandler(t)
 	ctx := context.Background()
-	_, _ = h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-admin")
-	_, _ = h.svc.CreateHold(ctx, "u-2", "c2", "r", "u-admin")
+	// 2 active, 1 pending.
+	s1, _ := h.svc.CreateHold(ctx, "u-1", "c1", "r", "u-creator")
+	_, _ = h.svc.Approve(ctx, s1.ID, "u-approver")
+	s2, _ := h.svc.CreateHold(ctx, "u-2", "c2", "r", "u-creator")
+	_, _ = h.svc.Approve(ctx, s2.ID, "u-approver")
+	_, _ = h.svc.CreateHold(ctx, "u-3", "c3", "r", "u-creator") // pending
 
 	req := adminCtx(httptest.NewRequest(http.MethodGet, "/api/legal-holds", nil), "u-admin")
 	w := httptest.NewRecorder()
@@ -201,13 +254,15 @@ func TestList_HappyPath(t *testing.T) {
 	}
 	var out []holdResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	if len(out) != 2 {
-		t.Errorf("list len = %d, want 2", len(out))
+	if len(out) != 3 {
+		t.Errorf("list len = %d, want 3", len(out))
 	}
-	// Admin event должен содержать active_count=2.
 	meta := rec.events[len(rec.events)-1].Metadata.(map[string]any)
 	if meta["active_count"] != 2 {
 		t.Errorf("active_count = %v, want 2", meta["active_count"])
+	}
+	if meta["pending_count"] != 1 {
+		t.Errorf("pending_count = %v, want 1", meta["pending_count"])
 	}
 }
 
@@ -272,8 +327,10 @@ func TestCreate_ConflictEventHasHashNotRawCaseRef(t *testing.T) {
 		t.Fatalf("events = %d", len(rec.events))
 	}
 	conflictMeta := rec.events[1].Metadata.(map[string]any)
-	if conflictMeta["error_code"] != "already_active" {
-		t.Errorf("error_code = %v, want already_active", conflictMeta["error_code"])
+	// PR-L2.3: error_code renamed from "already_active" →
+	// "already_blocking" (покрывает и pending, и active).
+	if conflictMeta["error_code"] != "already_blocking" {
+		t.Errorf("error_code = %v, want already_blocking", conflictMeta["error_code"])
 	}
 	if _, has := conflictMeta["case_ref"]; has {
 		t.Error("conflict event содержит raw case_ref")
@@ -340,12 +397,15 @@ func TestCreate_NotConfigured_Returns503(t *testing.T) {
 }
 
 // TestRelease_HappyPath_MetadataHasHashOnly — privacy guard для
-// release event.
+// release event. PR-L2.3: hold нужно approve перед release.
 func TestRelease_HappyPath_MetadataHasHashOnly(t *testing.T) {
 	h, _, rec := setupHandler(t)
 	ctx := context.Background()
 	rawCaseRef := "CFPB-PRIVATE-MATTER"
-	seeded, _ := h.svc.CreateHold(ctx, "u-1", rawCaseRef, "r", "u-admin")
+	seeded, _ := h.svc.CreateHold(ctx, "u-1", rawCaseRef, "r", "u-creator")
+	if _, err := h.svc.Approve(ctx, seeded.ID, "u-approver"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
 
 	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
 	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
@@ -499,4 +559,170 @@ func actionsFromEvents(events []adminaudit.Event) []string {
 		out = append(out, e.Action)
 	}
 	return out
+}
+
+// TestApprove_HappyPath — PR-L2.3: 4-eyes approve flow. Creator →
+// pending, другой admin → approve → active. Emits
+// apply_hold_approved event.
+func TestApprove_HappyPath(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-target", "case", "r", "u-creator")
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/approve", nil), "u-approver")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if repo.holds[0].Status != StatusActive || !repo.holds[0].IsActive {
+		t.Errorf("hold state after approve = %+v", repo.holds[0])
+	}
+	if repo.holds[0].ApprovedBy == nil || *repo.holds[0].ApprovedBy != "u-approver" {
+		t.Errorf("approved_by = %v, want u-approver", repo.holds[0].ApprovedBy)
+	}
+	actions := actionsFromEvents(rec.events)
+	if len(actions) != 1 || actions[0] != "apply_hold_approved" {
+		t.Errorf("actions = %v, want [apply_hold_approved]", actions)
+	}
+	if !rec.events[0].Success {
+		t.Error("approve event success=false")
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["status"] != "active" {
+		t.Errorf("metadata.status = %v, want active", meta["status"])
+	}
+}
+
+// TestApprove_SelfApproval_Forbidden — 4-eyes enforcement на handler
+// layer. creator == approver → 403 + metadata.error_code=self_approval.
+// Критический тест для compliance-audit'а.
+func TestApprove_SelfApproval_Forbidden(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-target", "case", "r", "u-admin")
+
+	// Тот же admin пытается approve.
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/approve", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	// Hold остаётся pending.
+	if repo.holds[0].Status != StatusPending {
+		t.Errorf("hold status = %q, want pending (self-approval НЕ должен применяться)", repo.holds[0].Status)
+	}
+	if rec.events[0].Success {
+		t.Error("self-approval event success=true, expected false")
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "self_approval" {
+		t.Errorf("error_code = %v, want self_approval (SIEM-alerting key)", meta["error_code"])
+	}
+}
+
+// TestApprove_NotPending_Conflict — approve на уже active → 409.
+func TestApprove_NotPending_Conflict(t *testing.T) {
+	h, _, _ := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-target", "case", "r", "u-creator")
+	_, _ = h.svc.Approve(ctx, seeded.ID, "u-approver1")
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/approve", nil), "u-approver2")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", w.Code)
+	}
+}
+
+// TestApprove_Handler_NotFound — несуществующий id → 404.
+func TestApprove_Handler_NotFound(t *testing.T) {
+	h, _, _ := setupHandler(t)
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/h-missing/approve", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": "h-missing"})
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+// TestApprove_NonAdmin_Forbidden.
+func TestApprove_NonAdmin(t *testing.T) {
+	h, _, _ := setupHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/legal-holds/x/approve", nil)
+	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{UserID: "u-user", Role: auth.RoleUser}))
+	req = mux.SetURLVars(req, map[string]string{"id": "x"})
+	w := httptest.NewRecorder()
+	h.Approve(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+// TestReject_HappyPath — pending → released, rejector может быть
+// creator'ом (это cancel, не approval).
+func TestReject_HappyPath(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-target", "case", "r", "u-admin")
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/reject", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Reject(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if repo.holds[0].Status != StatusReleased {
+		t.Errorf("hold status = %q, want released", repo.holds[0].Status)
+	}
+	actions := actionsFromEvents(rec.events)
+	if len(actions) != 1 || actions[0] != "apply_hold_rejected" {
+		t.Errorf("actions = %v, want [apply_hold_rejected]", actions)
+	}
+}
+
+// TestReject_NotPending_Conflict — reject на active → 409 (release
+// flow, не reject).
+func TestReject_NotPending_Conflict(t *testing.T) {
+	h, _, _ := setupHandler(t)
+	ctx := context.Background()
+	seeded, _ := h.svc.CreateHold(ctx, "u-target", "case", "r", "u-creator")
+	_, _ = h.svc.Approve(ctx, seeded.ID, "u-approver")
+
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/reject", nil), "u-admin")
+	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
+	w := httptest.NewRecorder()
+	h.Reject(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", w.Code)
+	}
+}
+
+// TestPendingHold_DoesNotBlockDSAR — critical semantic guard: pending
+// hold НЕ блокирует erasure (HasActiveHold возвращает false).
+// Защищает от regression'а если status/is_active sync сломается.
+func TestPendingHold_DoesNotBlockDSAR(t *testing.T) {
+	h, _, _ := setupHandler(t)
+	ctx := context.Background()
+	_, _ = h.svc.CreateHold(ctx, "u-target", "case", "r", "u-admin")
+
+	has, err := h.svc.HasActiveHold(ctx, "u-target")
+	if err != nil {
+		t.Fatalf("HasActiveHold: %v", err)
+	}
+	if has {
+		t.Error("pending hold блокирует DSAR — L2.3 contract нарушен")
+	}
 }
