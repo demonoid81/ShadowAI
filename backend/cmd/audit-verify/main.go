@@ -24,7 +24,6 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 
 	"context"
@@ -74,7 +73,7 @@ func main() {
 
 	tables := []string{*tableFlag}
 	if *tableFlag == "all" {
-		tables = []string{"audit_logs", "admin_event_logs", "legal_hold_events"}
+		tables = []string{"audit_logs", "admin_event_logs", "legal_hold_events", "audit_purge_runs"}
 	}
 
 	for _, table := range tables {
@@ -87,8 +86,12 @@ func main() {
 			res, err = chain.VerifyAdminEventLogs(ctx, db, secretBytes)
 		case "legal_hold_events":
 			res, err = chain.VerifyLegalHoldEvents(ctx, db, secretBytes)
+		case "audit_purge_runs":
+			res, err = chain.VerifyAuditPurgeRuns(ctx, db, secretBytes)
 		default:
-			log.Fatalf("unknown table: %q (valid: audit_logs|admin_event_logs|legal_hold_events|all)", table)
+			// Fix #3: invalid --table flag is a config error → exit 2.
+			exitConfig("unknown table: %q (valid: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all)", table)
+			return // unreachable, satisfies compiler
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR %s: %v\n", table, err)

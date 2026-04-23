@@ -74,13 +74,6 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 		return 0, err
 	}
 
-	// PR-W2: chain entry для purge run ПЕРЕД DELETE — криптографическое
-	// доказательство авторизованного purge. Если chain disabled (пустой
-	// secret), это no-op. Вызывается внутри tx с advisory lock.
-	if err := r.insertPurgeRunChainEntry(ctx, tx, cutoff, PurgeTargetAuditLogs); err != nil {
-		return 0, fmt.Errorf("purge chain entry: %w", err)
-	}
-
 	// PR-L2.3: status = 'active' (4-eyes workflow). Pending holds
 	// НЕ защищают от purge — только approve'нутые. is_active
 	// сохраняется как derivative, но source of truth — status.
@@ -116,10 +109,13 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 		}
 	}
 
-	const recordQ = `INSERT INTO audit_purge_runs
-	    (cutoff, rows_deleted, completed_at, target)
-	    VALUES ($1, $2, now(), $3)`
-	if _, err := tx.ExecContext(ctx, recordQ, cutoff, total, PurgeTargetAuditLogs); err != nil {
+	// PR-W2.1 fix: ONE chained row per purge with actual rows_deleted.
+	// Ранее была отдельная pre-purge строка с rows_deleted=0, что
+	// создавало два rows в audit_purge_runs на одну операцию и ломало
+	// LastPurgeRun() при одинаковом started_at в одной tx.
+	// Теперь chain write встраивается в ЭТОТ INSERT (после DELETE,
+	// внутри той же tx), содержит реальный rows_deleted.
+	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, PurgeTargetAuditLogs); err != nil {
 		return total, fmt.Errorf("purge record run: %w", err)
 	}
 

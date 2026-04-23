@@ -138,29 +138,32 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 	return tx.Commit()
 }
 
-// insertPurgeRunChainEntry пишет chain entry для audit_purge_runs
-// ВНУТРИ purge tx (до COMMIT). Это криптографически доказывает, что
-// purge был залогирован прежде чем данные удалились.
+// recordPurgeRunChained пишет ОДНУ chained row в audit_purge_runs
+// с фактическим rowsDeleted. Вызывается внутри существующей purge tx
+// ПОСЛЕ DELETE — содержит реальное количество удалённых rows.
 //
-// W2 fix: теперь реально реализован. Если chainSecret пустой —
-// no-op (chain disabled). Иначе: advisory lock + canonical + INSERT
-// с явными id, completed_at, seq_no, row_hash.
+// W2.1 fix: заменяет отдельный pre-purge anchor (который создавал
+// два rows на одну операцию с rows_deleted=0, ломая LastPurgeRun).
 //
-// rowsDeleted на момент вызова неизвестен (мы ещё не выполнили DELETE);
-// передаём 0 — verifier будет знать что это pre-purge anchor.
-// rows_deleted в audit_purge_runs проставляется RETURNING после DELETE.
-func (r *Repository) insertPurgeRunChainEntry(ctx context.Context, tx *sql.Tx, cutoff time.Time, target string) error {
-	if len(r.chainSecret) == 0 {
-		return nil
-	}
+// Если chainSecret пустой — пишет обычный INSERT без chain fields.
+func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target string) error {
 	runID := uuid.New().String()
-	now := time.Now().UTC()
-	canonical := chain.CanonicalAuditPurgeRun(runID, cutoff.Unix(), 0, target, now.Unix())
+	completedAt := time.Now().UTC()
+
+	if len(r.chainSecret) == 0 {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			runID, cutoff, rowsDeleted, completedAt, target)
+		return err
+	}
+
+	canonical := chain.CanonicalAuditPurgeRun(runID, cutoff.Unix(), rowsDeleted, target, completedAt.Unix())
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableAuditPurgeRuns, "audit_purge_runs", chain.SeqAuditPurgeRuns,
 		canonical, r.chainSecret)
 	if err != nil {
-		return fmt.Errorf("audit purge chain: acquire slot: %w", err)
+		return fmt.Errorf("purge run chain: acquire slot: %w", err)
 	}
 	var seqArg any
 	var hashArg any
@@ -170,8 +173,8 @@ func (r *Repository) insertPurgeRunChainEntry(ctx context.Context, tx *sql.Tx, c
 	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target, seq_no, row_hash)
-		 VALUES ($1, $2, 0, $3, $4, $5, $6)`,
-		runID, cutoff, now, target, seqArg, hashArg)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		runID, cutoff, rowsDeleted, completedAt, target, seqArg, hashArg)
 	return err
 }
 

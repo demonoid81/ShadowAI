@@ -268,6 +268,75 @@ func VerifyLegalHoldEvents(ctx context.Context, db *sql.DB, secret []byte) (Veri
 	return res, nil
 }
 
+// AuditPurgeRunRow — minimal read model for audit_purge_runs verification.
+type AuditPurgeRunRow struct {
+	ID          string
+	CutoffEpoch int64
+	RowsDeleted int
+	Target      string
+	CompletedAt time.Time
+	SeqNo       int64
+	RowHash     []byte
+}
+
+// VerifyAuditPurgeRuns верифицирует chain integrity для audit_purge_runs.
+// Покрывает как coordinated (retention_hold.go), так и non-coordinated
+// (retention.go RecordPurgeRun) purge paths.
+func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (VerifyResult, error) {
+	start := time.Now()
+	res := VerifyResult{Table: "audit_purge_runs"}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, extract(epoch FROM cutoff)::bigint, rows_deleted,
+		        coalesce(target,''), completed_at, seq_no, row_hash
+		 FROM audit_purge_runs
+		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
+		 ORDER BY seq_no`)
+	if err != nil {
+		return res, fmt.Errorf("verify audit_purge_runs: query: %w", err)
+	}
+	defer rows.Close()
+
+	var prevHash []byte
+	var prevSeqNo int64
+
+	for rows.Next() {
+		var r AuditPurgeRunRow
+		if err := rows.Scan(
+			&r.ID, &r.CutoffEpoch, &r.RowsDeleted, &r.Target,
+			&r.CompletedAt, &r.SeqNo, &r.RowHash,
+		); err != nil {
+			return res, fmt.Errorf("verify audit_purge_runs: scan: %w", err)
+		}
+		res.RowCount++
+
+		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
+			for gap := prevSeqNo + 1; gap < r.SeqNo; gap++ {
+				res.Gaps = append(res.Gaps, gap)
+			}
+		}
+
+		canonical := CanonicalAuditPurgeRun(
+			r.ID, r.CutoffEpoch, r.RowsDeleted, r.Target,
+			r.CompletedAt.UTC().Unix(),
+		)
+		if !Verify(prevHash, canonical, secret, r.RowHash) {
+			res.Breaks = append(res.Breaks, ChainBreak{
+				SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash,
+			})
+		}
+
+		prevHash = r.RowHash
+		prevSeqNo = r.SeqNo
+	}
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("verify audit_purge_runs: rows: %w", err)
+	}
+	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
+	res.Duration = time.Since(start)
+	return res, nil
+}
+
 // pqArrayScan — helper для сканирования pq.StringArray в []string.
 // Упрощённый вариант без pq dependency в chain package.
 func pqArrayScan(dest *[]string) interface{} {

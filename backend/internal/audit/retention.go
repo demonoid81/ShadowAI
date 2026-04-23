@@ -122,23 +122,42 @@ func uuidArrayLiteral(ids []string) string {
 // target-таблицы ("audit_logs" | "admin_event_logs"). Вызывающий может
 // передать "" — интерпретируется как audit_logs (backward compat для
 // call-site'ов до PR-D.1).
+//
+// PR-W2.1: если chainSecret установлен, пишет chained INSERT в короткой
+// транзакции (симметрично coordinated purge в retention_hold.go).
 func (r *Repository) RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error {
 	if target == "" {
 		target = PurgeTargetAuditLogs
 	}
-	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO audit_purge_runs (cutoff, rows_deleted, completed_at, target)
-		 VALUES ($1, $2, now(), $3)`,
-		cutoff, rowsDeleted, target)
-	if err != nil {
-		return fmt.Errorf("record purge run: %w", err)
+	if len(r.chainSecret) == 0 {
+		_, err := r.db.ExecContext(ctx,
+			`INSERT INTO audit_purge_runs (cutoff, rows_deleted, completed_at, target)
+			 VALUES ($1, $2, now(), $3)`,
+			cutoff, rowsDeleted, target)
+		if err != nil {
+			return fmt.Errorf("record purge run: %w", err)
+		}
+		return nil
 	}
-	return nil
+	// Chain path: short tx for advisory lock + chain INSERT.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("record purge run chain: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := r.recordPurgeRunChained(ctx, tx, cutoff, rowsDeleted, target); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // LastPurgeRun возвращает последний завершённый purge для target'а.
 // target="" → audit_logs (default). Nil result → ещё ни разу не purge'или
 // эту target-таблицу.
+//
+// PR-W2.1: ORDER BY seq_no DESC NULLS LAST tiebreaker чтобы
+// не было нодетерминизма когда несколько rows имеют один started_at
+// (в одной PG-транзакции DEFAULT now() одинаков).
 func (r *Repository) LastPurgeRun(ctx context.Context, target string) (*domain.PurgeRun, error) {
 	if target == "" {
 		target = PurgeTargetAuditLogs
@@ -149,7 +168,7 @@ func (r *Repository) LastPurgeRun(ctx context.Context, target string) (*domain.P
 		`SELECT id, started_at, completed_at, cutoff, rows_deleted, target
 		 FROM audit_purge_runs
 		 WHERE completed_at IS NOT NULL AND target = $1
-		 ORDER BY started_at DESC LIMIT 1`, target).
+		 ORDER BY started_at DESC, seq_no DESC NULLS LAST LIMIT 1`, target).
 		Scan(&pr.ID, &pr.StartedAt, &completed, &pr.Cutoff, &pr.RowsDeleted, &pr.Target)
 	if err == sql.ErrNoRows {
 		return nil, nil
