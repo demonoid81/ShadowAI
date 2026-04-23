@@ -1,9 +1,12 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -341,28 +344,38 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 type AnchorVerifyResult struct {
 	Table         string
 	AnchorCount   int
-	Mismatches    []AnchorMismatch
-	SeqGaps       []int64  // gaps between anchor ranges (missing rows not covered by any anchor)
-	OK            bool
+	// DBMismatches: DB anchor root ≠ Merkle computed from current DB rows.
+	// Detects: row modification WITHIN DB (chain break in anchor range).
+	DBMismatches []AnchorMismatch
+	// SinkMismatches: DB anchor root ≠ root read from external file sink.
+	// Detects: DBA tamper of audit_chain_anchors AFTER external sync.
+	// Only populated if sinkPath provided.
+	SinkMismatches []AnchorMismatch
+	SeqGaps        []int64 // gaps between anchor ranges
+	OK             bool
 }
 
-// AnchorMismatch — anchor, у которого recomputed Merkle root не совпадает
-// с stored root (rows modified or deleted within that range).
+// AnchorMismatch — один несовпадающий anchor.
 type AnchorMismatch struct {
 	AnchorID   string
 	SeqLo      int64
 	SeqHi      int64
-	Stored     []byte
-	Recomputed []byte
+	Stored     []byte // what's in DB anchor table (or file)
+	Recomputed []byte // what we computed (nil = no comparison partner)
 }
 
 // VerifyAnchors recomputes Merkle roots from stored row_hashes and
 // compares to audit_chain_anchors records for the given table.
 //
-// W3 tier: does NOT require chain_secret. Only needs access to the DB
-// to read row_hash values. Detects row deletion/modification within
-// anchored ranges (mismatch) and gaps in anchor coverage.
-func VerifyAnchors(ctx context.Context, db *sql.DB, tableName string) (AnchorVerifyResult, error) {
+// W3 tier: does NOT require chain_secret. Only needs DB access to
+// read row_hash values (and optionally the file sink path).
+//
+// sinkPath: if non-empty, also reads the NDJSON anchor file and
+// cross-references each DB anchor record against the external sink.
+// This is the external-witness verification — defends against a DBA
+// who rewrites both DB rows AND DB anchor table: the file records
+// written at anchor time are independent and not in the DB.
+func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, sinkPath string) (AnchorVerifyResult, error) {
 	res := AnchorVerifyResult{Table: tableName}
 	repo := NewAnchorRepository(db)
 
@@ -376,7 +389,16 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName string) (AnchorVer
 	}
 	res.AnchorCount = len(anchors)
 
-	// Check anchor coverage continuity: each anchor's SeqLo should = prev SeqHi + 1.
+	// Optional: load external sink records for cross-reference.
+	var sinkIndex map[string]string // key = "table:seqLo:seqHi", val = merkle_root_hex
+	if sinkPath != "" {
+		sinkIndex, err = loadSinkAnchors(sinkPath)
+		if err != nil {
+			return res, fmt.Errorf("verify anchors %s: read sink %s: %w", tableName, sinkPath, err)
+		}
+	}
+
+	// Check anchor coverage continuity.
 	for i := 1; i < len(anchors); i++ {
 		prev, curr := anchors[i-1], anchors[i]
 		if curr.SeqLo != prev.SeqHi+1 {
@@ -386,8 +408,8 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName string) (AnchorVer
 		}
 	}
 
-	// Recompute Merkle root for each anchor and compare.
 	for _, a := range anchors {
+		// 1. DB integrity check: recompute Merkle from current DB row_hashes.
 		hashes, err := repo.FetchRowHashes(ctx, tableName, a.SeqLo-1, a.SeqHi)
 		if err != nil {
 			return res, fmt.Errorf("verify anchors %s: fetch hashes [%d,%d]: %w",
@@ -395,7 +417,7 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName string) (AnchorVer
 		}
 		recomputed := ComputeMerkleRoot(hashes)
 		if !merkleEqual(recomputed, a.MerkleRoot) {
-			res.Mismatches = append(res.Mismatches, AnchorMismatch{
+			res.DBMismatches = append(res.DBMismatches, AnchorMismatch{
 				AnchorID:   a.ID,
 				SeqLo:      a.SeqLo,
 				SeqHi:      a.SeqHi,
@@ -403,10 +425,100 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName string) (AnchorVer
 				Recomputed: recomputed,
 			})
 		}
+
+		// 2. External witness check: compare DB anchor root to sink file root.
+		if sinkIndex != nil {
+			key := fmt.Sprintf("%s:%d:%d", tableName, a.SeqLo, a.SeqHi)
+			sinkRootHex, found := sinkIndex[key]
+			if !found {
+				// Anchor exists in DB but not in sink — possible if sink write failed
+				// (sink_ok=false) or sink file was modified/truncated.
+				if a.SinkOK {
+					// sink_ok=true but no matching record → sink tampered or lost.
+					res.SinkMismatches = append(res.SinkMismatches, AnchorMismatch{
+						AnchorID: a.ID,
+						SeqLo:    a.SeqLo,
+						SeqHi:    a.SeqHi,
+						Stored:   a.MerkleRoot,
+						// Recomputed = nil signals "not found in sink"
+					})
+				}
+			} else {
+				sinkRootBytes, _ := hexToBytes(sinkRootHex)
+				if !merkleEqual(sinkRootBytes, a.MerkleRoot) {
+					res.SinkMismatches = append(res.SinkMismatches, AnchorMismatch{
+						AnchorID:   a.ID,
+						SeqLo:      a.SeqLo,
+						SeqHi:      a.SeqHi,
+						Stored:     a.MerkleRoot,    // DB anchor root
+						Recomputed: sinkRootBytes,   // what sink says
+					})
+				}
+			}
+		}
 	}
 
-	res.OK = len(res.Mismatches) == 0 && len(res.SeqGaps) == 0
+	res.OK = len(res.DBMismatches) == 0 && len(res.SinkMismatches) == 0 && len(res.SeqGaps) == 0
 	return res, nil
+}
+
+// loadSinkAnchors reads the NDJSON anchor file and builds an index
+// keyed by "table:seqLo:seqHi" → merkle_root_hex.
+func loadSinkAnchors(sinkPath string) (map[string]string, error) {
+	data, err := os.ReadFile(sinkPath)
+	if err != nil {
+		return nil, fmt.Errorf("read sink file: %w", err)
+	}
+	index := make(map[string]string)
+	for _, raw := range bytes.Split(data, []byte("\n")) {
+		raw = bytes.TrimSpace(raw)
+		if len(raw) == 0 {
+			continue
+		}
+		var rec struct {
+			V             int    `json:"v"`
+			Table         string `json:"table"`
+			SeqLo         int64  `json:"seq_lo"`
+			SeqHi         int64  `json:"seq_hi"`
+			MerkleRootHex string `json:"merkle_root_hex"`
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			continue // malformed line — skip, don't abort
+		}
+		if rec.V == 1 && rec.Table != "" {
+			key := fmt.Sprintf("%s:%d:%d", rec.Table, rec.SeqLo, rec.SeqHi)
+			index[key] = rec.MerkleRootHex
+		}
+	}
+	return index, nil
+}
+
+// hexToBytes converts hex string to bytes; returns nil on error.
+func hexToBytes(h string) ([]byte, error) {
+	if len(h)%2 != 0 {
+		return nil, fmt.Errorf("odd hex string")
+	}
+	b := make([]byte, len(h)/2)
+	for i := 0; i < len(h); i += 2 {
+		hi, lo := fromHexChar(h[i]), fromHexChar(h[i+1])
+		if hi == 255 || lo == 255 {
+			return nil, fmt.Errorf("invalid hex")
+		}
+		b[i/2] = hi<<4 | lo
+	}
+	return b, nil
+}
+
+func fromHexChar(c byte) byte {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10
+	}
+	return 255
 }
 
 func merkleEqual(a, b []byte) bool {

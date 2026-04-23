@@ -6,35 +6,39 @@
 //   - legal_hold_events
 //   - audit_purge_runs
 //
-// Требует AUDIT_CHAIN_SECRET и DATABASE_URL.
+// Требует DATABASE_URL. AUDIT_CHAIN_SECRET обязателен только для режима
+// chain verification (W2 tier). Anchor-only mode (W3 tier) не требует секрета.
 //
 // Usage:
 //
+//	# Chain verification (W2 tier, requires AUDIT_CHAIN_SECRET):
 //	audit-verify [--table <table>] [--verbose]
+//
+//	# Anchor verification (W3 tier, no secret, optionally cross-reference sink):
+//	audit-verify --anchor-only [--anchor-sink-path <file>] [--table <table>]
+//
+//	# Both chain + anchor:
+//	audit-verify --include-anchors [--anchor-sink-path <file>] [--table <table>]
 //
 // --table: "audit_logs" | "admin_event_logs" | "legal_hold_events" |
 //
 //	"audit_purge_runs" | "all" (default)
 //
-// --verbose: print each gap and break detail
+// --anchor-sink-path: path to NDJSON file:// sink file for external cross-reference.
 //
 // Exit codes:
 //
-//	0 — chain OK
-//	1 — chain failures detected (GAP or CHAIN_BREAK)
+//	0 — verification OK
+//	1 — chain/anchor failures detected (GAP, CHAIN_BREAK, ANCHOR_MISMATCH)
 //	2 — configuration / connection / invalid-flag error
-//
-// W2 verifier requires AUDIT_CHAIN_SECRET (privileged tool).
-// See RFC §8.4 for verification tier semantics.
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
 	"os"
-
-	"context"
 
 	_ "github.com/lib/pq"
 	"github.com/shadowai/backend/internal/chain"
@@ -43,28 +47,36 @@ import (
 func main() {
 	tableFlag := flag.String("table", "all", "Table to verify: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
 	verbose := flag.Bool("verbose", false, "Print detailed gap/break info")
-	includeAnchors := flag.Bool("include-anchors", false, "Also verify Merkle anchors (W3 tier: no chain_secret required)")
+	anchorOnly := flag.Bool("anchor-only", false, "W3 anchor-only mode: no chain_secret required, verifies Merkle anchors")
+	includeAnchors := flag.Bool("include-anchors", false, "Also verify Merkle anchors in addition to chain (W2+W3 combined)")
+	anchorSinkPath := flag.String("anchor-sink-path", "", "Path to NDJSON file:// sink for external anchor cross-reference")
 	flag.Parse()
 
-	// Config errors exit with code 2 (not 1 which is chain failure).
+	// Config errors exit with code 2 (not 1 which is verification failure).
 	exitConfig := func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "config error: "+format+"\n", args...)
 		os.Exit(2)
 	}
 
-	secret := os.Getenv("AUDIT_CHAIN_SECRET")
-	if secret == "" {
-		exitConfig("AUDIT_CHAIN_SECRET is required for chain verification")
-	}
-	if len(secret) < 32 {
-		exitConfig("AUDIT_CHAIN_SECRET must be >= 32 chars")
+	// Chain verification (W2 tier) requires AUDIT_CHAIN_SECRET.
+	// Anchor-only (W3 tier) does not.
+	wantChain := !*anchorOnly
+	var secretBytes []byte
+	if wantChain {
+		secret := os.Getenv("AUDIT_CHAIN_SECRET")
+		if secret == "" {
+			exitConfig("AUDIT_CHAIN_SECRET is required for chain verification (use --anchor-only to skip)")
+		}
+		if len(secret) < 32 {
+			exitConfig("AUDIT_CHAIN_SECRET must be >= 32 chars")
+		}
+		secretBytes = []byte(secret)
 	}
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		exitConfig("DATABASE_URL is required")
 	}
-
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		exitConfig("db open: %v", err)
@@ -74,10 +86,7 @@ func main() {
 		exitConfig("db ping: %v", err)
 	}
 
-	secretBytes := []byte(secret)
 	ctx := context.Background()
-
-	var results []chain.VerifyResult
 	var anyFail bool
 
 	tables := []string{*tableFlag}
@@ -85,78 +94,88 @@ func main() {
 		tables = []string{"audit_logs", "admin_event_logs", "legal_hold_events", "audit_purge_runs"}
 	}
 
-	for _, table := range tables {
-		var res chain.VerifyResult
-		var err error
-		switch table {
-		case "audit_logs":
-			res, err = chain.VerifyAuditLogs(ctx, db, secretBytes)
-		case "admin_event_logs":
-			res, err = chain.VerifyAdminEventLogs(ctx, db, secretBytes)
-		case "legal_hold_events":
-			res, err = chain.VerifyLegalHoldEvents(ctx, db, secretBytes)
-		case "audit_purge_runs":
-			res, err = chain.VerifyAuditPurgeRuns(ctx, db, secretBytes)
-		default:
-			// Fix #3: invalid --table flag is a config error → exit 2.
-			exitConfig("unknown table: %q (valid: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all)", table)
-			return // unreachable, satisfies compiler
+	// W2 chain verification.
+	if wantChain {
+		var results []chain.VerifyResult
+		for _, table := range tables {
+			var res chain.VerifyResult
+			var err error
+			switch table {
+			case "audit_logs":
+				res, err = chain.VerifyAuditLogs(ctx, db, secretBytes)
+			case "admin_event_logs":
+				res, err = chain.VerifyAdminEventLogs(ctx, db, secretBytes)
+			case "legal_hold_events":
+				res, err = chain.VerifyLegalHoldEvents(ctx, db, secretBytes)
+			case "audit_purge_runs":
+				res, err = chain.VerifyAuditPurgeRuns(ctx, db, secretBytes)
+			default:
+				exitConfig("unknown table: %q (valid: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all)", table)
+				return
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR chain %s: %v\n", table, err)
+				anyFail = true
+				continue
+			}
+			results = append(results, res)
+			if !res.OK {
+				anyFail = true
+			}
 		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR %s: %v\n", table, err)
-			anyFail = true
-			continue
-		}
-		results = append(results, res)
-		if !res.OK {
-			anyFail = true
+		for _, res := range results {
+			status := "OK"
+			if !res.OK {
+				status = "FAIL"
+			}
+			fmt.Printf("chain  %-24s %-6s rows=%d gaps=%d breaks=%d elapsed=%s\n",
+				res.Table, status, res.RowCount, len(res.Gaps), len(res.Breaks), res.Duration.Round(1e6))
+			if *verbose {
+				for _, g := range res.Gaps {
+					fmt.Printf("  GAP seq_no=%d\n", g)
+				}
+				for _, b := range res.Breaks {
+					fmt.Printf("  CHAIN_BREAK seq_no=%d row_id=%s\n", b.SeqNo, b.RowID)
+				}
+			}
 		}
 	}
 
-	for _, res := range results {
-		status := "OK"
-		if !res.OK {
-			status = "FAIL"
-		}
-		fmt.Printf("%-25s %-6s rows=%d gaps=%d breaks=%d elapsed=%s\n",
-			res.Table, status, res.RowCount, len(res.Gaps), len(res.Breaks), res.Duration.Round(1e6))
-		if *verbose && len(res.Gaps) > 0 {
-			for _, g := range res.Gaps {
-				fmt.Printf("  GAP seq_no=%d (row deleted or sequence broken)\n", g)
-			}
-		}
-		if *verbose && len(res.Breaks) > 0 {
-			for _, b := range res.Breaks {
-				fmt.Printf("  CHAIN_BREAK seq_no=%d row_id=%s (row modified after insert)\n",
-					b.SeqNo, b.RowID)
-			}
-		}
-	}
-
-	// PR-W3: anchor verification (no chain_secret required).
-	if *includeAnchors {
-		anchorTables := tables
-		for _, table := range anchorTables {
-			ar, err := chain.VerifyAnchors(ctx, db, table)
+	// W3 anchor verification — no secret required.
+	if *anchorOnly || *includeAnchors {
+		for _, table := range tables {
+			ar, err := chain.VerifyAnchors(ctx, db, table, *anchorSinkPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ERROR anchors %s: %v\n", table, err)
 				anyFail = true
 				continue
 			}
-			astatus := "OK"
 			if !ar.OK {
-				astatus = "FAIL"
 				anyFail = true
 			}
-			fmt.Printf("  anchors %-20s %-6s count=%d seq_gaps=%d mismatches=%d\n",
-				ar.Table, astatus, ar.AnchorCount, len(ar.SeqGaps), len(ar.Mismatches))
+			status := "OK"
+			if !ar.OK {
+				status = "FAIL"
+			}
+			fmt.Printf("anchor %-24s %-6s count=%d db_mm=%d sink_mm=%d seq_gaps=%d\n",
+				ar.Table, status, ar.AnchorCount,
+				len(ar.DBMismatches), len(ar.SinkMismatches), len(ar.SeqGaps))
 			if *verbose {
-				for _, m := range ar.Mismatches {
-					fmt.Printf("    ANCHOR_MISMATCH anchor_id=%s range=[%d,%d] (rows deleted/modified)\n",
+				for _, m := range ar.DBMismatches {
+					fmt.Printf("  DB_MISMATCH anchor_id=%s range=[%d,%d] (rows modified in DB)\n",
 						m.AnchorID, m.SeqLo, m.SeqHi)
 				}
+				for _, m := range ar.SinkMismatches {
+					if m.Recomputed == nil {
+						fmt.Printf("  SINK_MISSING anchor_id=%s range=[%d,%d] (in DB sink_ok=true but missing from sink file)\n",
+							m.AnchorID, m.SeqLo, m.SeqHi)
+					} else {
+						fmt.Printf("  SINK_MISMATCH anchor_id=%s range=[%d,%d] (DB anchor root ≠ external sink root — DBA tampering)\n",
+							m.AnchorID, m.SeqLo, m.SeqHi)
+					}
+				}
 				for _, g := range ar.SeqGaps {
-					fmt.Printf("    ANCHOR_GAP seq_no=%d (rows not covered by any anchor)\n", g)
+					fmt.Printf("  ANCHOR_GAP seq_no=%d\n", g)
 				}
 			}
 		}

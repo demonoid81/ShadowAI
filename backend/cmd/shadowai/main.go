@@ -341,8 +341,10 @@ func main() {
 		if cfg.AuditAnchorSink == "file://" && cfg.AuditAnchorSinkPath != "" {
 			anchorSink = chain.NewFileSink(cfg.AuditAnchorSinkPath)
 		}
+		// Core tables. Enterprise tables (admin_event_logs, legal_hold_events)
+		// are added by enterprise_wire.go StartSchedulers via entBundle.AnchorExtra.
 		anchorSched := chain.NewAnchorScheduler(anchorRepo, anchorSink, cfg.AuditAnchorInterval,
-			[]string{"audit_logs", "audit_purge_runs"})
+			append([]string{"audit_logs", "audit_purge_runs"}, entBundle.AnchorExtraTables...))
 		go anchorSched.Run(connectivityCtx)
 	}
 

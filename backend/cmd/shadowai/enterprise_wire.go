@@ -99,6 +99,9 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			admin.HandleFunc("/legal-holds/{id}/release", legalHoldHandler.Release).Methods("POST")
 		},
 
+		// PR-W3: enterprise tables добавляются к anchor scheduler'у.
+		AnchorExtraTables: []string{"admin_event_logs", "legal_hold_events"},
+
 		StartSchedulers: func(ctx context.Context, cfg *config.Config) {
 			// PR-A: audit-purge scheduler для audit_logs.
 			// PR-S1: purge events тоже уходят в SIEM через fanout recorder.

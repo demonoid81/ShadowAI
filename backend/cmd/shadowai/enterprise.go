@@ -51,6 +51,11 @@ type enterpriseBundle struct {
 	// (audit_logs retention + admin_event_logs retention). В Core —
 	// no-op (retention выключен на уровне product model).
 	StartSchedulers func(ctx context.Context, cfg *config.Config)
+
+	// AnchorExtraTables — PR-W3: enterprise-only таблицы, которые
+	// добавляются к anchor scheduler'у (main.go включает core tables
+	// audit_logs + audit_purge_runs; enterprise добавляет свои).
+	AnchorExtraTables []string
 }
 
 // enterpriseDeps — входные данные, которые wire получает от main,
