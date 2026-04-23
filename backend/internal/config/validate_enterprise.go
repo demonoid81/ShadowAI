@@ -85,6 +85,30 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-W4.2: immudb:// sink требует всех четырёх connection fields в prod.
+	// Также при immudb:// в prod требуются signing key + pubkey_id.
+	if c.AuditAnchorSink == "immudb://" {
+		if strings.TrimSpace(c.AuditImmuDBAddr) == "" {
+			errs = append(errs, "AUDIT_IMMUDB_ADDR required when AUDIT_ANCHOR_SINK=immudb://")
+		}
+		if strings.TrimSpace(c.AuditImmuDBUsername) == "" {
+			errs = append(errs, "AUDIT_IMMUDB_USERNAME required when AUDIT_ANCHOR_SINK=immudb://")
+		}
+		if strings.TrimSpace(c.AuditImmuDBPassword) == "" {
+			errs = append(errs, "AUDIT_IMMUDB_PASSWORD required when AUDIT_ANCHOR_SINK=immudb://")
+		}
+		if strings.TrimSpace(c.AuditImmuDBDatabase) == "" {
+			errs = append(errs, "AUDIT_IMMUDB_DATABASE required when AUDIT_ANCHOR_SINK=immudb://")
+		}
+		// immudb:// is an immutable external ledger — signing is mandatory.
+		if strings.TrimSpace(c.AuditAnchorSigningKey) == "" {
+			errs = append(errs, "AUDIT_ANCHOR_SIGNING_KEY required when AUDIT_ANCHOR_SINK=immudb:// (immutable sink must have signed manifests)")
+		}
+		if strings.TrimSpace(c.AuditAnchorPubKeyID) == "" {
+			errs = append(errs, "AUDIT_ANCHOR_PUBKEY_ID required when AUDIT_ANCHOR_SINK=immudb://")
+		}
+	}
+
 	// PR-W3: AUDIT_ANCHOR_INTERVAL не должен превышать 24h в prod.
 	// Слишком большой интервал = слишком большой window без external witness
 	// (rows могут быть удалены и появиться в следующем anchor только через сутки).

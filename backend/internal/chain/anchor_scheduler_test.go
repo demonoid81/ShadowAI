@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// TestFileSink_Write_NDJSON — FileSink записывает валидный JSON и
-// возвращает "file://{path}" как ref.
+// TestFileSink_Write_NDJSON — FileSink записывает signed manifest JSON
+// через новый двухфазный интерфейс.
 func TestFileSink_Write_NDJSON(t *testing.T) {
 	tmp := t.TempDir() + "/anchor_test.ndjson"
 	sink := NewFileSink(tmp)
@@ -21,12 +21,23 @@ func TestFileSink_Write_NDJSON(t *testing.T) {
 		RowCount:   10,
 		MerkleRoot: make([]byte, 32),
 	}
-	ref, err := sink.Write(context.Background(), a)
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	// Phase 1: build ref.
+	ref := sink.BuildRef(a)
 	if ref != "file://"+tmp {
-		t.Errorf("ref = %q, want file://%s", ref, tmp)
+		t.Errorf("BuildRef = %q, want file://%s", ref, tmp)
+	}
+	a.SinkRef = ref
+	a.SinkName = sink.Name()
+
+	// Phase 2: marshal (no signing for this test).
+	manifest, err := MarshalSignedManifest(a)
+	if err != nil {
+		t.Fatalf("MarshalSignedManifest: %v", err)
+	}
+
+	// Phase 3: write.
+	if err := sink.Write(context.Background(), manifest, ref); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 
 	content, _ := os.ReadFile(tmp)
@@ -43,9 +54,9 @@ func TestFileSink_Write_NDJSON(t *testing.T) {
 // anchor не пишется (acceptance criterion #3).
 func TestAnchorScheduler_NoNewRows_NoOp(t *testing.T) {
 	written := 0
-	sink := &testSink{writeFn: func(_ *AnchorRecord) (string, error) {
+	sink := &testSink{writeFn: func(_ []byte, _ string) error {
 		written++
-		return "mock://ref", nil
+		return nil
 	}}
 	// lastSeqHi == maxSeqNo → no new rows.
 	repo := &testAnchorRepo{lastSeqHi: 10, maxSeqNo: 10}
@@ -68,35 +79,36 @@ func TestAnchorScheduler_NewRows_WritesAnchor(t *testing.T) {
 	hashes[0][0] = 0xAA
 	hashes[1][0] = 0xBB
 
-	var written *AnchorRecord
-	sink := &testSink{writeFn: func(a *AnchorRecord) (string, error) {
-		written = a
-		return "file:///test", nil
-	}}
+	sink := &testSink{buildRef: "file:///test"}
 	repo := &testAnchorRepo{lastSeqHi: 10, maxSeqNo: 12, hashes: hashes}
 	sched := NewAnchorScheduler(repo, sink, 0, []string{"audit_logs"})
 	if err := sched.anchorTable(context.Background(), "audit_logs"); err != nil {
 		t.Fatalf("anchorTable: %v", err)
 	}
 
-	if written == nil {
+	if repo.lastWritten == nil {
 		t.Fatal("expected anchor written, got nil")
 	}
-	if written.RowCount != 2 {
-		t.Errorf("RowCount = %d, want 2", written.RowCount)
+	a := repo.lastWritten
+	if a.RowCount != 2 {
+		t.Errorf("RowCount = %d, want 2", a.RowCount)
 	}
-	if written.SeqLo != 11 || written.SeqHi != 12 {
-		t.Errorf("range = [%d,%d], want [11,12]", written.SeqLo, written.SeqHi)
+	if a.SeqLo != 11 || a.SeqHi != 12 {
+		t.Errorf("range = [%d,%d], want [11,12]", a.SeqLo, a.SeqHi)
 	}
 	expectedRoot := ComputeMerkleRoot(hashes)
-	if !merkleEqual(written.MerkleRoot, expectedRoot) {
+	if !merkleEqual(a.MerkleRoot, expectedRoot) {
 		t.Errorf("merkle root mismatch")
 	}
 	if !repo.anchored {
 		t.Error("WriteAnchor not called")
 	}
-	if !written.SinkOK {
+	if !a.SinkOK {
 		t.Error("sink_ok=false, want true")
+	}
+	// Verify manifest was passed to sink (not raw AnchorRecord).
+	if a.SinkRef != "file:///test" {
+		t.Errorf("SinkRef = %q, want file:///test (BuildRef should have been called)", a.SinkRef)
 	}
 }
 
@@ -104,8 +116,8 @@ func TestAnchorScheduler_NewRows_WritesAnchor(t *testing.T) {
 // запись anchor'а в PG (fail-open).
 func TestAnchorScheduler_SinkFail_AnchorStillWritten(t *testing.T) {
 	hashes := [][]byte{make([]byte, 32)}
-	sink := &testSink{writeFn: func(_ *AnchorRecord) (string, error) {
-		return "", fmt.Errorf("simulated sink failure")
+	sink := &testSink{writeFn: func(_ []byte, _ string) error {
+		return fmt.Errorf("simulated sink failure")
 	}}
 	repo := &testAnchorRepo{lastSeqHi: 0, maxSeqNo: 1, hashes: hashes}
 	sched := NewAnchorScheduler(repo, sink, 0, []string{"audit_logs"})
@@ -146,10 +158,20 @@ func (m *testAnchorRepo) WriteAnchor(_ context.Context, a *AnchorRecord) error {
 }
 
 type testSink struct {
-	writeFn func(*AnchorRecord) (string, error)
+	writeFn   func(manifest []byte, ref string) error
+	buildRef  string
 }
 
 func (s *testSink) Name() string { return "test://" }
-func (s *testSink) Write(_ context.Context, a *AnchorRecord) (string, error) {
-	return s.writeFn(a)
+func (s *testSink) BuildRef(_ *AnchorRecord) string {
+	if s.buildRef != "" {
+		return s.buildRef
+	}
+	return "test://ref"
+}
+func (s *testSink) Write(_ context.Context, manifest []byte, ref string) error {
+	if s.writeFn != nil {
+		return s.writeFn(manifest, ref)
+	}
+	return nil
 }

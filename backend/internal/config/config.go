@@ -149,6 +149,13 @@ type Config struct {
 	// Пустая строка = sink disabled (anchor только в PG, без external witness).
 	AuditAnchorSink string
 
+	// PR-W4.2: immudb:// sink connection.
+	// AUDIT_IMMUDB_ADDR — host:port for immudb server (default 127.0.0.1:3322).
+	AuditImmuDBAddr     string
+	AuditImmuDBUsername string // AUDIT_IMMUDB_USERNAME
+	AuditImmuDBPassword string // AUDIT_IMMUDB_PASSWORD
+	AuditImmuDBDatabase string // AUDIT_IMMUDB_DATABASE
+
 	// AuditAnchorSinkPath — путь к файлу для file:// sink.
 	// Append-only NDJSON. Создаётся если не существует.
 	// Обязателен если AuditAnchorSink = "file://".
@@ -249,6 +256,12 @@ func Load() *Config {
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
 		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
+
+		// PR-W4.2: immudb sink.
+		AuditImmuDBAddr:     getEnv("AUDIT_IMMUDB_ADDR", "127.0.0.1:3322"),
+		AuditImmuDBUsername: getEnv("AUDIT_IMMUDB_USERNAME", ""),
+		AuditImmuDBPassword: getEnv("AUDIT_IMMUDB_PASSWORD", ""),
+		AuditImmuDBDatabase: getEnv("AUDIT_IMMUDB_DATABASE", ""),
 
 		// PR-W4.1: anchor signing.
 		AuditAnchorSigningKey: getEnv("AUDIT_ANCHOR_SIGNING_KEY", ""),

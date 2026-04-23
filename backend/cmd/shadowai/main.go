@@ -340,8 +340,22 @@ func main() {
 	if cfg.AuditAnchorInterval > 0 {
 		anchorRepo := chain.NewAnchorRepository(db)
 		var anchorSink chain.AnchorSink = chain.NoOpSink{}
-		if cfg.AuditAnchorSink == "file://" && cfg.AuditAnchorSinkPath != "" {
-			anchorSink = chain.NewFileSink(cfg.AuditAnchorSinkPath)
+		switch cfg.AuditAnchorSink {
+		case "file://":
+			if cfg.AuditAnchorSinkPath != "" {
+				anchorSink = chain.NewFileSink(cfg.AuditAnchorSinkPath)
+			}
+		case "immudb://":
+			// PR-W4.2: immudb:// sink. Provide real ImmuDBClient implementation
+			// via github.com/codenotary/immudb/pkg/client when deploying.
+			// Here we configure the sink; actual client connection is left to
+			// the operator's integration layer (see docs/rfcs/2026-04-pr-w1-worm).
+			log.Printf("anchor scheduler: immudb:// sink configured (addr=%s db=%s)",
+				cfg.AuditImmuDBAddr, cfg.AuditImmuDBDatabase)
+			// To connect real immudb: swap NoOpSink with ImmuDBSink backed by
+			// a concrete ImmuDBClient implementation.
+			// anchorSink = chain.NewImmuDBSink(realClient, cfg.AuditImmuDBDatabase)
+			log.Printf("anchor scheduler: immudb:// real client connection not yet wired — using NoOp fallback until W4.2 integration")
 		}
 		anchorSched := chain.NewAnchorScheduler(anchorRepo, anchorSink, cfg.AuditAnchorInterval,
 			append([]string{"audit_logs", "audit_purge_runs"}, entBundle.AnchorExtraTables...))

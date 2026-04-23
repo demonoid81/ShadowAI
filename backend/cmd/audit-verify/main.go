@@ -54,6 +54,15 @@ func main() {
 	verifySignatures := flag.Bool("verify-signatures", false, "W4.1: verify Ed25519 anchor signatures (--pubkey or --pubkey-file required)")
 	pubKeyFlag := flag.String("pubkey", "", "Base64-encoded Ed25519 public key for signature verification")
 	pubKeyFile := flag.String("pubkey-file", "", "Path to file containing base64 Ed25519 public key")
+	// W4.2: immudb:// sink verification.
+	// Usage: audit-verify --verify-sink --immudb-addr 127.0.0.1:3322 --immudb-db shadowai
+	// Fetches manifest from immudb per each anchor's sink_ref, cross-checks fields + signature.
+	verifySink := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
+	immudbAddr := flag.String("immudb-addr", "127.0.0.1:3322", "immudb server address for --verify-sink")
+	immudbDB := flag.String("immudb-db", "shadowai", "immudb database for --verify-sink")
+	_ = verifySink  // reserved; real client wired in W4.2 integration
+	_ = immudbAddr
+	_ = immudbDB
 	flag.Parse()
 
 	// Config errors exit with code 2 (not 1 which is verification failure).

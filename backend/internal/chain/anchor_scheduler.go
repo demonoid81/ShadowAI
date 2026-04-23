@@ -145,23 +145,25 @@ func (s *AnchorScheduler) anchorTable(ctx context.Context, tableName string) err
 		SinkName:   s.sink.Name(),
 	}
 
-	// Write to sink (fail-open: on error, still write to PG with sink_ok=false).
-	ref, sinkErr := s.sink.Write(ctx, a)
-	a.SinkRef = ref
-	a.SinkOK = sinkErr == nil
-	if sinkErr != nil {
-		log.Printf("anchor scheduler: table=%s sink write failed (anchor still written to PG): %v",
-			tableName, sinkErr)
-	}
+	// PR-W4.2 two-phase sink flow:
+	//   1. BuildRef → deterministic ref set on anchor (no I/O).
+	//   2. Sign canonical (which now includes sink_ref).
+	//   3. Serialize to signed manifest JSON.
+	//   4. Write manifest to sink.
+	// This order ensures the signature covers the exact sink_ref,
+	// and the sink stores the fully-signed manifest.
 
-	// PR-W4.1: sign manifest AFTER sink write (canonical includes sink_ref).
+	// Phase 1: get deterministic ref (no write yet).
+	ref := s.sink.BuildRef(a)
+	a.SinkName = s.sink.Name()
+	a.SinkRef = ref
+
+	// Phase 2: sign (canonical covers sink_ref).
 	if len(s.signingKey) > 0 && s.pubKeyID != "" {
 		if err := SignAnchor(a, s.signingKey, s.pubKeyID); err != nil {
 			return fmt.Errorf("anchor %s: sign: %w", tableName, err)
 		}
-		// Self-verify: catch misconfiguration before persisting to DB.
 		if s.selfVerify {
-			// Use the configured pubKey if provided; derive from privKey otherwise.
 			var verifyKey ed25519.PublicKey
 			if len(s.selfVerifyKey) > 0 {
 				verifyKey = s.selfVerifyKey
@@ -172,6 +174,20 @@ func (s *AnchorScheduler) anchorTable(ctx context.Context, tableName string) err
 				return fmt.Errorf("anchor %s: self-verify failed (AUDIT_ANCHOR_PUBKEY mismatch)", tableName)
 			}
 		}
+	}
+
+	// Phase 3: serialize signed manifest.
+	manifest, err := MarshalSignedManifest(a)
+	if err != nil {
+		return fmt.Errorf("anchor %s: marshal manifest: %w", tableName, err)
+	}
+
+	// Phase 4: write to sink (fail-open).
+	sinkErr := s.sink.Write(ctx, manifest, ref)
+	a.SinkOK = sinkErr == nil
+	if sinkErr != nil {
+		log.Printf("anchor scheduler: table=%s sink write failed (anchor still written to PG): %v",
+			tableName, sinkErr)
 	}
 
 	// Write to audit_chain_anchors.
