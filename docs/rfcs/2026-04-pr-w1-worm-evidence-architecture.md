@@ -682,10 +682,15 @@ Scope:
    не в DB) после получения advisory lock и до INSERT. Конкурентность
    сериализуется на DB-уровне.
 
-2. **Canonical row serialization spec**: JSON (deterministic field order)?
-   Protocol Buffers? Simple concatenation of typed fields? **Recommendation**:
-   custom fixed-field concatenation (strings left-padded, fixed-width where
-   possible) — минимально зависит от JSON library implementation differences.
+2. **Canonical row serialization spec**: RESOLVED — versioned fixed-field
+   concatenation `v1|field1|field2|...`. Не JSON (нет зависимости от
+   JSON library ordering, escaping, float formatting). Поля в fixed
+   canonical order, разделитель `|`. Числа в decimal, timestamp в
+   Unix epoch (UTC integer). cost_usd = integer microcents (avoid float
+   variability). pii_types = comma-joined sorted slice. NULL = empty
+   string. Version prefix `v1` позволяет добавить новые field layouts
+   в будущем без invalidation старых rows. Конкретные layouts по
+   таблицам фиксируются в W2 implementation PR (package chain/canonical.go).
 
 3. **chain_secret rotation policy**: при ротации нужно либо re-hash все
    существующие rows (expensive), либо поддерживать multiple active secrets
