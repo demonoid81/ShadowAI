@@ -1,6 +1,6 @@
 # ShadowAI — Privacy / Retention / DSAR / Legal-Hold / Incident Runbook
 
-**Версия документа:** 1.18
+**Версия документа:** 1.19
 **Дата:** 2026-04-19
 **Audience:** ops, compliance, legal, incident responders.
 **Покрывает:** ShadowAI backend после merge PR-A/B/C/D/D.1.
@@ -736,6 +736,29 @@ external tooling.
 
 ## 9. Change log
 
+- **1.19 (2026-04-23)** — PR-F7.3: structured streaming audit outcomes.
+  Migration `backend/migrations/009_add_streaming_audit_outcomes.sql`
+  добавляет 3 колонки в `audit_logs`: `outcome`, `fallback_reason`,
+  `usage_source`. Compound marker hack из F7.2.1
+  (`streaming_buffered_fallback:<x>` в `policy_action`) строго
+  удалён.
+  **Breaking changes (synchronous dashboard/SIEM rollout):**
+  - `policy_action` больше не содержит transport/accounting
+    семантики; возвращается к чистым verdict'ам (allowed/blocked/
+    flagged/sanitized).
+  - Старые F7.1/F7.2 значения в `policy_action`
+    (`streaming_transport_error`, `streaming_flagged`,
+    `streaming_blocked_midflight`, `streaming_buffered_fallback`,
+    `streaming_budget_exceeded_soft`) переехали в `outcome` как
+    `stream_transport_error` / `stream_flagged` / etc.
+  - Новый outcome `stream_blocked` (без `_midflight` суффикса) для
+    buffered-path блока (stream machinery была invoked, client
+    получил 403 до emit'а).
+  - Compound marker `streaming_buffered_fallback:<x>` убран полностью.
+  - SIEM JSON получает 3 новых поля (`outcome`, `fallback_reason`,
+    `usage_source`) с `omitempty` — legacy записи без них.
+  Dashboards должны матчить `outcome` вместо `HasPrefix(policy_action,
+  "streaming_")`.
 - **1.18 (2026-04-22)** — PR-L2.3.1 follow-up по ревью:
   - Release на pending перестал collapse'иться в 200
     `already_released`. Новый sentinel `ErrPendingNotReleasable`

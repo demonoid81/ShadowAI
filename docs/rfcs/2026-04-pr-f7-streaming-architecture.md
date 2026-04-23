@@ -436,22 +436,28 @@ frame mix, undocumented keepalive, ParseStreamUsage soft-fail на
 
 ## 11. Audit Contract
 
-Для streaming path audit builder должен различать минимум следующие
-outcomes (будут отражаться в `audit_logs.policy_action` +
-`audit_logs.metadata`):
+**PR-F7.3 schema** (migration 009): три отдельных поля в :
 
-| Outcome                              | Когда                                                        |
-|--------------------------------------|--------------------------------------------------------------|
-| `stream_completed`                   | normal clean flow, все chunks passed                         |
-| `stream_flagged`                     | один или более flag, stream прошёл целиком                   |
-| `stream_sanitized`                   | Stage 1 sanitize применён (deterministic chunk-local)        |
-| `stream_blocked_midflight`           | inspector вернул block, stream прерван                       |
-| `stream_upstream_error`              | provider вернул error mid-stream (5xx / stream error event)  |
-| `stream_usage_parse_failed`          | uplink ok, usage не извлечён — soft-fail (существующая метрика) |
-| `stream_buffered_fallback`           | promotion на legacy buffered path (explicit). **F7.2 interim:** marker эмитится в `policy_action` как `streaming_buffered_fallback` (если buffered decision = allow) или compound `streaming_buffered_fallback:<original>` (если buffered отдал block/flag/sanitize). Dashboards query'ят через `HasPrefix`. F7.3 audit outcome classifier должен формализовать через отдельное поле `fallback_reason` (требует schema migration в audit_logs). |
-| `streaming_transport_error`          | PR-F7.1: decoder/emitter failed с non-cancel error. Audit StatusCode=502. Buffered path в аналогичной ситуации (io.ReadAll err) audit не пишет вовсе — F7.1 incremental честнее. |
-| `streaming_budget_exceeded_soft`     | PR-F7.1: post-call CheckBudgetAfterUsage вернул over-budget, но body уже ушёл клиенту. Audit StatusCode=200 (отражает real client outcome); маркер явно признаёт divergence от buffered (где был бы 402 + блок body). RecordBudgetBlock инкрементит счётчик для следующих запросов. |
+-  — только policy/security verdict (allowed/blocked/flagged/sanitized).
+  Не перегружен transport/accounting семантикой.
+-  — transport-level итог. Пустое значение = non-streaming или request-side
+  early reject.
+-  — non-empty при .
+-  — origin accounting: , .  reserved (F7.4).
 
+Для streaming path audit builder различает следующие outcomes:
+
+| Outcome                          | Когда                                                                        |
+|----------------------------------|------------------------------------------------------------------------------|
+| `""` (empty)                     | Non-streaming (`chatReq.Stream=false`) или request-side early reject. Stream machinery не запускалась. |
+| `stream_completed`               | Normal clean flow, все chunks passed. `policy_action` → allowed/sanitized. |
+| `stream_flagged`                 | Flag накоплен, stream прошёл целиком. `policy_action` → flagged. |
+| `stream_blocked`                 | **PR-F7.3:** Buffered path заблокировал после `io.ReadAll`, до emit — client получил 403 без stream body. `policy_action` → blocked. |
+| `stream_blocked_midflight`       | Incremental path заблокировал после начала emit — client получил partial bytes + SSE terminal error frame. Audit StatusCode=403. |
+| `stream_buffered_fallback`       | Incremental requested, capability/provider заставили buffered path. `fallback_reason` non-empty. `policy_action` дублирует buffered's final verdict. |
+| `stream_transport_error`         | Decoder/emitter non-cancel error. Audit StatusCode=502. |
+| `stream_usage_parse_failed`      | `parseErr != nil` (parser fatal). Отличается от "usage не найден" (outcome=`stream_completed` + `usage_source=none`). |
+| `stream_budget_exceeded_soft`    | Incremental post-call budget over, body уже ушёл. Audit StatusCode=200. `RecordBudgetBlock` инкрементит для следующих запросов. |
 ### 11.1 Request body
 
 Same privacy rules as today (`AUDIT_PAYLOAD_MODE`, existing

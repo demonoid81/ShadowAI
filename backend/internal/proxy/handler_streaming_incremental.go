@@ -24,50 +24,17 @@ import (
 // streaming_transport_error маркером независимо от фазы.
 var errTransportEmit = errors.New("streaming: downstream emit failed")
 
-// PR-F7.1 / PR-F7.2 audit markers для incremental mode. Явные
-// строки, чтобы ops-дашборды могли queriify "какие стримы ушли
-// через incremental без full enforcement" vs "какие были
-// downgrade'нуты в buffered fallback".
-//
-//   PolicyActionStreamingBudgetExceededSoft — PR-F7.1. Post-call
-//   budget check вернул over-budget, но body уже ушёл клиенту. В
-//   buffered режиме это был бы 402 с блоком body; в incremental
-//   audit пишется с этим маркером + RecordBudgetBlock инкрементит
-//   счётчик для последующих запросов.
-//
-//   PolicyActionStreamingTransportError — PR-F7.1. Decoder или
-//   emitter упал на non-cancel error (ctx.Err client-disconnect-like
-//   → не считается transport error'ом и пишется как allow). В audit
-//   отражается как 502 Bad Gateway + этот маркер. Buffered path в
-//   аналогичной ситуации (io.ReadAll err) возвращает 502 клиенту и
-//   audit не пишет — incremental теперь честнее в audit footprint.
-//
-//   PolicyActionStreamingFlagged — PR-F7.2. Incremental inspection
-//   engine накопил flag на стриме (response-side inspector вернул
-//   ActionFlag или sanitize-downgrade'нуто до flag). Stream прошёл
-//   до конца без block'а. Audit StatusCode=200, marker — для
-//   ops-query'ей.
-//
-//   PolicyActionStreamingBlockedMidflight — PR-F7.2. Incremental
-//   inspector вернул ActionBlock на delta. Transport эмитнул
-//   terminal error frame, upstream закрыт. Audit StatusCode=403
-//   (consistent с buffered block audit), marker отличает "блок
-//   случился mid-stream, client получил partial" от "блок до
-//   первого flush'а".
-//
-//   PolicyActionStreamingBufferedFallback — PR-F7.2. Stream должен
-//   был пойти incremental, но capability-check на wire-time сказал
-//   "есть inspector, требующий buffered path" (на сейчас — только
-//   CM+judge.Enabled, RFC §12.6). Весь stream обрабатывается через
-//   legacy buffered branch, но audit помечается, чтобы было видно:
-//   client запросил incremental, но deployment не смог предоставить.
-const (
-	PolicyActionStreamingBudgetExceededSoft  = "streaming_budget_exceeded_soft"
-	PolicyActionStreamingTransportError      = "streaming_transport_error"
-	PolicyActionStreamingFlagged             = "streaming_flagged"
-	PolicyActionStreamingBlockedMidflight    = "streaming_blocked_midflight"
-	PolicyActionStreamingBufferedFallback    = "streaming_buffered_fallback"
-)
+// PR-F7.3: PolicyAction'Streaming'*  константы удалены. Transport /
+// accounting semantics перенесены в separate structured fields:
+//   policy_action    — только policy/security verdict (allowed/
+//                      blocked/flagged/sanitized).
+//   outcome          — transport-level итог (см. streaming_audit.go
+//                      Outcome*).
+//   fallback_reason  — почему incremental не применён.
+//   usage_source     — origin accounting data.
+// Compound marker hack (streaming_buffered_fallback:<original>) из
+// F7.2.1 удалён строго — dashboards должны быть обновлены синхронно
+// с deploy.
 
 // errMidstreamBlock — sentinel для выхода из decoder callback'а
 // когда inspector сказал block. Обёрнут так, чтобы caller-side
@@ -255,26 +222,6 @@ func (h *Handler) shouldUseIncrementalStream(providerName string) (streaming.Ada
 	return a, true, ""
 }
 
-// composeBufferedFallbackMarker — helper для audit PolicyAction в
-// buffered path после fallback'а. Contract:
-//   - fallbackReason == "" → возвращает original как есть;
-//   - fallbackReason != "" и original == allow →
-//     "streaming_buffered_fallback";
-//   - fallbackReason != "" и original != allow → compound
-//     "streaming_buffered_fallback:<original>" (PR-F7.2 review fix
-//     observability gap: fallback-факт не терялся при block/flag
-//     внутри buffered path'а).
-//
-// Dashboards query'ят через HasPrefix(policy_action,
-// "streaming_buffered_fallback"); suffix после ':' — fallthrough
-// buffered decision. F7.3 audit outcome classifier должен
-// формализовать это через отдельное поле (RFC §11).
-func composeBufferedFallbackMarker(original, fallbackReason string) string {
-	if fallbackReason == "" {
-		return original
-	}
-	if original == "allowed" {
-		return PolicyActionStreamingBufferedFallback
-	}
-	return PolicyActionStreamingBufferedFallback + ":" + original
-}
+// composeBufferedFallbackMarker: удалён в PR-F7.3. Заменён на
+// structured outcome/fallback_reason fields в domain.AuditLog
+// (см. streaming_audit.go Outcome* + classifyBufferedOutcome).

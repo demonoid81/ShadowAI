@@ -493,28 +493,32 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 			}
-			// Audit outcome classification. Приоритет:
-			//   1. mid-stream block (inspector верховодит).
-			//   2. transport error (decoder/emitter упал).
-			//   3. budget soft-exceed.
-			//   4. flag (прошёл до конца с пометкой).
-			//   5. обычное прохождение.
+			// PR-F7.3: structured audit fields (RFC §11).
+			//   policy_action — policy/security verdict (block over
+			//                   allow если inspector block'нул; иначе
+			//                   flagged если flagged; иначе original).
+			//   outcome       — transport-level итог через
+			//                   classifyIncrementalOutcome.
+			//   fallback_reason — "" (fallback не случился, мы
+			//                     в incremental ветке).
+			//   usage_source  — final / none через classifyUsageSource.
+			// StatusCode отражает audit-side classification:
+			// Block→403, Transport error→502, прочее→resp.StatusCode.
+			overBudget := false
+			if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
+				metrics.RecordBudgetBlock(true)
+				overBudget = true
+			}
+			auditOutcome := classifyIncrementalOutcome(res.Blocked, res.TransportErr != nil, parseErr, overBudget, res.Flagged)
 			auditStatus := resp.StatusCode
-			auditAction := policyAction
-			switch {
-			case res.Blocked:
+			auditPolicyAction := policyAction
+			if res.Blocked {
 				auditStatus = http.StatusForbidden
-				auditAction = PolicyActionStreamingBlockedMidflight
-			case res.TransportErr != nil:
+				auditPolicyAction = string(dlp.DLPActionBlock)
+			} else if res.TransportErr != nil {
 				auditStatus = http.StatusBadGateway
-				auditAction = PolicyActionStreamingTransportError
-			default:
-				if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
-					metrics.RecordBudgetBlock(true)
-					auditAction = PolicyActionStreamingBudgetExceededSoft
-				} else if res.Flagged {
-					auditAction = PolicyActionStreamingFlagged
-				}
+			} else if res.Flagged && auditPolicyAction == string(dlp.DLPActionAllow) {
+				auditPolicyAction = "flagged"
 			}
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
@@ -525,7 +529,10 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected: piiDetected, PIITypes: piiTypes,
-				PolicyAction: auditAction, DurationMs: int(time.Since(start).Milliseconds()),
+				PolicyAction:   auditPolicyAction,
+				Outcome:        auditOutcome,
+				UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
 			return
 		}
@@ -596,6 +603,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
 
 		if responseDecision.Action == dlp.DLPActionBlock {
+			// PR-F7.3: structured streaming fields. usage_source=none
+			// (usage не parse'ится при block — early return).
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -603,7 +612,11 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				Model:        model, Provider: providerName, Endpoint: endpoint,
 				StatusCode:   resp.StatusCode,
 				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-				PolicyAction: responsePolicyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				PolicyAction:   responsePolicyAction,
+				Outcome:        classifyBufferedOutcome(responsePolicyAction, streamingFallbackReason != "", nil),
+				FallbackReason: streamingFallbackReason,
+				UsageSource:    UsageSourceNone,
+				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -643,6 +656,9 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		if err == nil && !allowedAfter {
 			recordUsage()
 			metrics.RecordBudgetBlock(true)
+			// PR-F7.3: structured streaming fields. Hard budget block
+			// в buffered → outcome=stream_blocked (fallback marker
+			// доминирует если mode был incremental).
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -652,7 +668,11 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-				PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				PolicyAction:   policyAction,
+				Outcome:        bufferedBudgetBlockOutcome(streamingFallbackReason != ""),
+				FallbackReason: streamingFallbackReason,
+				UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusPaymentRequired)
@@ -663,12 +683,10 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		// PR-F7.2 + review fix: если buffered branch выполнился как
-		// fallback из incremental (capability / unsupported provider),
-		// пометить audit. Compound marker сохраняет сильный сигнал
-		// (blocked/sanitized/flagged) как suffix, чтобы fallback-факт
-		// не терялся.
-		buffPolicyAction := composeBufferedFallbackMarker(policyAction, streamingFallbackReason)
+		// PR-F7.3: structured streaming fields для buffered path.
+		// policy_action остаётся чистым verdict'ом (block/flag/
+		// sanitize/allow); fallback/transport/usage перешли в
+		// отдельные поля.
 		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -678,7 +696,11 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,
 			TotalTokens: totalTokens, CostUSD: cost,
 			PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-			PolicyAction: buffPolicyAction, DurationMs: int(time.Since(start).Milliseconds()),
+			PolicyAction:   policyAction,
+			Outcome:        classifyBufferedOutcome(policyAction, streamingFallbackReason != "", parseErr),
+			FallbackReason: streamingFallbackReason,
+			UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+			DurationMs:     int(time.Since(start).Milliseconds()),
 		})
 		w.Write(responsePayload)
 		return
@@ -1599,22 +1621,23 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 				}
+				// PR-F7.3: structured audit fields — симметрично
+				// ProxyChat incremental ветке.
+				overBudget := false
+				if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
+					metrics.RecordBudgetBlock(true)
+					overBudget = true
+				}
+				auditOutcome := classifyIncrementalOutcome(res.Blocked, res.TransportErr != nil, parseErr, overBudget, res.Flagged)
 				auditStatus := resp.StatusCode
-				auditAction := policyAction
-				switch {
-				case res.Blocked:
+				auditPolicyAction := policyAction
+				if res.Blocked {
 					auditStatus = http.StatusForbidden
-					auditAction = PolicyActionStreamingBlockedMidflight
-				case res.TransportErr != nil:
+					auditPolicyAction = string(dlp.DLPActionBlock)
+				} else if res.TransportErr != nil {
 					auditStatus = http.StatusBadGateway
-					auditAction = PolicyActionStreamingTransportError
-				default:
-					if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
-						metrics.RecordBudgetBlock(true)
-						auditAction = PolicyActionStreamingBudgetExceededSoft
-					} else if res.Flagged {
-						auditAction = PolicyActionStreamingFlagged
-					}
+				} else if res.Flagged && auditPolicyAction == string(dlp.DLPActionAllow) {
+					auditPolicyAction = "flagged"
 				}
 				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
@@ -1625,7 +1648,10 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					PromptTokens: promptTokens, CompletionTokens: completionTokens,
 					TotalTokens: totalTokens, CostUSD: cost,
 					PIIDetected: piiDetected, PIITypes: piiTypes,
-					PolicyAction: auditAction, DurationMs: int(time.Since(start).Milliseconds()),
+					PolicyAction:   auditPolicyAction,
+					Outcome:        auditOutcome,
+					UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+					DurationMs:     int(time.Since(start).Milliseconds()),
 				})
 				return
 			}
@@ -1687,6 +1713,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			responsePIITypes = appendUniqueTypes(responsePIITypes, h.dlpTypes(responseDecision.Findings))
 
 			if responseDecision.Action == dlp.DLPActionBlock {
+				// PR-F7.3: structured streaming fields. См. ProxyChat аналог.
 				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(respBytes, responseFindings, responseDecision),
@@ -1695,7 +1722,11 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					PromptTokens: 0, CompletionTokens: 0,
 					TotalTokens:  0, CostUSD: 0,
 					PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-					PolicyAction: responsePolicyAction, DurationMs: int(time.Since(start).Milliseconds()),
+					PolicyAction:   responsePolicyAction,
+					Outcome:        classifyBufferedOutcome(responsePolicyAction, streamingFallbackReason != "", nil),
+					FallbackReason: streamingFallbackReason,
+					UsageSource:    UsageSourceNone,
+					DurationMs:     int(time.Since(start).Milliseconds()),
 				})
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
@@ -1728,6 +1759,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			if err == nil && !allowedAfter {
 				recordStreamUsage()
 				metrics.RecordBudgetBlock(true)
+				// PR-F7.3: structured streaming fields. См. ProxyChat аналог.
 				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
@@ -1737,7 +1769,11 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					PromptTokens: promptTokens, CompletionTokens: completionTokens,
 					TotalTokens: totalTokens, CostUSD: cost,
 					PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-					PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+					PolicyAction:   policyAction,
+					Outcome:        bufferedBudgetBlockOutcome(streamingFallbackReason != ""),
+					FallbackReason: streamingFallbackReason,
+					UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+					DurationMs:     int(time.Since(start).Milliseconds()),
 				})
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusPaymentRequired)
@@ -1746,8 +1782,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 			recordStreamUsage()
 
-			// PR-F7.2 + review fix: compound fallback marker.
-			buffPolicyAction := composeBufferedFallbackMarker(policyAction, streamingFallbackReason)
+			// PR-F7.3: structured streaming fields. См. ProxyChat аналог.
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -1756,7 +1791,11 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-				PolicyAction: buffPolicyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				PolicyAction:   policyAction,
+				Outcome:        classifyBufferedOutcome(policyAction, streamingFallbackReason != "", parseErr),
+				FallbackReason: streamingFallbackReason,
+				UsageSource:    classifyUsageSource(streamUsage.Found, parseErr),
+				DurationMs:     int(time.Since(start).Milliseconds()),
 			})
 			copyHeadersWithoutContentLength(w.Header(), resp.Header)
 			w.Header().Set("X-Provider", candidate.Name)

@@ -5,44 +5,18 @@ import (
 	"testing"
 )
 
-// TestComposeBufferedFallbackMarker — PR-F7.2 review fix #3: compound
-// marker сохраняет fallback-факт, даже если buffered path внутри
-// отдал flag/block/sanitize.
-func TestComposeBufferedFallbackMarker(t *testing.T) {
-	cases := []struct {
-		name           string
-		original       string
-		fallbackReason string
-		want           string
-	}{
-		{"no_fallback_allow", "allowed", "", "allowed"},
-		{"no_fallback_block", "blocked", "", "blocked"},
-		{"fallback_clean_allow", "allowed", "judge_inspector", PolicyActionStreamingBufferedFallback},
-		{"fallback_plus_block", "blocked", "judge_inspector", PolicyActionStreamingBufferedFallback + ":blocked"},
-		{"fallback_plus_sanitize", "sanitized", "unsupported_provider", PolicyActionStreamingBufferedFallback + ":sanitized"},
-		{"fallback_plus_flag", "flagged", "judge_inspector", PolicyActionStreamingBufferedFallback + ":flagged"},
-		{"fallback_plus_empty_original", "", "judge_inspector", PolicyActionStreamingBufferedFallback + ":"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := composeBufferedFallbackMarker(c.original, c.fallbackReason)
-			if got != c.want {
-				t.Errorf("composeBufferedFallbackMarker(%q, %q) = %q, want %q",
-					c.original, c.fallbackReason, got, c.want)
-			}
-		})
-	}
-}
-
-// TestShouldUseIncrementalStream_NoSharedState — PR-F7.2 review fix
-// #1 regression guard. Ранее Handler хранил fallback reason в shared
-// mutable field → data race при concurrent streaming-запросах. После
-// fix'а reason — request-local, возвращается из функции.
+// TestShouldUseIncrementalStream_NoSharedState — PR-F7.2.1 review
+// fix #1 regression guard. Ранее Handler хранил fallback reason в
+// shared mutable field → data race при concurrent streaming-запросах.
+// После fix'а reason — request-local, возвращается из функции.
 //
-// Сценарий: один Handler вызывается concurrent'но с разными provider
-// names, часть из которых unsupported. Каждый caller должен получить
-// корректный fallback reason, соответствующий своему провайдеру, без
-// leak'а между goroutine'ами.
+// PR-F7.3: compound marker helper удалён (TestComposeBufferedFallbackMarker
+// тест удалён); вся fallback observability теперь в structured
+// Outcome/FallbackReason полях (покрыто classifier tests в
+// streaming_audit_test.go + end-to-end в handler_streaming_f73_test.go).
+//
+// Этот тест регрессионно проверяет, что сигнатура
+// shouldUseIncrementalStream остаётся concurrent-safe.
 func TestShouldUseIncrementalStream_NoSharedState(t *testing.T) {
 	h := &Handler{streamingMode: "incremental"}
 	// Capability не fallback (no CM+judge). Это изолирует тест на
@@ -59,15 +33,13 @@ func TestShouldUseIncrementalStream_NoSharedState(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < iterations; i++ {
 		wg.Add(2)
-		// Поток A: supported provider (openai). Ожидает ok=true,
-		// reason="".
+		// Supported provider (openai).
 		go func() {
 			defer wg.Done()
 			_, ok, reason := h.shouldUseIncrementalStream("openai")
 			results <- result{"openai", ok, reason}
 		}()
-		// Поток B: unsupported provider (cohere). Ожидает ok=false,
-		// reason="unsupported_provider".
+		// Unsupported provider (cohere).
 		go func() {
 			defer wg.Done()
 			_, ok, reason := h.shouldUseIncrementalStream("cohere")

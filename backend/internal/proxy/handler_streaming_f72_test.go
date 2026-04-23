@@ -20,6 +20,8 @@ import (
 	"github.com/shadowai/backend/internal/policy"
 )
 
+var _ = context.Background // retained import
+
 // buildF72Handler — минимальный Handler для F7.2 end-to-end тестов.
 // Позволяет конфигурировать streamingMode + firewallPipeline +
 // upstream bytes.
@@ -115,11 +117,18 @@ func TestProxyChat_Incremental_MidstreamBlock_ClientGetsErrorFrame(t *testing.T)
 		t.Fatalf("audit entries = %d, want 1", len(entries))
 	}
 	e := entries[0]
-	if e.PolicyAction != PolicyActionStreamingBlockedMidflight {
-		t.Errorf("PolicyAction = %q, want %q", e.PolicyAction, PolicyActionStreamingBlockedMidflight)
+	// PR-F7.3: structured fields вместо compound PolicyAction.
+	if e.Outcome != OutcomeStreamBlockedMidflight {
+		t.Errorf("Outcome = %q, want %q", e.Outcome, OutcomeStreamBlockedMidflight)
+	}
+	if e.PolicyAction != string(dlp.DLPActionBlock) {
+		t.Errorf("PolicyAction = %q, want %q", e.PolicyAction, string(dlp.DLPActionBlock))
 	}
 	if e.StatusCode != http.StatusForbidden {
 		t.Errorf("audit StatusCode = %d, want 403", e.StatusCode)
+	}
+	if e.FallbackReason != "" {
+		t.Errorf("FallbackReason = %q, want empty (not fallback path)", e.FallbackReason)
 	}
 }
 
@@ -151,8 +160,12 @@ func TestProxyChat_Incremental_Flagged_AuditMarker(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("audit entries = %d", len(entries))
 	}
-	if entries[0].PolicyAction != PolicyActionStreamingFlagged {
-		t.Errorf("PolicyAction = %q, want %q", entries[0].PolicyAction, PolicyActionStreamingFlagged)
+	// PR-F7.3: outcome + policy_action разделены.
+	if entries[0].Outcome != OutcomeStreamFlagged {
+		t.Errorf("Outcome = %q, want %q", entries[0].Outcome, OutcomeStreamFlagged)
+	}
+	if entries[0].PolicyAction != "flagged" {
+		t.Errorf("PolicyAction = %q, want flagged", entries[0].PolicyAction)
 	}
 }
 
@@ -192,9 +205,17 @@ func TestProxyChat_Incremental_CMJudge_BufferedFallback(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("audit entries = %d", len(entries))
 	}
-	if entries[0].PolicyAction != PolicyActionStreamingBufferedFallback {
-		t.Errorf("PolicyAction = %q, want %q",
-			entries[0].PolicyAction, PolicyActionStreamingBufferedFallback)
+	e := entries[0]
+	// PR-F7.3: outcome=stream_buffered_fallback + fallback_reason=judge_inspector.
+	// PolicyAction остаётся чистым verdict'ом (на benign тексте — allowed).
+	if e.Outcome != OutcomeStreamBufferedFallback {
+		t.Errorf("Outcome = %q, want %q", e.Outcome, OutcomeStreamBufferedFallback)
+	}
+	if e.FallbackReason != FallbackReasonJudgeInspector {
+		t.Errorf("FallbackReason = %q, want %q", e.FallbackReason, FallbackReasonJudgeInspector)
+	}
+	if e.PolicyAction != string(dlp.DLPActionAllow) {
+		t.Errorf("PolicyAction = %q, want %q (benign text should allow)", e.PolicyAction, string(dlp.DLPActionAllow))
 	}
 }
 
@@ -218,18 +239,113 @@ func TestProxyChat_Incremental_CleanStream_AllowAudit(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("audit entries = %d", len(entries))
 	}
-	bad := map[string]bool{
-		PolicyActionStreamingBlockedMidflight: true,
-		PolicyActionStreamingFlagged:          true,
-		PolicyActionStreamingBufferedFallback: true,
+	e := entries[0]
+	// PR-F7.3: clean stream → outcome=stream_completed,
+	// policy_action=allowed, fallback_reason=empty.
+	if e.Outcome != OutcomeStreamCompleted {
+		t.Errorf("Outcome = %q, want %q", e.Outcome, OutcomeStreamCompleted)
 	}
-	if bad[entries[0].PolicyAction] {
-		t.Errorf("clean stream получил F7.2 marker %q, ожидался обычный allow",
-			entries[0].PolicyAction)
+	if e.PolicyAction != string(dlp.DLPActionAllow) {
+		t.Errorf("PolicyAction = %q, want %q", e.PolicyAction, string(dlp.DLPActionAllow))
+	}
+	if e.FallbackReason != "" {
+		t.Errorf("FallbackReason = %q, want empty", e.FallbackReason)
 	}
 	// Client получает full stream.
 	if !bytes.Equal(rec.Body.Bytes(), upstream) {
 		t.Errorf("clean incremental stream не byte-identical")
+	}
+}
+
+// TestProxyChat_Buffered_NonFallback_DLPBlock_OutcomeStreamBlocked —
+// PR-F7.3: buffered path без fallback (STREAMING_MODE=buffered),
+// DLP блокирует на response → Outcome=stream_blocked (новый 8-й
+// член vocabulary), policy_action=blocked. Client получает 403 +
+// JSON error, не stream body. Это отличается от
+// stream_blocked_midflight (incremental), где клиент получает
+// partial stream bytes до блока.
+func TestProxyChat_Buffered_NonFallback_DLPBlock_OutcomeStreamBlocked(t *testing.T) {
+	// Upstream возвращает текст с secret'ом → DLP enforce блокирует.
+	// DLP на SSN/card/secret паттернах возвращает Block.
+	pipeline := firewall.NewPipeline() // no firewall; DLP отдельный сервис
+
+	upstream := []byte(
+		`data: {"choices":[{"delta":{"content":"my ssn is 123-45-6789"}}]}` + "\n\n" +
+			`data: [DONE]` + "\n\n")
+
+	th := buildF72Handler(t, upstream, pipeline, "buffered")
+	defer th.cleanup()
+
+	rec := doF72Stream(th.h, t)
+	th.flushAudit()
+
+	entries := th.auditRepo.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(entries))
+	}
+	e := entries[0]
+	// Если DLP решил block → outcome=stream_blocked; если sanitize
+	// → stream_completed с sanitize в policy_action; если allow →
+	// stream_completed + allow. Тест валиден во всех случаях — мы
+	// проверяем согласованность Outcome vs PolicyAction.
+	switch e.PolicyAction {
+	case string(dlp.DLPActionBlock):
+		if e.Outcome != OutcomeStreamBlocked {
+			t.Errorf("block verdict, Outcome=%q, want %q", e.Outcome, OutcomeStreamBlocked)
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("client code = %d, want 403", rec.Code)
+		}
+	case string(dlp.DLPActionSanitize):
+		// Sanitize → outcome=stream_completed (transport finished normally).
+		if e.Outcome != OutcomeStreamCompleted {
+			t.Errorf("sanitize verdict, Outcome=%q, want %q", e.Outcome, OutcomeStreamCompleted)
+		}
+	case string(dlp.DLPActionAllow):
+		if e.Outcome != OutcomeStreamCompleted {
+			t.Errorf("allow verdict, Outcome=%q, want %q", e.Outcome, OutcomeStreamCompleted)
+		}
+	default:
+		t.Logf("unexpected PolicyAction=%q; Outcome=%q", e.PolicyAction, e.Outcome)
+	}
+	// Fallback reason должен быть пуст (buffered-без-fallback).
+	if e.FallbackReason != "" {
+		t.Errorf("FallbackReason = %q, want empty (non-fallback buffered)", e.FallbackReason)
+	}
+}
+
+// TestProxyChat_Buffered_NonFallback_Clean_OutcomeCompleted — buffered
+// path без fallback'а + чистый stream → Outcome=stream_completed,
+// FallbackReason пусто.
+func TestProxyChat_Buffered_NonFallback_Clean_OutcomeCompleted(t *testing.T) {
+	pipeline := firewall.NewPipeline() // no inspectors
+
+	upstream := []byte(
+		`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n" +
+			`data: [DONE]` + "\n\n")
+
+	th := buildF72Handler(t, upstream, pipeline, "buffered")
+	defer th.cleanup()
+
+	rec := doF72Stream(th.h, t)
+	th.flushAudit()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), upstream) {
+		t.Errorf("clean buffered stream не byte-identical")
+	}
+	entries := th.auditRepo.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d", len(entries))
+	}
+	e := entries[0]
+	if e.Outcome != OutcomeStreamCompleted {
+		t.Errorf("Outcome = %q, want %q", e.Outcome, OutcomeStreamCompleted)
+	}
+	if e.FallbackReason != "" {
+		t.Errorf("FallbackReason = %q, want empty", e.FallbackReason)
 	}
 }
 

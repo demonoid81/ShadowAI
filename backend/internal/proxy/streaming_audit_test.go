@@ -1,0 +1,119 @@
+package proxy
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestClassifyUsageSource(t *testing.T) {
+	boom := errors.New("parser fatal")
+	cases := []struct {
+		name     string
+		found    bool
+		parseErr error
+		want     string
+	}{
+		{"final_found_no_error", true, nil, UsageSourceFinal},
+		{"none_found_false", false, nil, UsageSourceNone},
+		{"none_parse_error", true, boom, UsageSourceNone},
+		{"none_found_false_with_error", false, boom, UsageSourceNone},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyUsageSource(c.found, c.parseErr); got != c.want {
+				t.Errorf("classifyUsageSource(%v,%v) = %q, want %q", c.found, c.parseErr, got, c.want)
+			}
+		})
+	}
+}
+
+// TestClassifyUsageSource_PartialNotReachedInF73 — invariant guard:
+// F7.3 никогда не возвращает UsageSourcePartial (parsers не
+// различают partial vs final). F7.4 ослабит этот инвариант.
+func TestClassifyUsageSource_PartialNotReachedInF73(t *testing.T) {
+	// Exhaustive на двух осях (found, parseErr nil/non-nil).
+	for _, found := range []bool{true, false} {
+		for _, pe := range []error{nil, errors.New("x")} {
+			got := classifyUsageSource(found, pe)
+			if got == UsageSourcePartial {
+				t.Errorf("F7.3 не должен возвращать partial (found=%v, pe=%v)", found, pe)
+			}
+		}
+	}
+}
+
+func TestClassifyIncrementalOutcome(t *testing.T) {
+	boom := errors.New("parser fatal")
+	cases := []struct {
+		name         string
+		blocked      bool
+		transportErr bool
+		parseErr     error
+		overBudget   bool
+		flagged      bool
+		want         string
+	}{
+		{"clean_completed", false, false, nil, false, false, OutcomeStreamCompleted},
+		{"flagged", false, false, nil, false, true, OutcomeStreamFlagged},
+		{"budget_soft", false, false, nil, true, false, OutcomeStreamBudgetExceededSoft},
+		{"parse_failed", false, false, boom, false, false, OutcomeStreamUsageParseFailed},
+		{"transport_error", false, true, nil, false, false, OutcomeStreamTransportError},
+		{"blocked_midflight", true, false, nil, false, false, OutcomeStreamBlockedMidflight},
+
+		// Priority checks: block beats all others.
+		{"priority_block_over_transport", true, true, nil, false, false, OutcomeStreamBlockedMidflight},
+		{"priority_block_over_parse", true, false, boom, false, false, OutcomeStreamBlockedMidflight},
+		{"priority_block_over_budget", true, false, nil, true, false, OutcomeStreamBlockedMidflight},
+		{"priority_block_over_flag", true, false, nil, false, true, OutcomeStreamBlockedMidflight},
+		// Transport error beats parse/budget/flag.
+		{"priority_transport_over_parse", false, true, boom, false, false, OutcomeStreamTransportError},
+		{"priority_transport_over_budget", false, true, nil, true, false, OutcomeStreamTransportError},
+		{"priority_transport_over_flag", false, true, nil, false, true, OutcomeStreamTransportError},
+		// Parse error beats budget/flag.
+		{"priority_parse_over_budget", false, false, boom, true, false, OutcomeStreamUsageParseFailed},
+		{"priority_parse_over_flag", false, false, boom, false, true, OutcomeStreamUsageParseFailed},
+		// Budget beats flag.
+		{"priority_budget_over_flag", false, false, nil, true, true, OutcomeStreamBudgetExceededSoft},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := classifyIncrementalOutcome(c.blocked, c.transportErr, c.parseErr, c.overBudget, c.flagged)
+			if got != c.want {
+				t.Errorf("classifyIncrementalOutcome(%+v) = %q, want %q", c, got, c.want)
+			}
+		})
+	}
+}
+
+func TestClassifyBufferedOutcome(t *testing.T) {
+	boom := errors.New("parser fatal")
+	cases := []struct {
+		name     string
+		policy   string
+		fallback bool
+		parseErr error
+		want     string
+	}{
+		// Non-fallback paths.
+		{"non_fallback_allowed", "allowed", false, nil, OutcomeStreamCompleted},
+		{"non_fallback_sanitized", "sanitized", false, nil, OutcomeStreamCompleted},
+		{"non_fallback_blocked", "blocked", false, nil, OutcomeStreamBlocked},
+		{"non_fallback_flagged", "flagged", false, nil, OutcomeStreamFlagged},
+		{"non_fallback_parse_error", "allowed", false, boom, OutcomeStreamUsageParseFailed},
+
+		// Fallback paths — fallback outcome dominates regardless of inner verdict.
+		{"fallback_allowed", "allowed", true, nil, OutcomeStreamBufferedFallback},
+		{"fallback_blocked", "blocked", true, nil, OutcomeStreamBufferedFallback},
+		{"fallback_flagged", "flagged", true, nil, OutcomeStreamBufferedFallback},
+		{"fallback_sanitized", "sanitized", true, nil, OutcomeStreamBufferedFallback},
+		{"fallback_parse_error", "allowed", true, boom, OutcomeStreamBufferedFallback},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := classifyBufferedOutcome(c.policy, c.fallback, c.parseErr)
+			if got != c.want {
+				t.Errorf("classifyBufferedOutcome(%+v) = %q, want %q", c, got, c.want)
+			}
+		})
+	}
+}

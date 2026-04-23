@@ -307,17 +307,17 @@ func TestProxyChat_Streaming_IncrementalMode_TransportError_AuditIs502(t *testin
 	if len(entries) == 0 {
 		t.Fatal("audit entries = 0; transport error должен писать audit запись")
 	}
-	// Ищем запись с transport-error маркером.
+	// PR-F7.3: transport error → Outcome=stream_transport_error.
 	var found *domain.AuditLog
 	for _, e := range entries {
-		if e.PolicyAction == PolicyActionStreamingTransportError {
+		if e.Outcome == OutcomeStreamTransportError {
 			found = e
 			break
 		}
 	}
 	if found == nil {
-		t.Fatalf("no audit entry with policy_action=%q; got: %+v",
-			PolicyActionStreamingTransportError, entries)
+		t.Fatalf("no audit entry with Outcome=%q; got: %+v",
+			OutcomeStreamTransportError, entries)
 	}
 	if found.StatusCode != http.StatusBadGateway {
 		t.Errorf("audit StatusCode = %d, want %d (Bad Gateway)",
@@ -412,10 +412,12 @@ func TestProxyChat_Streaming_IncrementalMode_BudgetSoftExceed_AuditMarker(t *tes
 	if len(entries) == 0 {
 		t.Fatal("audit entries = 0")
 	}
-	// Проверим что хотя бы одна запись маркирована soft-exceed.
+	// PR-F7.3: soft-exceed → Outcome=stream_budget_exceeded_soft.
+	// PolicyAction остаётся verdict'ом (allowed — policy ничего не
+	// блокировало).
 	var sawSoft bool
 	for _, e := range entries {
-		if e.PolicyAction == PolicyActionStreamingBudgetExceededSoft {
+		if e.Outcome == OutcomeStreamBudgetExceededSoft {
 			sawSoft = true
 			if e.StatusCode != http.StatusOK {
 				t.Errorf("soft-exceed audit StatusCode = %d, want %d (client got 200)",
@@ -424,9 +426,7 @@ func TestProxyChat_Streaming_IncrementalMode_BudgetSoftExceed_AuditMarker(t *tes
 		}
 	}
 	if !sawSoft {
-		// Не fatal — может быть, CheckBudgetAfterUsage не сработал на
-		// 0 tokens. Логируем и skip.
-		t.Skipf("no soft-exceed marker в audit; возможно, usage=0 → CheckBudgetAfterUsage не блокирует. Entries: %+v", entries)
+		t.Skipf("no soft-exceed outcome в audit; возможно, usage=0 → CheckBudgetAfterUsage не блокирует. Entries: %+v", entries)
 	}
 }
 
