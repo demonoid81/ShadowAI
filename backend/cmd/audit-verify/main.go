@@ -1,20 +1,28 @@
 // cmd/audit-verify — PR-W2: tamper-evident chain verifier CLI.
 //
-// Верифицирует integrity hash chain для audit_logs, admin_event_logs,
-// legal_hold_events. Требует AUDIT_CHAIN_SECRET и DATABASE_URL.
+// Верифицирует integrity hash chain для:
+//   - audit_logs
+//   - admin_event_logs
+//   - legal_hold_events
+//   - audit_purge_runs
+//
+// Требует AUDIT_CHAIN_SECRET и DATABASE_URL.
 //
 // Usage:
 //
 //	audit-verify [--table <table>] [--verbose]
 //
-// --table: "audit_logs" | "admin_event_logs" | "legal_hold_events" | "all" (default)
+// --table: "audit_logs" | "admin_event_logs" | "legal_hold_events" |
+//
+//	"audit_purge_runs" | "all" (default)
+//
 // --verbose: print each gap and break detail
 //
 // Exit codes:
 //
 //	0 — chain OK
 //	1 — chain failures detected (GAP or CHAIN_BREAK)
-//	2 — configuration / connection error
+//	2 — configuration / connection / invalid-flag error
 //
 // W2 verifier requires AUDIT_CHAIN_SECRET (privileged tool).
 // See RFC §8.4 for verification tier semantics.
@@ -33,7 +41,7 @@ import (
 )
 
 func main() {
-	tableFlag := flag.String("table", "all", "Table to verify: audit_logs|admin_event_logs|legal_hold_events|all")
+	tableFlag := flag.String("table", "all", "Table to verify: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
 	verbose := flag.Bool("verbose", false, "Print detailed gap/break info")
 	flag.Parse()
 

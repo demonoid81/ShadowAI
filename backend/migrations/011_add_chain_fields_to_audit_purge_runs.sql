@@ -1,11 +1,13 @@
 -- PR-W2: tamper-evident chain для audit_purge_runs.
 --
--- Перед каждой purge-операцией пишется chain-anchored record:
--- это доказывает что purge был авторизован и залогирован ПРЕЖДЕ
--- чем данные были удалены.
+-- После каждой purge-операции пишется ONE chained record с реальным
+-- rows_deleted — это доказывает что purge был залогирован и не был
+-- retroactively удалён или модифицирован.
 --
--- DBA не может удалить audit_logs без этой записи в chain —
--- она появляется в Merkle anchor (W3) как доказательство факта purge.
+-- Запись пишется ВНУТРИ той же транзакции что и DELETE (для coordinated
+-- path) или в короткой tx сразу после DELETE (для non-coordinated path),
+-- что обеспечивает атомарность: либо purge и record оба commit'ятся,
+-- либо оба rollback'ятся.
 --
 -- chain fields: аналогичны audit_logs (migration 010).
 -- TableID = 4 (chain namespace 4202, отдельный от других таблиц).
