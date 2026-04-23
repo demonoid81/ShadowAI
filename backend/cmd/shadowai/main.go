@@ -348,12 +348,17 @@ func main() {
 		case "immudb://":
 			// PR-W4.2: wire real immudb client via HTTP REST API.
 			// log.Fatalf if connection fails — do not silently fall back to NoOp.
-			immuClient, err := chain.DialImmuDB(
+			opts := chain.DefaultImmuDBOptions()
+			if cfg.AuditImmuDBAPIPrefix != "" {
+				opts.APIPrefix = cfg.AuditImmuDBAPIPrefix
+			}
+			immuClient, err := chain.DialImmuDBWithOptions(
 				context.Background(),
 				cfg.AuditImmuDBAddr,
 				cfg.AuditImmuDBUsername,
 				cfg.AuditImmuDBPassword,
 				cfg.AuditImmuDBDatabase,
+				opts,
 			)
 			if err != nil {
 				log.Fatalf("anchor scheduler: immudb:// connect failed (addr=%s db=%s): %v",
