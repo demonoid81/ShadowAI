@@ -567,13 +567,21 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
 			}
 			if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
+				// PR-F7.3: structured audit fields — firewall response block.
+				// usage_source=none: parseStreamingUsage ещё не вызывался
+				// (early block до usage parsing).
+				fwBlockOutcome := classifyBufferedOutcome("blocked", streamingFallbackReason != "", nil)
 				if h.auditSvc != nil {
 					h.auditLog(r.Context(), &domain.AuditLog{
 						ID: uuid.New().String(), UserID: claims.UserID,
 						RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
 						Model: model, Provider: providerName, Endpoint: endpoint,
-						StatusCode: 403, PolicyAction: "blocked",
-						DurationMs: int(time.Since(start).Milliseconds()),
+						StatusCode:     403,
+						PolicyAction:   "blocked",
+						Outcome:        fwBlockOutcome,
+						FallbackReason: streamingFallbackReason,
+						UsageSource:    UsageSourceNone,
+						DurationMs:     int(time.Since(start).Milliseconds()),
 					})
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -1683,13 +1691,19 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					appendShadowDecisions(r.Context(), fwDecision.ShadowDecisions)
 				}
 				if fwErr == nil && fwDecision.Action == firewall.ActionBlock {
+					// PR-F7.3: structured audit fields — симметрично ProxyChat.
+					fwBlockOutcome := classifyBufferedOutcome("blocked", streamingFallbackReason != "", nil)
 					if h.auditSvc != nil {
 						h.auditLog(r.Context(), &domain.AuditLog{
 							ID: uuid.New().String(), UserID: claims.UserID,
 							RequestBody: sanitizePayload(bodyBytes), ResponseBody: sanitizePayload(respBytes),
 							Model: providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
-							StatusCode: 403, PolicyAction: "blocked",
-							DurationMs: int(time.Since(start).Milliseconds()),
+							StatusCode:     403,
+							PolicyAction:   "blocked",
+							Outcome:        fwBlockOutcome,
+							FallbackReason: streamingFallbackReason,
+							UsageSource:    UsageSourceNone,
+							DurationMs:     int(time.Since(start).Milliseconds()),
 						})
 					}
 					w.Header().Set("Content-Type", "application/json")

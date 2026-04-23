@@ -99,9 +99,12 @@ func (h *Handler) runShadowCompare(
 	)
 
 	// 4. Parse usage from shadow result (same bytes, shadow perspective).
+	// Note (PR-F7.4.1 review fix): использовать providerName без суффикса
+	// чтобы не размывать cardinality метрики — контракт
+	// RecordStreamUsageParseFail ожидает реальное provider имя.
 	shadowStreamUsage, shadowParseErr := parseStreamingUsage(provider, res.Accumulated, model)
 	if shadowParseErr != nil || !shadowStreamUsage.Found {
-		metrics.RecordStreamUsageParseFail(providerName + "_shadow")
+		metrics.RecordStreamUsageParseFail(providerName)
 	}
 
 	// 5. Classify incremental outcomes.
