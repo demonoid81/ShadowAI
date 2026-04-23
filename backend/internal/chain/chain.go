@@ -34,6 +34,7 @@ const (
 	TableAuditLogs       = 1
 	TableAdminEventLogs  = 2
 	TableLegalHoldEvents = 3
+	TableAuditPurgeRuns  = 4
 )
 
 // Sequence names — используются в nextval() при INSERT.
@@ -41,6 +42,7 @@ const (
 	SeqAuditLogs       = "audit_logs_chain_seq"
 	SeqAdminEventLogs  = "admin_event_logs_chain_seq"
 	SeqLegalHoldEvents = "legal_hold_events_chain_seq"
+	SeqAuditPurgeRuns  = "audit_purge_runs_chain_seq"
 )
 
 // initialHash — prev_hash для первой row в таблице (chain anchor point).

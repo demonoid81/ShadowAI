@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/domain"
@@ -86,13 +87,25 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// W2 fix: capture created_at in Go so canonical и DB INSERT используют
+	// одно и то же значение. Без этого canonical хэш не совпадёт с тем,
+	// что вернул бы verifier — DB DEFAULT now() ≠ log.CreatedAt (нулевое
+	// или уже заполненное handler'ом). Источник истины — это значение.
+	createdAt := log.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	} else {
+		createdAt = createdAt.UTC()
+	}
+	log.CreatedAt = createdAt // присваиваем обратно для caller'а
+
 	canonical := chain.CanonicalAuditLog(
 		log.ID, log.UserID, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens,
 		chain.CostMicrocents(log.CostUSD),
 		log.PIIDetected, log.PIITypes,
 		log.PolicyAction, log.Outcome, log.FallbackReason, log.UsageSource,
-		log.CreatedAt.UTC().Unix(),
+		createdAt.Unix(),
 	)
 
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
@@ -109,32 +122,59 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 		hashArg = rowHash
 	}
 
+	// INSERT с явным created_at ($23) — не полагаемся на DB DEFAULT.
+	// Это гарантирует совпадение с canonical.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, seq_no, row_hash)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, seq_no, row_hash, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
 		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
 		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
 		log.Outcome, log.FallbackReason, log.UsageSource,
-		seqArg, hashArg); err != nil {
+		seqArg, hashArg, createdAt); err != nil {
 		return fmt.Errorf("audit chain: insert: %w", err)
 	}
 
 	return tx.Commit()
 }
 
-// insertPurgeRunChainEntry пишет chain entry для audit_purge_runs ДО
-// purge операции. Используется PurgeOlderThan* методами.
-// Пока не реализован полностью (W2 roadmap item); заглушка не
-// препятствует purge при пустом chainSecret.
+// insertPurgeRunChainEntry пишет chain entry для audit_purge_runs
+// ВНУТРИ purge tx (до COMMIT). Это криптографически доказывает, что
+// purge был залогирован прежде чем данные удалились.
+//
+// W2 fix: теперь реально реализован. Если chainSecret пустой —
+// no-op (chain disabled). Иначе: advisory lock + canonical + INSERT
+// с явными id, completed_at, seq_no, row_hash.
+//
+// rowsDeleted на момент вызова неизвестен (мы ещё не выполнили DELETE);
+// передаём 0 — verifier будет знать что это pre-purge anchor.
+// rows_deleted в audit_purge_runs проставляется RETURNING после DELETE.
 func (r *Repository) insertPurgeRunChainEntry(ctx context.Context, tx *sql.Tx, cutoff time.Time, target string) error {
-	// W2: chain entry для purge_runs (аналогично AuditLog chain write).
-	// Фиксируем факт того, что purge начался: canonical(purge_id, cutoff, target).
-	// В W3 это войдёт в Merkle anchor. Пока — placeholder.
-	_ = cutoff
-	_ = target
-	return nil
+	if len(r.chainSecret) == 0 {
+		return nil
+	}
+	runID := uuid.New().String()
+	now := time.Now().UTC()
+	canonical := chain.CanonicalAuditPurgeRun(runID, cutoff.Unix(), 0, target, now.Unix())
+	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
+		chain.TableAuditPurgeRuns, "audit_purge_runs", chain.SeqAuditPurgeRuns,
+		canonical, r.chainSecret)
+	if err != nil {
+		return fmt.Errorf("audit purge chain: acquire slot: %w", err)
+	}
+	var seqArg any
+	var hashArg any
+	if seqNo > 0 {
+		seqArg = seqNo
+		hashArg = rowHash
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target, seq_no, row_hash)
+		 VALUES ($1, $2, 0, $3, $4, $5, $6)`,
+		runID, cutoff, now, target, seqArg, hashArg)
+	return err
 }
+
 
 func (r *Repository) List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
 	where := []string{"1=1"}

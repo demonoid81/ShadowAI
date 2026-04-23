@@ -67,12 +67,17 @@ func (r *PGRepository) WithChainSecret(secret string) *PGRepository {
 // Если chainSecret пустой — chain fields остаются NULL (chain disabled).
 func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, action, newStatus, actorID string) error {
 	eventID := uuid.New().String()
+	// W2 fix: захватываем createdAt ОДИН раз до chain write.
+	// Используем то же значение в canonical и в INSERT — без этого
+	// canonical(time.Now()) при hash и DB DEFAULT now() при INSERT
+	// расходятся (разные вызовы time.Now + DB round).
+	createdAt := time.Now().UTC()
+
 	var actorArg any
 	if actorID != "" {
 		actorArg = actorID
 	}
-	// Chain fields.
-	canonical := chain.CanonicalLegalHoldEvent(eventID, holdID, action, newStatus, actorID, time.Now().UTC().Unix())
+	canonical := chain.CanonicalLegalHoldEvent(eventID, holdID, action, newStatus, actorID, createdAt.Unix())
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableLegalHoldEvents, "legal_hold_events", chain.SeqLegalHoldEvents,
 		canonical, r.chainSecret)
@@ -85,10 +90,11 @@ func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, 
 		seqArg = seqNo
 		hashArg = rowHash
 	}
+	// INSERT с явным created_at ($8) — совпадает с canonical.
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO legal_hold_events (id, hold_id, action, new_status, actor_id, seq_no, row_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		eventID, holdID, action, newStatus, actorArg, seqArg, hashArg)
+		`INSERT INTO legal_hold_events (id, hold_id, action, new_status, actor_id, created_at, seq_no, row_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		eventID, holdID, action, newStatus, actorArg, createdAt, seqArg, hashArg)
 	return err
 }
 

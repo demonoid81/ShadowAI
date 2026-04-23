@@ -38,26 +38,32 @@ func main() {
 	verbose := flag.Bool("verbose", false, "Print detailed gap/break info")
 	flag.Parse()
 
+	// Config errors exit with code 2 (not 1 which is chain failure).
+	exitConfig := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "config error: "+format+"\n", args...)
+		os.Exit(2)
+	}
+
 	secret := os.Getenv("AUDIT_CHAIN_SECRET")
 	if secret == "" {
-		log.Fatal("AUDIT_CHAIN_SECRET is required for chain verification")
+		exitConfig("AUDIT_CHAIN_SECRET is required for chain verification")
 	}
 	if len(secret) < 32 {
-		log.Fatal("AUDIT_CHAIN_SECRET must be >= 32 chars")
+		exitConfig("AUDIT_CHAIN_SECRET must be >= 32 chars")
 	}
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		log.Fatal("DATABASE_URL is required")
+		exitConfig("DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		log.Fatalf("db open: %v", err)
+		exitConfig("db open: %v", err)
 	}
 	defer db.Close()
 	if err := db.PingContext(context.Background()); err != nil {
-		log.Fatalf("db ping: %v", err)
+		exitConfig("db ping: %v", err)
 	}
 
 	secretBytes := []byte(secret)

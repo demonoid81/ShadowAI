@@ -76,6 +76,20 @@ func CanonicalLegalHoldEvent(
 	)
 }
 
+// CanonicalAuditPurgeRun возвращает v1 canonical для audit_purge_runs row.
+// Пишется ПЕРЕД самим purge в той же tx — доказывает что purge авторизован.
+func CanonicalAuditPurgeRun(
+	id string,
+	cutoffEpoch int64,
+	rowsDeleted int,
+	target string,
+	completedAtEpoch int64,
+) string {
+	return fmt.Sprintf("v1|%s|%d|%d|%s|%d",
+		id, cutoffEpoch, rowsDeleted, target, completedAtEpoch,
+	)
+}
+
 // CostMicrocents конвертирует float64 USD в int64 microcents для canonical.
 // 1 USD = 1_000_000 microcents. Rounding: nearest integer.
 func CostMicrocents(costUSD float64) int64 {

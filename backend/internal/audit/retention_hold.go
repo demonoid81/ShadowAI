@@ -74,6 +74,13 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 		return 0, err
 	}
 
+	// PR-W2: chain entry для purge run ПЕРЕД DELETE — криптографическое
+	// доказательство авторизованного purge. Если chain disabled (пустой
+	// secret), это no-op. Вызывается внутри tx с advisory lock.
+	if err := r.insertPurgeRunChainEntry(ctx, tx, cutoff, PurgeTargetAuditLogs); err != nil {
+		return 0, fmt.Errorf("purge chain entry: %w", err)
+	}
+
 	// PR-L2.3: status = 'active' (4-eyes workflow). Pending holds
 	// НЕ защищают от purge — только approve'нутые. is_active
 	// сохраняется как derivative, но source of truth — status.

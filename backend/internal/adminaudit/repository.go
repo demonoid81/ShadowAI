@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/domain"
 )
@@ -114,6 +115,15 @@ func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// W2 fix: DB генерирует id и created_at по DEFAULT. Чтобы canonical
+	// совпал с тем, что хранится в row, генерируем оба в Go и пишем
+	// явно в INSERT.
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	createdAt := time.Now().UTC()
+	e.CreatedAt = createdAt
+
 	actorStr := ""
 	if e.ActorUserID != nil {
 		actorStr = *e.ActorUserID
@@ -121,7 +131,7 @@ func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, 
 	canonical := chain.CanonicalAdminEventLog(
 		e.ID, actorStr, e.Action, e.Resource, e.TargetID,
 		e.Path, e.Method, e.StatusCode, e.Success,
-		e.CreatedAt.UTC().Unix(),
+		createdAt.Unix(),
 	)
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableAdminEventLogs, "admin_event_logs", chain.SeqAdminEventLogs,
@@ -137,12 +147,13 @@ func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, 
 		hashArg = rowHash
 	}
 
+	// INSERT с явными id и created_at ($12, $13) — совпадают с canonical.
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO admin_event_logs
-		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash, id, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		actor, e.Action, e.Resource, target, e.Path, e.Method, e.StatusCode, e.Success, meta,
-		seqArg, hashArg); err != nil {
+		seqArg, hashArg, e.ID, createdAt); err != nil {
 		return fmt.Errorf("adminaudit chain: insert: %w", err)
 	}
 	return tx.Commit()
