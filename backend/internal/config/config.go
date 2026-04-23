@@ -124,6 +124,18 @@ type Config struct {
 	FirewallEmbeddingDimension int
 	FirewallEmbeddingTimeout   time.Duration
 
+	// PR-W4.1: Ed25519 anchor manifest signing.
+	// AUDIT_ANCHOR_SIGNING_KEY — base64-encoded Ed25519 private key (64 bytes
+	// = standard combined form, or 32 bytes = seed). Required in prod if
+	// immutable sink enabled (ValidateStartupConfig). Empty = signing disabled.
+	AuditAnchorSigningKey string
+	// AUDIT_ANCHOR_PUBKEY_ID — identifier for the signing key (e.g. "ed25519-k1").
+	// Stored in anchor rows so verifier knows which public key to use.
+	AuditAnchorPubKeyID string
+	// AUDIT_ANCHOR_PUBKEY — optional base64 public key for local self-verification.
+	// If set, scheduler verifies each anchor after signing before writing to DB.
+	AuditAnchorPubKey string
+
 	// PR-W3: periodic Merkle anchor config (RFC §7.3 Layer 2).
 	//
 	// AuditAnchorInterval — период между anchor runs. Default 1h.
@@ -237,6 +249,11 @@ func Load() *Config {
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
 		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
+
+		// PR-W4.1: anchor signing.
+		AuditAnchorSigningKey: getEnv("AUDIT_ANCHOR_SIGNING_KEY", ""),
+		AuditAnchorPubKeyID:   getEnv("AUDIT_ANCHOR_PUBKEY_ID", ""),
+		AuditAnchorPubKey:     getEnv("AUDIT_ANCHOR_PUBKEY", ""),
 
 		// PR-W3: Merkle anchor scheduler.
 		AuditAnchorInterval: getDuration("AUDIT_ANCHOR_INTERVAL", time.Hour),

@@ -341,10 +341,16 @@ func main() {
 		if cfg.AuditAnchorSink == "file://" && cfg.AuditAnchorSinkPath != "" {
 			anchorSink = chain.NewFileSink(cfg.AuditAnchorSinkPath)
 		}
-		// Core tables. Enterprise tables (admin_event_logs, legal_hold_events)
-		// are added by enterprise_wire.go StartSchedulers via entBundle.AnchorExtra.
 		anchorSched := chain.NewAnchorScheduler(anchorRepo, anchorSink, cfg.AuditAnchorInterval,
 			append([]string{"audit_logs", "audit_purge_runs"}, entBundle.AnchorExtraTables...))
+		// PR-W4.1: optional Ed25519 signing.
+		if cfg.AuditAnchorSigningKey != "" && cfg.AuditAnchorPubKeyID != "" {
+			privKey, err := chain.ParsePrivateKey(cfg.AuditAnchorSigningKey)
+			if err != nil {
+				log.Fatalf("anchor signing key: %v", err)
+			}
+			anchorSched = anchorSched.WithSigning(privKey, cfg.AuditAnchorPubKeyID, cfg.AuditAnchorPubKey != "")
+		}
 		go anchorSched.Run(connectivityCtx)
 	}
 

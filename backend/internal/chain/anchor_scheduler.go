@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"log"
 	"time"
@@ -34,6 +35,12 @@ type AnchorScheduler struct {
 	sink     AnchorSink
 	interval time.Duration
 	tables   []string
+	// W4.1: optional Ed25519 signing.
+	signingKey ed25519.PrivateKey
+	pubKeyID   string
+	// selfVerify: if true, verify signature immediately after signing
+	// (uses public key derived from private key). Catches misconfiguration early.
+	selfVerify bool
 }
 
 // NewAnchorScheduler создаёт scheduler. Если interval == 0 — Run() немедленно
@@ -48,6 +55,16 @@ func NewAnchorScheduler(repo AnchorRepoReader, sink AnchorSink, interval time.Du
 		interval: interval,
 		tables:   tables,
 	}
+}
+
+// WithSigning configures Ed25519 signing for each anchor manifest.
+// pubKeyID is stored in anchor rows; selfVerify re-verifies immediately
+// after signing using the derived public key.
+func (s *AnchorScheduler) WithSigning(privKey ed25519.PrivateKey, pubKeyID string, selfVerify bool) *AnchorScheduler {
+	s.signingKey = privKey
+	s.pubKeyID = pubKeyID
+	s.selfVerify = selfVerify
+	return s
 }
 
 // Run запускает scheduler. Блокирует до ctx.Done(). Первый anchor run
@@ -129,6 +146,20 @@ func (s *AnchorScheduler) anchorTable(ctx context.Context, tableName string) err
 	if sinkErr != nil {
 		log.Printf("anchor scheduler: table=%s sink write failed (anchor still written to PG): %v",
 			tableName, sinkErr)
+	}
+
+	// PR-W4.1: sign manifest AFTER sink write (canonical includes sink_ref).
+	if len(s.signingKey) > 0 && s.pubKeyID != "" {
+		if err := SignAnchor(a, s.signingKey, s.pubKeyID); err != nil {
+			return fmt.Errorf("anchor %s: sign: %w", tableName, err)
+		}
+		// Self-verify: catch misconfiguration before persisting to DB.
+		if s.selfVerify {
+			pubKey := s.signingKey.Public().(ed25519.PublicKey)
+			if !VerifyAnchorSignature(a, pubKey) {
+				return fmt.Errorf("anchor %s: self-verify failed (signing misconfiguration)", tableName)
+			}
+		}
 	}
 
 	// Write to audit_chain_anchors.

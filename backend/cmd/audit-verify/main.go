@@ -39,6 +39,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 	"github.com/shadowai/backend/internal/chain"
@@ -50,6 +51,9 @@ func main() {
 	anchorOnly := flag.Bool("anchor-only", false, "W3 anchor-only mode: no chain_secret required, verifies Merkle anchors")
 	includeAnchors := flag.Bool("include-anchors", false, "Also verify Merkle anchors in addition to chain (W2+W3 combined)")
 	anchorSinkPath := flag.String("anchor-sink-path", "", "Path to NDJSON file:// sink for external anchor cross-reference")
+	verifySignatures := flag.Bool("verify-signatures", false, "W4.1: verify Ed25519 anchor signatures (--pubkey or --pubkey-file required)")
+	pubKeyFlag := flag.String("pubkey", "", "Base64-encoded Ed25519 public key for signature verification")
+	pubKeyFile := flag.String("pubkey-file", "", "Path to file containing base64 Ed25519 public key")
 	flag.Parse()
 
 	// Config errors exit with code 2 (not 1 which is verification failure).
@@ -136,6 +140,50 @@ func main() {
 				}
 				for _, b := range res.Breaks {
 					fmt.Printf("  CHAIN_BREAK seq_no=%d row_id=%s\n", b.SeqNo, b.RowID)
+				}
+			}
+		}
+	}
+
+	// W4.1: signature verification — no chain_secret required, needs public key.
+	if *verifySignatures {
+		var pubKeyB64 string
+		switch {
+		case *pubKeyFlag != "":
+			pubKeyB64 = *pubKeyFlag
+		case *pubKeyFile != "":
+			data, err := os.ReadFile(*pubKeyFile)
+			if err != nil {
+				exitConfig("pubkey-file: %v", err)
+			}
+			pubKeyB64 = strings.TrimSpace(string(data))
+		default:
+			exitConfig("--verify-signatures requires --pubkey or --pubkey-file")
+		}
+		pubKey, err := chain.ParsePublicKey(pubKeyB64)
+		if err != nil {
+			exitConfig("parse public key: %v", err)
+		}
+		for _, table := range tables {
+			sr, err := chain.VerifyAnchorSignatures(ctx, db, table, pubKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR signatures %s: %v\n", table, err)
+				anyFail = true
+				continue
+			}
+			if !sr.OK {
+				anyFail = true
+			}
+			status := "OK"
+			if !sr.OK {
+				status = "FAIL"
+			}
+			fmt.Printf("sigs   %-24s %-6s total=%d unsigned=%d fails=%d\n",
+				sr.Table, status, sr.AnchorCount, sr.UnsignedCount, len(sr.SignatureFails))
+			if *verbose {
+				for _, f := range sr.SignatureFails {
+					fmt.Printf("  SIG_FAIL anchor_id=%s range=[%d,%d] (tampered or wrong key)\n",
+						f.AnchorID, f.SeqLo, f.SeqHi)
 				}
 			}
 		}

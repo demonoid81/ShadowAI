@@ -10,6 +10,9 @@ import (
 
 // AnchorRecord — одна запись в audit_chain_anchors. Содержит Merkle root
 // над row_hash'ами диапазона [SeqLo, SeqHi] для одной таблицы.
+//
+// PR-W4.1: добавлены PubKeyID + Signature для Ed25519 signed manifests.
+// NULL Signature = unsigned anchor (pre-W4.1 row или signing disabled).
 type AnchorRecord struct {
 	ID          string
 	TableName   string
@@ -21,6 +24,9 @@ type AnchorRecord struct {
 	SinkName    string
 	SinkRef     string
 	SinkOK      bool
+	// W4.1 signature fields. Empty = unsigned.
+	PubKeyID  string
+	Signature []byte
 }
 
 // MerkleRootHex возвращает Merkle root в hex для NDJSON serialization.
@@ -89,13 +95,22 @@ func (r *AnchorRepository) FetchRowHashes(ctx context.Context, tableName string,
 }
 
 // WriteAnchor вставляет новую anchor запись в audit_chain_anchors.
+// PR-W4.1: включает pubkey_id + signature если установлены.
 func (r *AnchorRepository) WriteAnchor(ctx context.Context, a *AnchorRecord) error {
+	var pubKeyID any
+	var sig any
+	if a.PubKeyID != "" {
+		pubKeyID = a.PubKeyID
+	}
+	if len(a.Signature) > 0 {
+		sig = a.Signature
+	}
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO audit_chain_anchors
-		 (table_name, anchor_seq_lo, anchor_seq_hi, row_count, merkle_root, created_at, sink_name, sink_ref, sink_ok)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		 (table_name, anchor_seq_lo, anchor_seq_hi, row_count, merkle_root, created_at, sink_name, sink_ref, sink_ok, pubkey_id, signature)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		a.TableName, a.SeqLo, a.SeqHi, a.RowCount, a.MerkleRoot,
-		a.CreatedAt, a.SinkName, a.SinkRef, a.SinkOK)
+		a.CreatedAt, a.SinkName, a.SinkRef, a.SinkOK, pubKeyID, sig)
 	if err != nil {
 		return fmt.Errorf("anchor: write for %s: %w", a.TableName, err)
 	}
@@ -107,7 +122,8 @@ func (r *AnchorRepository) WriteAnchor(ctx context.Context, a *AnchorRecord) err
 func (r *AnchorRepository) ListAnchors(ctx context.Context, tableName string) ([]AnchorRecord, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, table_name, anchor_seq_lo, anchor_seq_hi, row_count, merkle_root,
-		        created_at, sink_name, sink_ref, sink_ok
+		        created_at, sink_name, sink_ref, sink_ok,
+		        coalesce(pubkey_id, ''), signature
 		 FROM audit_chain_anchors WHERE table_name = $1
 		 ORDER BY anchor_seq_lo`, tableName)
 	if err != nil {
@@ -117,10 +133,13 @@ func (r *AnchorRepository) ListAnchors(ctx context.Context, tableName string) ([
 	var records []AnchorRecord
 	for rows.Next() {
 		var a AnchorRecord
+		var sig []byte // nullable BYTEA → nil if NULL
 		if err := rows.Scan(&a.ID, &a.TableName, &a.SeqLo, &a.SeqHi, &a.RowCount,
-			&a.MerkleRoot, &a.CreatedAt, &a.SinkName, &a.SinkRef, &a.SinkOK); err != nil {
+			&a.MerkleRoot, &a.CreatedAt, &a.SinkName, &a.SinkRef, &a.SinkOK,
+			&a.PubKeyID, &sig); err != nil {
 			return nil, fmt.Errorf("anchor: scan: %w", err)
 		}
+		a.Signature = sig
 		records = append(records, a)
 	}
 	return records, rows.Err()

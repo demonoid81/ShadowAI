@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -338,6 +339,50 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 	}
 	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
 	res.Duration = time.Since(start)
+	return res, nil
+}
+
+// SignatureVerifyResult — итог проверки Ed25519 подписей anchor'ов.
+type SignatureVerifyResult struct {
+	Table            string
+	AnchorCount      int
+	UnsignedCount    int            // anchors with NULL signature (pre-W4.1)
+	SignatureFails   []AnchorMismatch // bad or unverifiable signatures
+	OK               bool           // true if all signed anchors verified
+}
+
+// VerifyAnchorSignatures verifies Ed25519 signatures on all anchor records
+// for the given table. No chain_secret required — uses the public key only.
+//
+// Unsigned anchors (Signature=nil) are counted but do not cause failure —
+// they are pre-W4.1 records. Only anchors with a non-nil signature that
+// fail verification are reported as failures.
+func VerifyAnchorSignatures(ctx context.Context, db *sql.DB, tableName string, pubKey ed25519.PublicKey) (SignatureVerifyResult, error) {
+	res := SignatureVerifyResult{Table: tableName}
+	repo := NewAnchorRepository(db)
+
+	anchors, err := repo.ListAnchors(ctx, tableName)
+	if err != nil {
+		return res, fmt.Errorf("verify signatures %s: list: %w", tableName, err)
+	}
+	res.AnchorCount = len(anchors)
+
+	for _, a := range anchors {
+		if len(a.Signature) == 0 {
+			res.UnsignedCount++
+			continue
+		}
+		if !VerifyAnchorSignature(&a, pubKey) {
+			res.SignatureFails = append(res.SignatureFails, AnchorMismatch{
+				AnchorID: a.ID,
+				SeqLo:    a.SeqLo,
+				SeqHi:    a.SeqHi,
+				Stored:   a.Signature,
+				// Recomputed = nil (signature verification is boolean)
+			})
+		}
+	}
+	res.OK = len(res.SignatureFails) == 0
 	return res, nil
 }
 
