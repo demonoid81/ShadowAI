@@ -35,6 +35,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -56,13 +57,14 @@ func main() {
 	pubKeyFile := flag.String("pubkey-file", "", "Path to file containing base64 Ed25519 public key")
 	// W4.2: immudb:// sink verification.
 	// Usage: audit-verify --verify-sink --immudb-addr 127.0.0.1:3322 --immudb-db shadowai
-	// Fetches manifest from immudb per each anchor's sink_ref, cross-checks fields + signature.
-	verifySink := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
-	immudbAddr := flag.String("immudb-addr", "127.0.0.1:3322", "immudb server address for --verify-sink")
-	immudbDB := flag.String("immudb-db", "shadowai", "immudb database for --verify-sink")
-	_ = verifySink  // reserved; real client wired in W4.2 integration
-	_ = immudbAddr
-	_ = immudbDB
+	//        [--immudb-user immudb --immudb-pass immudb]
+	// For each DB anchor with sink_name=immudb://, fetches manifest from immudb,
+	// cross-checks all fields, and verifies Ed25519 signature (if --pubkey provided).
+	verifySink     := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
+	immudbAddr     := flag.String("immudb-addr", "127.0.0.1:3322", "immudb REST address for --verify-sink")
+	immudbDB       := flag.String("immudb-db", "shadowai", "immudb database for --verify-sink")
+	immudbUser     := flag.String("immudb-user", "immudb", "immudb username for --verify-sink")
+	immudbPass     := flag.String("immudb-pass", "", "immudb password for --verify-sink")
 	flag.Parse()
 
 	// Config errors exit with code 2 (not 1 which is verification failure).
@@ -195,6 +197,76 @@ func main() {
 						f.AnchorID, f.SeqLo, f.SeqHi)
 				}
 			}
+		}
+	}
+
+	// W4.2: immudb sink verification.
+	if *verifySink {
+		if *immudbPass == "" {
+			exitConfig("--verify-sink requires --immudb-pass")
+		}
+		immuClient, err := chain.DialImmuDB(ctx, *immudbAddr, *immudbUser, *immudbPass, *immudbDB)
+		if err != nil {
+			exitConfig("immudb connect: %v", err)
+		}
+		sink := chain.NewImmuDBSink(immuClient, *immudbDB)
+		repo := chain.NewAnchorRepository(db)
+
+		// Optional pubKey for signature verification.
+		var sinkPubKey ed25519.PublicKey
+		if *pubKeyFlag != "" || *pubKeyFile != "" {
+			var b64 string
+			if *pubKeyFlag != "" {
+				b64 = *pubKeyFlag
+			} else {
+				data, err := os.ReadFile(*pubKeyFile)
+				if err != nil {
+					exitConfig("pubkey-file: %v", err)
+				}
+				b64 = strings.TrimSpace(string(data))
+			}
+			pk, err := chain.ParsePublicKey(b64)
+			if err != nil {
+				exitConfig("parse public key for --verify-sink: %v", err)
+			}
+			sinkPubKey = pk
+		}
+
+		for _, table := range tables {
+			anchors, err := repo.ListAnchors(ctx, table)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR sink list anchors %s: %v\n", table, err)
+				anyFail = true
+				continue
+			}
+			var sinkFails, sinkOK int
+			for _, a := range anchors {
+				if a.SinkName != "immudb://" {
+					continue
+				}
+				aCopy := a
+				ok, err := chain.VerifyImmuDBSinkRecord(ctx, sink, &aCopy, sinkPubKey)
+				if err != nil {
+					if *verbose {
+						fmt.Printf("  SINK_ERR anchor_id=%s: %v\n", a.ID, err)
+					}
+					sinkFails++
+					anyFail = true
+				} else if !ok {
+					sinkFails++
+					anyFail = true
+					if *verbose {
+						fmt.Printf("  SINK_MISMATCH anchor_id=%s range=[%d,%d]\n", a.ID, a.SeqLo, a.SeqHi)
+					}
+				} else {
+					sinkOK++
+				}
+			}
+			status := "OK"
+			if sinkFails > 0 {
+				status = "FAIL"
+			}
+			fmt.Printf("sink   %-24s %-6s ok=%d fails=%d\n", table, status, sinkOK, sinkFails)
 		}
 	}
 

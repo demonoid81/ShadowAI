@@ -109,11 +109,13 @@ func findByte(s string, c byte) int {
 }
 
 // VerifyImmuDBSinkRecord fetches the manifest from immudb and verifies:
-//  1. Manifest fields match the DB anchor record.
-//  2. Ed25519 signature in manifest is valid for pubKey (if non-nil).
+//  1. All manifest fields match the DB anchor record (including sink_name,
+//     sink_ref, pubkey_id, created_at epoch).
+//  2. If pubKey is non-nil: signature must be present AND valid. An unsigned
+//     manifest fails when pubKey is set — prevents downgrade to unsigned.
 //
-// Returns (true, nil) if everything matches. (false, nil) for mismatch.
-// (false, err) for read/parse/network errors.
+// Returns (true, nil) if everything matches. (false, nil) for any field
+// mismatch or signature failure. (false, err) for network/parse errors.
 func VerifyImmuDBSinkRecord(ctx context.Context, sink *ImmuDBSink, a *AnchorRecord, pubKey ed25519.PublicKey) (bool, error) {
 	if sink == nil {
 		return false, nil
@@ -126,16 +128,26 @@ func VerifyImmuDBSinkRecord(ctx context.Context, sink *ImmuDBSink, a *AnchorReco
 	if err != nil {
 		return false, fmt.Errorf("verify immudb: unmarshal: %w", err)
 	}
-	// Field comparison.
+	// Field comparison — all evidence fields must match exactly.
 	if manifest.TableName != a.TableName ||
 		manifest.SeqLo != a.SeqLo ||
 		manifest.SeqHi != a.SeqHi ||
 		manifest.RowCount != a.RowCount ||
+		manifest.SinkName != a.SinkName ||
+		manifest.SinkRef != a.SinkRef ||
+		manifest.PubKeyID != a.PubKeyID ||
+		manifest.CreatedAt.UTC().Unix() != a.CreatedAt.UTC().Unix() ||
 		!merkleEqual(manifest.MerkleRoot, a.MerkleRoot) {
 		return false, nil
 	}
-	// Signature verification (if pubKey and signature both present).
-	if len(pubKey) == ed25519.PublicKeySize && len(manifest.Signature) > 0 {
+	// Signature verification.
+	if len(pubKey) == ed25519.PublicKeySize {
+		// If pubKey provided: signature must be present (unsigned = fail).
+		// Prevents downgrade: a DBA who re-signs with a different key or
+		// strips the signature cannot pass verification.
+		if len(manifest.Signature) == 0 {
+			return false, nil // unsigned manifest when pubKey is set
+		}
 		if !VerifyAnchorSignature(manifest, pubKey) {
 			return false, nil
 		}
