@@ -510,15 +510,17 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 				overBudget = true
 			}
 			auditOutcome := classifyIncrementalOutcome(res.Blocked, res.TransportErr != nil, parseErr, overBudget, res.Flagged)
+			// F7.3 invariant: policy_action = security verdict, independent
+			// of transport outcome. Вычисляем ДО outcome branching, чтобы
+			// transport error не подавил already-observed flag/block.
+			auditPolicyAction := incrementalSecurityVerdict(policyAction, res.Blocked, res.Flagged)
+			// StatusCode: transport-side (может расходиться с client HTTP
+			// status — например, 403 в audit при client-500 incremental block).
 			auditStatus := resp.StatusCode
-			auditPolicyAction := policyAction
 			if res.Blocked {
 				auditStatus = http.StatusForbidden
-				auditPolicyAction = string(dlp.DLPActionBlock)
 			} else if res.TransportErr != nil {
 				auditStatus = http.StatusBadGateway
-			} else if res.Flagged && auditPolicyAction == string(dlp.DLPActionAllow) {
-				auditPolicyAction = "flagged"
 			}
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
@@ -1629,15 +1631,13 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 					overBudget = true
 				}
 				auditOutcome := classifyIncrementalOutcome(res.Blocked, res.TransportErr != nil, parseErr, overBudget, res.Flagged)
+				// F7.3 invariant — симметрично ProxyChat.
+				auditPolicyAction := incrementalSecurityVerdict(policyAction, res.Blocked, res.Flagged)
 				auditStatus := resp.StatusCode
-				auditPolicyAction := policyAction
 				if res.Blocked {
 					auditStatus = http.StatusForbidden
-					auditPolicyAction = string(dlp.DLPActionBlock)
 				} else if res.TransportErr != nil {
 					auditStatus = http.StatusBadGateway
-				} else if res.Flagged && auditPolicyAction == string(dlp.DLPActionAllow) {
-					auditPolicyAction = "flagged"
 				}
 				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,

@@ -160,12 +160,13 @@ func TestProxyChat_Incremental_Flagged_AuditMarker(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("audit entries = %d", len(entries))
 	}
-	// PR-F7.3: outcome + policy_action разделены.
+	// PR-F7.3.1: outcome + policy_action разделены. policy_action
+	// использует canonical "warned" (policy.ActionWarned), не "flagged".
 	if entries[0].Outcome != OutcomeStreamFlagged {
 		t.Errorf("Outcome = %q, want %q", entries[0].Outcome, OutcomeStreamFlagged)
 	}
-	if entries[0].PolicyAction != "flagged" {
-		t.Errorf("PolicyAction = %q, want flagged", entries[0].PolicyAction)
+	if entries[0].PolicyAction != canonicalFlaggedPolicyAction {
+		t.Errorf("PolicyAction = %q, want %q (canonical warned)", entries[0].PolicyAction, canonicalFlaggedPolicyAction)
 	}
 }
 

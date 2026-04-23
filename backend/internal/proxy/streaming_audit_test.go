@@ -5,6 +5,62 @@ import (
 	"testing"
 )
 
+func TestIncrementalSecurityVerdict(t *testing.T) {
+	cases := []struct {
+		name     string
+		original string
+		blocked  bool
+		flagged  bool
+		want     string
+	}{
+		// Block beats flag, block beats original.
+		{"blocked_only", "allowed", true, false, "blocked"},
+		{"blocked_beats_flag", "allowed", true, true, "blocked"},
+		{"blocked_preserves_original_on_override", "sanitized", true, false, "blocked"},
+
+		// Flag when original is allow → canonical "warned".
+		{"flag_on_allow", "allowed", false, true, canonicalFlaggedPolicyAction},
+
+		// Flag when original is already warned/blocked/sanitized → original unchanged.
+		{"flag_on_warned", "warned", false, true, "warned"},
+		{"flag_on_blocked", "blocked", false, true, "blocked"},
+		{"flag_on_sanitized", "sanitized", false, true, "sanitized"},
+
+		// Neither block nor flag → original unchanged.
+		{"no_signal_allow", "allowed", false, false, "allowed"},
+		{"no_signal_warned", "warned", false, false, "warned"},
+
+		// Key regression: transport_error path — even though outcome will be
+		// stream_transport_error, security verdict should NOT be lost.
+		// (Callers pass blocked=false, flagged=true when flag was observed
+		// before transport failed; verdict should still say "warned".)
+		{"flagged_then_transport_error", "allowed", false, true, canonicalFlaggedPolicyAction},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := incrementalSecurityVerdict(c.original, c.blocked, c.flagged)
+			if got != c.want {
+				t.Errorf("incrementalSecurityVerdict(%q, blocked=%v, flagged=%v) = %q, want %q",
+					c.original, c.blocked, c.flagged, got, c.want)
+			}
+		})
+	}
+}
+
+// TestClassifyBufferedOutcome_WarnedRecognized — FR-F7.3.1 regression
+// guard. applyFlagCorrelation возвращает "warned" для флагнутых
+// потоков в buffered path. classifyBufferedOutcome должен распознавать
+// "warned" так же как "flagged", иначе outcome будет stream_completed
+// вместо stream_flagged.
+func TestClassifyBufferedOutcome_WarnedRecognized(t *testing.T) {
+	// "warned" — canonical flag от applyFlagCorrelation.
+	got := classifyBufferedOutcome("warned", false, nil)
+	if got != OutcomeStreamFlagged {
+		t.Errorf("classifyBufferedOutcome(%q, ...) = %q, want %q",
+			"warned", got, OutcomeStreamFlagged)
+	}
+}
+
 func TestClassifyUsageSource(t *testing.T) {
 	boom := errors.New("parser fatal")
 	cases := []struct {

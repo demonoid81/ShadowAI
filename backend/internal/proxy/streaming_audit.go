@@ -160,6 +160,37 @@ func bufferedBudgetBlockOutcome(fallbackFromIncremental bool) string {
 	return OutcomeStreamBlocked
 }
 
+// canonicalFlaggedPolicyAction — единое значение policy_action для
+// flag-equivalent события в streaming audit. В системе исторически
+// используется "warned" (policy.ActionWarned, applyFlagCorrelation),
+// а не "flagged". Incremental path выровнен на это значение в F7.3.1,
+// устраняя vocabulary inconsistency.
+const canonicalFlaggedPolicyAction = "warned"
+
+// incrementalSecurityVerdict вычисляет policy_action для incremental
+// path. Вызывается ДО transport-outcome classification, чтобы
+// transport error не подавил already-observed flag/block:
+//
+//   block → "blocked" (highest priority)
+//   flagged && original==allow → canonicalFlaggedPolicyAction ("warned")
+//   otherwise → original (request-side policyAction)
+//
+// F7.3 invariant: policy_action = security verdict independent of
+// transport result. outcome field несёт transport-side story.
+func incrementalSecurityVerdict(original string, blocked, flagged bool) string {
+	if blocked {
+		return "blocked"
+	}
+	if flagged && original == "allowed" {
+		return canonicalFlaggedPolicyAction
+	}
+	return original
+}
+
+// classifyBufferedOutcome см. выше.
+// Распознаёт: "warned" (buffered path via applyFlagCorrelation) И
+// "flagged" (legacy / direct writes) как один семантический класс
+// → OutcomeStreamFlagged.
 func classifyBufferedOutcome(policyAction string, fallbackFromIncremental bool, parseErr error) string {
 	if fallbackFromIncremental {
 		return OutcomeStreamBufferedFallback
@@ -167,7 +198,9 @@ func classifyBufferedOutcome(policyAction string, fallbackFromIncremental bool, 
 	switch policyAction {
 	case "blocked":
 		return OutcomeStreamBlocked
-	case "flagged":
+	case "flagged", "warned":
+		// "warned" — canonical от applyFlagCorrelation.
+		// "flagged" — допускаем для backward compat и явных writes.
 		return OutcomeStreamFlagged
 	}
 	if parseErr != nil {
