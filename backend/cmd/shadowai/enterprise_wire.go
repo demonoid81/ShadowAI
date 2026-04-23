@@ -238,22 +238,27 @@ func runAdminEventsPurgeScheduler(ctx context.Context, cfg *config.Config, audit
 		cutoff := time.Now().UTC().Add(-time.Duration(cfg.AdminAuditRetentionDays) * 24 * time.Hour)
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
-		// W2.3: atomic PurgeAndRecord so admin_event_logs DELETE
-		// and audit_purge_runs evidence INSERT share the same final tx.
-		var deleted int
-		var err error
+		// W2.5: truly atomic PurgeAndRecord — all deletes + evidence INSERT in one tx.
+		// RecordPurgeRunTx requires *audit.Repository; misconfig (e.g. wrapper type)
+		// is a fatal scheduler error: skip tick, log + admin event, do NOT purge without evidence.
 		auditConcreteRepo, ok := auditRepoHandle.(*audit.Repository)
 		if !ok {
-			log.Printf("admin-events purge scheduler: audit repo type assertion failed — falling back to non-atomic path")
-			deleted, err = adminAuditRepo.PurgeOlderThan(rctx, cutoff, cfg.AuditPurgeChunkSize)
-			if err == nil {
-				_ = auditRepoHandle.RecordPurgeRun(rctx, cutoff, deleted, adminaudit.PurgeTarget)
-			}
-		} else {
-			deleted, err = adminAuditRepo.PurgeAndRecord(rctx, cutoff, cfg.AuditPurgeChunkSize, func(c context.Context, tx *sql.Tx, total int) error {
-				return auditConcreteRepo.RecordPurgeRunTx(c, tx, cutoff, total, adminaudit.PurgeTarget)
+			log.Printf("admin-events purge scheduler: MISCONFIG — auditRepoHandle is not *audit.Repository; skipping tick to preserve evidence integrity")
+			adminAuditSvc.Record(rctx, adminaudit.Event{
+				ActorUserID: nil, Action: "purge", Resource: adminaudit.PurgeTarget,
+				Path: "scheduler", Method: "INTERNAL", Success: false,
+				Metadata: map[string]any{
+					"mode": "scheduler", "target": adminaudit.PurgeTarget,
+					"error": "audit repo type assertion failed — cannot guarantee atomic evidence; skipping purge tick",
+				},
 			})
+			return
 		}
+		var deleted int
+		var err error
+		deleted, err = adminAuditRepo.PurgeAndRecord(rctx, cutoff, cfg.AuditPurgeChunkSize, func(c context.Context, tx *sql.Tx, total int) error {
+			return auditConcreteRepo.RecordPurgeRunTx(c, tx, cutoff, total, adminaudit.PurgeTarget)
+		})
 		if err != nil {
 			log.Printf("admin-events purge scheduler: err: %v", err)
 			adminAuditSvc.Record(rctx, adminaudit.Event{

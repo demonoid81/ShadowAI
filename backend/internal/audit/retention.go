@@ -118,18 +118,19 @@ func uuidArrayLiteral(ids []string) string {
 	return string(b)
 }
 
-// PurgeAndRecord — W2.3: atomic combination of chunked delete +
-// chained evidence record. Replaces separate PurgeOlderThan + RecordPurgeRun
-// calls to eliminate the evidence gap.
+// PurgeAndRecord — W2.5: truly atomic chunked delete + chained evidence.
+// All DELETEs and the audit_purge_runs INSERT run inside ONE transaction.
 //
-// Pattern:
-//   Phase 1: chunked DELETEs outside tx (same as PurgeOlderThan, avoids long-held locks).
-//   Phase 2: short atomic tx — one final DELETE chunk (catches any rows added during phase 1)
-//            + recordPurgeRunChained (chain write). Either both commit or both rollback.
+// Contract:
+//   - Either ALL deleted rows AND the evidence row commit together.
+//   - Or everything rolls back: no deleted rows without evidence row,
+//     no evidence row without deleted rows.
 //
-// Result: if the final tx commit fails, at most one chunk worth of rows is
-// re-purgeable on the next run. No evidence record appears without deletes,
-// no deletes appear without an evidence record in phase 2.
+// Trade-off: the tx is held open for the duration of the delete loop.
+// For CLI purge and the admin_event_logs scheduler this is acceptable:
+// both are infrequent operator/scheduler operations, not hot-path.
+// The coordinated hold-aware purge (PurgeOlderThanRespectingHoldsAndRecordRun)
+// was already tx-based from the start.
 func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, target string) (int, error) {
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)
@@ -137,20 +138,25 @@ func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunk
 	if target == "" {
 		target = PurgeTargetAuditLogs
 	}
-	total := 0
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("purge: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	const q = `DELETE FROM audit_logs WHERE id IN (
 		SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2
 	)`
-
-	// Phase 1: bulk chunked deletes, no tx.
+	total := 0
 	for {
-		res, err := r.db.ExecContext(ctx, q, cutoff, chunkSize)
+		res, err := tx.ExecContext(ctx, q, cutoff, chunkSize)
 		if err != nil {
-			return total, fmt.Errorf("purge exec: %w", err)
+			return 0, fmt.Errorf("purge exec: %w", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return total, fmt.Errorf("purge RowsAffected: %w", err)
+			return 0, fmt.Errorf("purge RowsAffected: %w", err)
 		}
 		total += int(n)
 		if n < int64(chunkSize) {
@@ -158,26 +164,13 @@ func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunk
 		}
 		select {
 		case <-ctx.Done():
-			return total, ctx.Err()
+			return 0, ctx.Err()
 		default:
 		}
 	}
 
-	// Phase 2: atomic final tx — last possible rows + chained evidence record.
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return total, fmt.Errorf("purge final tx begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Final optional chunk (usually 0 rows, handles race with concurrent inserts).
-	if res, err := tx.ExecContext(ctx, q, cutoff, chunkSize); err == nil {
-		if n, _ := res.RowsAffected(); n > 0 {
-			total += int(n)
-		}
-	}
 	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, target); err != nil {
-		return total, fmt.Errorf("purge record run: %w", err)
+		return 0, fmt.Errorf("purge record run: %w", err)
 	}
 	return total, tx.Commit()
 }
