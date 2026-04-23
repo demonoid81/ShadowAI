@@ -222,31 +222,59 @@ func (h *Handler) runIncrementalStreamTransport(
 	return res
 }
 
-// shouldUseIncrementalStream — возвращает (adapter, true) если можно
-// использовать incremental path для данного provider'а. False
-// означает: caller остаётся на buffered branch; сопутствующий
-// fallback metric + audit marker уже обработаны здесь.
+// shouldUseIncrementalStream — возвращает (adapter, useIncremental,
+// fallbackReason). Contract:
+//   - useIncremental=true: caller берёт incremental path;
+//     fallbackReason пустой.
+//   - useIncremental=false: caller остаётся на buffered branch.
+//     fallbackReason заполнен одним из:
+//       * FallbackReasonUnsupportedProvider (provider без adapter'а);
+//       * reason из streamingCapability (CM+judge → "judge_inspector");
+//       * пустая строка, если streamingMode != "incremental" (не
+//         fallback, а обычный buffered-режим).
+//     Caller обязан thread reason в local переменную и использовать
+//     её при final audit write (compound marker
+//     streaming_buffered_fallback:<original_action>).
 //
-// PR-F7.2: в дополнение к F7.1 provider-check добавлена проверка
-// streamingCapability (pre-computed в SetStreamingMode из
-// DecideStreamingCapability). Если capability говорит fallback —
-// также включается audit marker через streamingFallbackActive
-// context flag (см. handler.go buffered branch).
-func (h *Handler) shouldUseIncrementalStream(providerName string) (streaming.Adapter, bool) {
+// PR-F7.2 review fix: ранее reason хранился в мутируемом поле
+// handler'а — data race при concurrent streaming requests. Теперь
+// request-local: три return values.
+func (h *Handler) shouldUseIncrementalStream(providerName string) (streaming.Adapter, bool, string) {
 	if h.streamingMode != "incremental" {
-		return streaming.Adapter{}, false
+		return streaming.Adapter{}, false, ""
 	}
 	a, ok := streaming.AdapterForProvider(providerName)
 	if !ok {
 		metrics.RecordStreamingFallback(providerName, FallbackReasonUnsupportedProvider)
-		h.streamingFallbackLastReason = FallbackReasonUnsupportedProvider
-		return streaming.Adapter{}, false
+		return streaming.Adapter{}, false, FallbackReasonUnsupportedProvider
 	}
 	if h.streamingCapability.IsFallback() {
 		metrics.RecordStreamingFallback(providerName, h.streamingCapability.Reason)
-		h.streamingFallbackLastReason = h.streamingCapability.Reason
-		return streaming.Adapter{}, false
+		return streaming.Adapter{}, false, h.streamingCapability.Reason
 	}
-	h.streamingFallbackLastReason = ""
-	return a, true
+	return a, true, ""
+}
+
+// composeBufferedFallbackMarker — helper для audit PolicyAction в
+// buffered path после fallback'а. Contract:
+//   - fallbackReason == "" → возвращает original как есть;
+//   - fallbackReason != "" и original == allow →
+//     "streaming_buffered_fallback";
+//   - fallbackReason != "" и original != allow → compound
+//     "streaming_buffered_fallback:<original>" (PR-F7.2 review fix
+//     observability gap: fallback-факт не терялся при block/flag
+//     внутри buffered path'а).
+//
+// Dashboards query'ят через HasPrefix(policy_action,
+// "streaming_buffered_fallback"); suffix после ':' — fallthrough
+// buffered decision. F7.3 audit outcome classifier должен
+// формализовать это через отдельное поле (RFC §11).
+func composeBufferedFallbackMarker(original, fallbackReason string) string {
+	if fallbackReason == "" {
+		return original
+	}
+	if original == "allowed" {
+		return PolicyActionStreamingBufferedFallback
+	}
+	return PolicyActionStreamingBufferedFallback + ":" + original
 }

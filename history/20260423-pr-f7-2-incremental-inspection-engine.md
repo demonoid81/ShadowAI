@@ -177,6 +177,66 @@ Cardinality: ≤ 7 providers × ≤ 6 response-side inspectors = 42.
    RFC §12.1 разрешает оба fail mode; выбираем open на stage, где
    incremental ещё подтверждает стабильность.
 
+## Follow-up PR-F7.2.1 — review fixes
+
+Review выделил три проблемы в F7.2, все пофикшены.
+
+### Fix #1 (High): race condition на shared mutable field
+
+Handler хранил `streamingFallbackLastReason` как поле, мутировал
+в `shouldUseIncrementalStream` и читал в buffered-branch final
+audit write. net/http обслуживает concurrent requests в отдельных
+goroutine'ах → реальный data race: reason от одного stream'а
+протекал в audit другого.
+
+Решение:
+- Поле удалено из Handler struct.
+- `shouldUseIncrementalStream` теперь возвращает третий параметр
+  `fallbackReason string`.
+- Callers в ProxyChat и UnifiedChat держат reason в request-local
+  переменной, передают в audit write как параметр.
+- Regression test `TestShouldUseIncrementalStream_NoSharedState`
+  запускает 400 concurrent goroutine'ов с разными provider names,
+  проверяет что каждая получает свой корректный reason. Проходит
+  под `go test -race`.
+
+### Fix #2 (Medium): fail-mode matrix не соответствовала RFC
+
+Engine blanket fail-open'ил любой `firewallPipeline.InspectResponse`
+error, хотя RFC §12.1 требует fail-closed для всех response-side
+inspector'ов (OutputValidation, PII, DLP, CM-heuristic, Policy).
+Это silent safety regression при transient inspector errors.
+
+Решение:
+- Engine на error → возвращает Block verdict с InspectorName=
+  "firewall_pipeline_error", Reason указывает на fail-closed RFC §12.1.
+- Justification: semantic/semantic_v2 (единственные fail-open
+  inspector'ы по RFC) работают только на request path — в response
+  path их нет, так что blanket fail-closed на response = корректное
+  mapping матрицы.
+- Test `TestIncrementalEngine_FailClosedOnInspectorError` с
+  erroringResponseInspector проверяет Block verdict при inspector
+  error.
+
+### Fix #3 (Low): buffered_fallback observability gap
+
+Audit marker `streaming_buffered_fallback` устанавливался только
+если buffered path отдал чистый allow. Если буферная ветка дальше
+решила block/sanitize/flag — fallback-факт терялся.
+
+Решение:
+- Helper `composeBufferedFallbackMarker(original, fallbackReason)`.
+- No fallback → original as-is.
+- Fallback + allow → `streaming_buffered_fallback`.
+- Fallback + non-allow → compound `streaming_buffered_fallback:<original>`
+  (например `streaming_buffered_fallback:blocked`).
+- Dashboards query'ят через `HasPrefix(policy_action,
+  "streaming_buffered_fallback")`; suffix — fallthrough decision.
+- RFC §11 обновлён с явным F7.2 interim footnote'ом + обещанием
+  отдельного `fallback_reason` поля в F7.3 audit outcome classifier.
+- Test `TestComposeBufferedFallbackMarker` с 7 subtest'ами
+  покрывает весь truth-table.
+
 ## Следующий PR
 
 **PR-F7.3** — streaming audit & accounting finalization:

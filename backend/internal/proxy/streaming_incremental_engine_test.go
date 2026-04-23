@@ -179,3 +179,41 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+// TestIncrementalEngine_FailClosedOnInspectorError — PR-F7.2 review
+// fix #2. RFC §12.1: response-side inspector'ы (OutputValidation,
+// PII, DLP, CM-heuristic, Policy) fail-closed. Engine на error
+// firewall.Pipeline'а должен вернуть Block verdict, не Allow.
+//
+// Предыдущая F7.2 реализация молча allow'ила на error → silent
+// safety regression.
+func TestIncrementalEngine_FailClosedOnInspectorError(t *testing.T) {
+	pipeline := firewall.NewPipeline()
+	pipeline.Register(erroringResponseInspector{})
+
+	e := newIncrementalEngine(pipeline, nil, "gpt-4o", "openai", "u-1")
+	v := e.EvaluateDelta(context.Background(), "any text")
+	if !v.Block {
+		t.Fatalf("inspector error должен fail-close'ить в Block, got %+v", v)
+	}
+	if v.InspectorName != "firewall_pipeline_error" {
+		t.Errorf("InspectorName = %q, want firewall_pipeline_error (marker)", v.InspectorName)
+	}
+}
+
+// erroringResponseInspector — response-side inspector, который
+// всегда возвращает error.
+type erroringResponseInspector struct{}
+
+func (erroringResponseInspector) Name() string { return "test_error" }
+func (erroringResponseInspector) InspectRequest(_ context.Context, _ *firewall.Payload) (*firewall.Decision, error) {
+	return &firewall.Decision{Action: firewall.ActionAllow}, nil
+}
+func (erroringResponseInspector) InspectResponse(_ context.Context, _ *firewall.Payload) (*firewall.Decision, error) {
+	return nil, contextErr{}
+}
+
+// contextErr — простая error-marker.
+type contextErr struct{}
+
+func (contextErr) Error() string { return "simulated inspector transient error" }

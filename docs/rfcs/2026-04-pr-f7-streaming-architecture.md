@@ -448,7 +448,7 @@ outcomes (будут отражаться в `audit_logs.policy_action` +
 | `stream_blocked_midflight`           | inspector вернул block, stream прерван                       |
 | `stream_upstream_error`              | provider вернул error mid-stream (5xx / stream error event)  |
 | `stream_usage_parse_failed`          | uplink ok, usage не извлечён — soft-fail (существующая метрика) |
-| `stream_buffered_fallback`           | promotion на legacy buffered path (explicit)                 |
+| `stream_buffered_fallback`           | promotion на legacy buffered path (explicit). **F7.2 interim:** marker эмитится в `policy_action` как `streaming_buffered_fallback` (если buffered decision = allow) или compound `streaming_buffered_fallback:<original>` (если buffered отдал block/flag/sanitize). Dashboards query'ят через `HasPrefix`. F7.3 audit outcome classifier должен формализовать через отдельное поле `fallback_reason` (требует schema migration в audit_logs). |
 | `streaming_transport_error`          | PR-F7.1: decoder/emitter failed с non-cancel error. Audit StatusCode=502. Buffered path в аналогичной ситуации (io.ReadAll err) audit не пишет вовсе — F7.1 incremental честнее. |
 | `streaming_budget_exceeded_soft`     | PR-F7.1: post-call CheckBudgetAfterUsage вернул over-budget, но body уже ушёл клиенту. Audit StatusCode=200 (отражает real client outcome); маркер явно признаёт divergence от buffered (где был бы 402 + блок body). RecordBudgetBlock инкрементит счётчик для следующих запросов. |
 

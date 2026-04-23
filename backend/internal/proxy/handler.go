@@ -115,21 +115,17 @@ type Handler struct {
 	streamingMode string
 	// PR-F7.2: кэшированное решение capability-проверки. Вычисляется
 	// один раз в SetStreamingMode через DecideStreamingCapability
-	// над текущим firewallPipeline. Если IsFallback() → incremental
-	// deployment не поддержан, весь stream идёт через buffered path
-	// с audit-маркером streaming_buffered_fallback.
+	// над текущим firewallPipeline. Read-only после SetStreamingMode —
+	// безопасно читать concurrent'но. Если IsFallback() → весь
+	// stream идёт через buffered path с audit-маркером
+	// streaming_buffered_fallback.
 	streamingCapability CapabilityDecision
-	// PR-F7.2: last-fallback-reason устанавливается в
-	// shouldUseIncrementalStream когда capability заставила
-	// fallback. Buffered branch читает его при финальном audit
-	// write, чтобы поставить PolicyActionStreamingBufferedFallback.
-	// Empty при не-fallback.
-	//
-	// Safety: поле mutate'ится на каждый streaming-запрос. Handler
-	// обслуживает один request за раз в своей goroutine — race'а
-	// нет; но если когда-то будет sharing между goroutines, поле
-	// надо пересмотреть. На F7.2 это safe.
-	streamingFallbackLastReason string
+	// Замечание (PR-F7.2 review fix): ранее существовало поле
+	// streamingFallbackLastReason, которое мутировалось per-request.
+	// Это был data-race bug (net/http обрабатывает concurrent
+	// requests в своих goroutine'ах). Удалено. Fallback reason
+	// теперь request-local переменная в каждой streaming-ветви,
+	// возвращаемая из shouldUseIncrementalStream.
 }
 
 // SetStreamingMode — F7.1: настройка transport mode после
@@ -470,7 +466,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		// firewall/DLP inspection (inspection придёт в PR-F7.2).
 		// Budget / usage / audit сохраняются — accumulated bytes
 		// скармливаются существующему parseStreamingUsage.
-		if adapter, ok := h.shouldUseIncrementalStream(providerName); ok {
+		adapter, useIncremental, streamingFallbackReason := h.shouldUseIncrementalStream(providerName)
+		if useIncremental {
 			metrics.RecordStreamingMode("incremental", providerName)
 			// PR-F7.2: inspection engine заменяет transport-only
 			// F7.1 поведение. firewallPipeline / dlpSvc прокидываются
@@ -666,14 +663,12 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		// PR-F7.2: если buffered branch выполнился как fallback из
-		// incremental (capability / unsupported provider) — пометить
-		// audit marker'ом, но только если более сильного сигнала
-		// (block/sanitize/flag) не было.
-		buffPolicyAction := policyAction
-		if h.streamingFallbackLastReason != "" && buffPolicyAction == string(dlp.DLPActionAllow) {
-			buffPolicyAction = PolicyActionStreamingBufferedFallback
-		}
+		// PR-F7.2 + review fix: если buffered branch выполнился как
+		// fallback из incremental (capability / unsupported provider),
+		// пометить audit. Compound marker сохраняет сильный сигнал
+		// (blocked/sanitized/flagged) как suffix, чтобы fallback-факт
+		// не терялся.
+		buffPolicyAction := composeBufferedFallbackMarker(policyAction, streamingFallbackReason)
 		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -1581,7 +1576,8 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			// аналог + handler_streaming_incremental.go). Real-time
 			// passthrough через normalized event layer; response-side
 			// inspection отключена в F7.1 (F7.2 добавит).
-			if adapter, ok := h.shouldUseIncrementalStream(candidate.Name); ok {
+			adapter, useIncremental, streamingFallbackReason := h.shouldUseIncrementalStream(candidate.Name)
+			if useIncremental {
 				metrics.RecordStreamingMode("incremental", candidate.Name)
 				engine := newIncrementalEngine(
 					h.firewallPipeline, h.dlpSvc,
@@ -1750,12 +1746,8 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 			recordStreamUsage()
 
-			// PR-F7.2: see ProxyChat аналог — если buffered branch
-			// выполнился как fallback, пометить audit.
-			buffPolicyAction := policyAction
-			if h.streamingFallbackLastReason != "" && buffPolicyAction == string(dlp.DLPActionAllow) {
-				buffPolicyAction = PolicyActionStreamingBufferedFallback
-			}
+			// PR-F7.2 + review fix: compound fallback marker.
+			buffPolicyAction := composeBufferedFallbackMarker(policyAction, streamingFallbackReason)
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),

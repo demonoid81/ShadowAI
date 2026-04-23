@@ -106,11 +106,24 @@ func (e *incrementalEngine) EvaluateDelta(ctx context.Context, delta string) inc
 			Phase:    firewall.PhaseResponse,
 		}
 		decision, err := e.firewallPipeline.InspectResponse(ctx, fwPayload)
-		// Fail-open на error: F7.2 conservative default, не рвём
-		// stream из-за transient inspector ошибки. Эта политика
-		// зафиксирована в RFC §12.1 / §12.5 (inspector timeout
-		// mapping отдельно от HTTP request timeout).
-		if err == nil && decision != nil {
+		if err != nil {
+			// RFC §12.1 fail-mode matrix: response-side inspector'ы
+			// (OutputValidation, PII, DLP, ContentModeration-heuristic,
+			// Policy) — все safety-critical, fail-closed. Semantic /
+			// SemanticV2 (fail-open) — request-only, в response path
+			// их не бывает. Значит blanket fail-closed = корректный
+			// mapping матрицы для incremental response engine.
+			//
+			// Previous F7.2 behavior (blanket fail-open) расходился с
+			// RFC § и давал silent safety regression при transient
+			// inspector errors. Review fix.
+			return incrementalVerdict{
+				Block:         true,
+				InspectorName: "firewall_pipeline_error",
+				Reason:        "inspector error (fail-closed per RFC §12.1)",
+			}
+		}
+		if decision != nil {
 			switch decision.Action {
 			case firewall.ActionBlock:
 				return incrementalVerdict{
