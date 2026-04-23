@@ -71,6 +71,45 @@ var (
 		Help: "Total streaming responses where usage could not be parsed (likely SSE without include_usage).",
 	}, []string{"provider"})
 
+	// PR-F7.1: streaming transport layer metrics. Cardinality safe:
+	// labels ограничены provider (≤ 7 values из SupportedProviders)
+	// + mode ("buffered"/"incremental"/"shadow") для mode-total;
+	// reason для fallback — fixed vocabulary ("unsupported_provider"
+	// / "decoder_error" / позже в F7.2 "judge_inspector" и т.п.).
+
+	// StreamingModeTotal — сколько streaming-запросов какому режиму
+	// пошло. Используется для rollout visibility (Stage 0 → все
+	// buffered, Stage 1 → растёт incremental).
+	StreamingModeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_mode_total",
+		Help: "Streaming requests by transport mode and provider.",
+	}, []string{"mode", "provider"})
+
+	// StreamingMalformedChunkTotal — количество frame'ов, которые
+	// decoder не смог распарсить (unknown_chunk из-за JSON error
+	// или неподдержанной структуры). Alerting signal для parser
+	// regression'ов.
+	StreamingMalformedChunkTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_malformed_chunk_total",
+		Help: "Streaming frames decoder could not parse into a known event.",
+	}, []string{"provider"})
+
+	// StreamingEmitFailTotal — emit error при записи в downstream
+	// writer. Обычно означает client disconnect, но может быть
+	// upstream http.Flusher contract violation.
+	StreamingEmitFailTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_emit_fail_total",
+		Help: "Streaming downstream emit failures (client disconnect, writer errors).",
+	}, []string{"provider"})
+
+	// StreamingFallbackTotal — transition из incremental в buffered
+	// path по причине. В F7.1 только "unsupported_provider"; в F7.2
+	// добавится "judge_inspector" (RFC §12.6) и прочие.
+	StreamingFallbackTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_fallback_total",
+		Help: "Streaming transitions from incremental to buffered fallback.",
+	}, []string{"provider", "reason"})
+
 	// --- LLM-as-Judge observability ---
 	//
 	// Cardinality constraint: label provider+threat_type даёт умеренный
@@ -198,6 +237,29 @@ func RecordBudgetBlock(streaming bool) {
 // RecordStreamUsageParseFail инкрементирует счётчик парсинга usage для streaming.
 func RecordStreamUsageParseFail(provider string) {
 	StreamUsageParseFailTotal.WithLabelValues(provider).Inc()
+}
+
+// RecordStreamingMode — помечает streaming-запрос transport-режимом.
+// mode ∈ {"buffered","incremental","shadow"}.
+func RecordStreamingMode(mode, provider string) {
+	StreamingModeTotal.WithLabelValues(mode, provider).Inc()
+}
+
+// RecordStreamingMalformedChunk — decoder не смог распарсить frame.
+func RecordStreamingMalformedChunk(provider string) {
+	StreamingMalformedChunkTotal.WithLabelValues(provider).Inc()
+}
+
+// RecordStreamingEmitFail — emit в downstream writer не удался
+// (client disconnect / writer error).
+func RecordStreamingEmitFail(provider string) {
+	StreamingEmitFailTotal.WithLabelValues(provider).Inc()
+}
+
+// RecordStreamingFallback — incremental path downgraded в buffered.
+// reason ∈ {"unsupported_provider","decoder_error", ...}.
+func RecordStreamingFallback(provider, reason string) {
+	StreamingFallbackTotal.WithLabelValues(provider, reason).Inc()
 }
 
 // RecordJudgeRequest инкрементирует счётчик всех judge вызовов.

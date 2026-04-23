@@ -108,6 +108,23 @@ type Handler struct {
 	// PR-G1: admin-event writer для governance_deny / governance
 	// CRUD. nil → админ-события не пишутся (Core build / dev).
 	adminAudit adminaudit.Recorder
+	// PR-F7.1: streaming transport mode (см. docs/rfcs/2026-04-pr-f7-*).
+	// Допустимые значения: "" (== "buffered") | "incremental" | "shadow".
+	// Default пустой = buffered (исторический path unchanged).
+	// Incremental — transport-only pass-through через streaming/*
+	// adapter layer; response-side inspection не активирована в F7.1
+	// (придёт в F7.2). Operator должен opt-in'уть осознанно.
+	// Shadow в F7.1 эквивалентен buffered (зарезервирован под F7.2+).
+	streamingMode string
+}
+
+// SetStreamingMode — F7.1: настройка transport mode после
+// конструктора. Оставлено как setter (не constructor arg), чтобы не
+// ломать существующих callers NewHandler. В prod wiring (main.go)
+// вызывается из cfg.StreamingMode через
+// config.NormalizeStreamingMode. Тесты могут вызывать напрямую.
+func (h *Handler) SetStreamingMode(mode string) {
+	h.streamingMode = mode
 }
 
 // NewHandler creates a new multi-provider proxy handler.
@@ -428,6 +445,52 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 	// 8. Handle streaming
 	if chatReq.Stream {
+		// PR-F7.1 incremental transport branch. Активируется ТОЛЬКО
+		// при STREAMING_MODE=incremental и наличии paired adapter'а
+		// для провайдера (см. streaming.AdapterForProvider). Real-time
+		// passthrough через normalized event layer, БЕЗ response-side
+		// firewall/DLP inspection (inspection придёт в PR-F7.2).
+		// Budget / usage / audit сохраняются — accumulated bytes
+		// скармливаются существующему parseStreamingUsage.
+		if adapter, ok := h.shouldUseIncrementalStream(providerName); ok {
+			metrics.RecordStreamingMode("incremental", providerName)
+			accumulated, transportErr := h.runIncrementalStreamTransport(
+				r.Context(), w, resp.Header, resp.Body, resp.StatusCode,
+				providerName, adapter,
+			)
+			// Post-stream accounting (те же правила, что в buffered path).
+			streamUsage, parseErr := parseStreamingUsage(provider, accumulated, model)
+			if parseErr != nil || !streamUsage.Found {
+				metrics.RecordStreamUsageParseFail(providerName)
+			}
+			promptTokens := streamUsage.PromptTokens
+			completionTokens := streamUsage.CompletionTokens
+			totalTokens := streamUsage.TotalTokens
+			cost := streamUsage.CostUSD
+			if cost > 0 {
+				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+			}
+			// Post-call budget check: для incremental мы не можем
+			// изменить уже отправленный ответ, но запись и block на
+			// следующие запросы сохраняются.
+			if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
+				metrics.RecordBudgetBlock(true)
+			}
+			h.auditLog(r.Context(), &domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
+				ResponseBody: h.auditPayload(accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
+				Model:        model, Provider: providerName, Endpoint: endpoint,
+				StatusCode:   resp.StatusCode,
+				PromptTokens: promptTokens, CompletionTokens: completionTokens,
+				TotalTokens: totalTokens, CostUSD: cost,
+				PIIDetected: piiDetected, PIITypes: piiTypes,
+				PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+			})
+			_ = transportErr // статус уже записан; ошибка транспорта залогирована через metric
+			return
+		}
+		metrics.RecordStreamingMode("buffered", providerName)
 		// ВНИМАНИЕ: текущая реализация streaming НЕ является real-time passthrough.
 		// Чтобы гарантировать enforcement DLP и firewall на response, handler
 		// буферизует весь upstream-stream, затем прогоняет его через inspectors
@@ -1464,6 +1527,46 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 
 		// Streaming
 		if chatReq.Stream {
+			// PR-F7.1: incremental transport branch (см. ProxyChat
+			// аналог + handler_streaming_incremental.go). Real-time
+			// passthrough через normalized event layer; response-side
+			// inspection отключена в F7.1 (F7.2 добавит).
+			if adapter, ok := h.shouldUseIncrementalStream(candidate.Name); ok {
+				metrics.RecordStreamingMode("incremental", candidate.Name)
+				accumulated, transportErr := h.runIncrementalStreamTransport(
+					r.Context(), w, resp.Header, resp.Body, resp.StatusCode,
+					candidate.Name, adapter,
+				)
+				resp.Body.Close()
+				streamUsage, parseErr := parseStreamingUsage(provider, accumulated, providerModel)
+				if parseErr != nil || !streamUsage.Found {
+					metrics.RecordStreamUsageParseFail(candidate.Name)
+				}
+				promptTokens := streamUsage.PromptTokens
+				completionTokens := streamUsage.CompletionTokens
+				totalTokens := streamUsage.TotalTokens
+				cost := streamUsage.CostUSD
+				if cost > 0 {
+					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				}
+				if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
+					metrics.RecordBudgetBlock(true)
+				}
+				h.auditLog(r.Context(), &domain.AuditLog{
+					ID: uuid.New().String(), UserID: claims.UserID,
+					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
+					ResponseBody: h.auditPayload(accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
+					Model:        providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
+					StatusCode:   resp.StatusCode,
+					PromptTokens: promptTokens, CompletionTokens: completionTokens,
+					TotalTokens: totalTokens, CostUSD: cost,
+					PIIDetected: piiDetected, PIITypes: piiTypes,
+					PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				})
+				_ = transportErr
+				return
+			}
+			metrics.RecordStreamingMode("buffered", candidate.Name)
 			respBytes, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
