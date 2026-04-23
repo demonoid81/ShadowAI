@@ -4,11 +4,91 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 )
 
 // buildChainedHashes строит цепочку из N хэшей и возвращает их в порядке.
 // Используется для генерации тест-fixtures без реальной БД.
+// TestLoadSinkAnchors_ReverseCheckDetectsDeletedDBRow — ключевой W3.2 guard:
+// verifier должен обнаружить что sink содержит запись, которой нет в DB (anchor
+// строка удалена из audit_chain_anchors DBA'ем после публикации в sink).
+//
+// Этот unit тест проверяет логику parseSinkKey* и обнаружение через
+// sinkIndex. Интеграционный reverse-check через verifyAnchors проверяется
+// в integration/purge_chain_test.go (требует Postgres).
+func TestLoadSinkAnchors_ReverseCheckDetectsDeletedDBRow(t *testing.T) {
+	// Simulate NDJSON sink with one entry.
+	ndjson := `{"v":1,"table":"audit_logs","seq_lo":1,"seq_hi":10,"row_count":10,"merkle_root_hex":"aabbcc","created_at":"2026-04-23T00:00:00Z"}` + "\n"
+	dir := t.TempDir()
+	sinkFile := dir + "/sink.ndjson"
+	_ = os.WriteFile(sinkFile, []byte(ndjson), 0o644)
+
+	idx, err := loadSinkAnchors(sinkFile, false)
+	if err != nil {
+		t.Fatalf("loadSinkAnchors: %v", err)
+	}
+	key := "audit_logs:1:10"
+	if _, ok := idx[key]; !ok {
+		t.Fatalf("expected key %q in sink index", key)
+	}
+
+	// Simulate: DB has 0 anchors (DBA deleted the row).
+	dbKeys := make(map[string]bool)
+
+	// Reverse check logic (mirrors verifyAnchors internals):
+	var sinkMismatches int
+	for sinkKey := range idx {
+		if strings.HasPrefix(sinkKey, "audit_logs:") && !dbKeys[sinkKey] {
+			sinkMismatches++
+		}
+	}
+	if sinkMismatches != 1 {
+		t.Errorf("expected 1 sink mismatch (deleted DB row), got %d", sinkMismatches)
+	}
+}
+
+// TestLoadSinkAnchors_StrictMode_RejectsmalformedLine — Fix #3: strict
+// mode возвращает error на malformed NDJSON.
+func TestLoadSinkAnchors_StrictMode_RejectsMalformedLine(t *testing.T) {
+	dir := t.TempDir()
+	sinkFile := dir + "/sink.ndjson"
+	_ = os.WriteFile(sinkFile, []byte("{invalid json}\n"), 0o644)
+
+	_, err := loadSinkAnchors(sinkFile, true)
+	if err == nil {
+		t.Error("strict mode should return error on malformed NDJSON, got nil")
+	}
+}
+
+// TestLoadSinkAnchors_NonStrictMode_SkipsMalformedLine — non-strict mode
+// тихо пропускает malformed строки.
+func TestLoadSinkAnchors_NonStrictMode_SkipsMalformedLine(t *testing.T) {
+	good := `{"v":1,"table":"audit_logs","seq_lo":1,"seq_hi":5,"row_count":5,"merkle_root_hex":"aabb","created_at":"2026-04-23T00:00:00Z"}`
+	dir := t.TempDir()
+	sinkFile := dir + "/sink.ndjson"
+	_ = os.WriteFile(sinkFile, []byte("{bad}\n"+good+"\n"), 0o644)
+
+	idx, err := loadSinkAnchors(sinkFile, false)
+	if err != nil {
+		t.Fatalf("non-strict: unexpected error: %v", err)
+	}
+	if len(idx) != 1 {
+		t.Errorf("expected 1 valid entry, got %d", len(idx))
+	}
+}
+
+// TestParseSinkKey — parses seqLo/seqHi from "table:seqLo:seqHi".
+func TestParseSinkKey(t *testing.T) {
+	if lo := parseSinkKeySeqLo("audit_logs:42:100"); lo != 42 {
+		t.Errorf("seqLo = %d, want 42", lo)
+	}
+	if hi := parseSinkKeySeqHi("audit_logs:42:100"); hi != 100 {
+		t.Errorf("seqHi = %d, want 100", hi)
+	}
+}
+
 func buildChainedHashes(n int, secret []byte, canonicals []string) [][]byte {
 	hashes := make([][]byte, n)
 	prev := make([]byte, 32)

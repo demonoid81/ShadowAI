@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -367,15 +368,30 @@ type AnchorMismatch struct {
 // VerifyAnchors recomputes Merkle roots from stored row_hashes and
 // compares to audit_chain_anchors records for the given table.
 //
-// W3 tier: does NOT require chain_secret. Only needs DB access to
-// read row_hash values (and optionally the file sink path).
+// W3 tier: does NOT require chain_secret.
 //
-// sinkPath: if non-empty, also reads the NDJSON anchor file and
-// cross-references each DB anchor record against the external sink.
-// This is the external-witness verification — defends against a DBA
-// who rewrites both DB rows AND DB anchor table: the file records
-// written at anchor time are independent and not in the DB.
-func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, sinkPath string) (AnchorVerifyResult, error) {
+// Per-anchor sink resolution (Fix #2): for each DB anchor with
+// SinkName="file://" and non-empty SinkRef, the referenced file is used
+// for cross-reference. fallbackSinkPath is used for anchors without a
+// sink_ref (e.g. older records) or as a CLI override.
+//
+// Reverse check (Fix #1): after iterating DB anchors, sink records for
+// this table that have no matching DB anchor → SinkMismatches. This
+// detects a DBA who deleted anchor rows from audit_chain_anchors.
+//
+// strictSink: if true, malformed NDJSON lines in sink file return error
+// instead of being silently skipped.
+func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, fallbackSinkPath string) (AnchorVerifyResult, error) {
+	return verifyAnchors(ctx, db, tableName, fallbackSinkPath, false)
+}
+
+// VerifyAnchorsStrict is like VerifyAnchors but returns an error for
+// malformed NDJSON lines in the sink file (Fix #3).
+func VerifyAnchorsStrict(ctx context.Context, db *sql.DB, tableName, fallbackSinkPath string) (AnchorVerifyResult, error) {
+	return verifyAnchors(ctx, db, tableName, fallbackSinkPath, true)
+}
+
+func verifyAnchors(ctx context.Context, db *sql.DB, tableName, fallbackSinkPath string, strict bool) (AnchorVerifyResult, error) {
 	res := AnchorVerifyResult{Table: tableName}
 	repo := NewAnchorRepository(db)
 
@@ -383,19 +399,71 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, sinkPath string) 
 	if err != nil {
 		return res, fmt.Errorf("verify anchors %s: list: %w", tableName, err)
 	}
-	if len(anchors) == 0 {
-		res.OK = true
-		return res, nil
-	}
 	res.AnchorCount = len(anchors)
 
-	// Optional: load external sink records for cross-reference.
-	var sinkIndex map[string]string // key = "table:seqLo:seqHi", val = merkle_root_hex
-	if sinkPath != "" {
-		sinkIndex, err = loadSinkAnchors(sinkPath)
-		if err != nil {
-			return res, fmt.Errorf("verify anchors %s: read sink %s: %w", tableName, sinkPath, err)
+	// Determine all sink files to load (Fix #2: per-anchor sink_ref).
+	// Build a set of unique file paths from sink_ref + fallbackSinkPath.
+	sinkFiles := make(map[string]bool)
+	for _, a := range anchors {
+		if a.SinkName == "file://" && a.SinkRef != "" {
+			path := strings.TrimPrefix(a.SinkRef, "file://")
+			if path != "" {
+				sinkFiles[path] = true
+			}
 		}
+	}
+	if fallbackSinkPath != "" {
+		sinkFiles[fallbackSinkPath] = true
+	}
+
+	// Load all unique sink files into combined index.
+	// key = "table:seqLo:seqHi", val = merkle_root_hex
+	var combinedSinkIndex map[string]string
+	if len(sinkFiles) > 0 {
+		combinedSinkIndex = make(map[string]string)
+		for path := range sinkFiles {
+			idx, err := loadSinkAnchors(path, strict)
+			if err != nil {
+				return res, fmt.Errorf("verify anchors %s: read sink %s: %w", tableName, path, err)
+			}
+			for k, v := range idx {
+				combinedSinkIndex[k] = v
+			}
+		}
+	}
+
+	// W3.2 Fix #1 — Reverse check: sink records missing from DB.
+	// A DBA could delete rows from audit_chain_anchors after the file was written.
+	// Without this check, VerifyAnchors would return OK (DB empty → early return).
+	if combinedSinkIndex != nil {
+		dbKeys := make(map[string]bool, len(anchors))
+		for _, a := range anchors {
+			dbKeys[fmt.Sprintf("%s:%d:%d", tableName, a.SeqLo, a.SeqHi)] = true
+		}
+		for sinkKey, sinkRootHex := range combinedSinkIndex {
+			// Only check keys for this table.
+			if !strings.HasPrefix(sinkKey, tableName+":") {
+				continue
+			}
+			if !dbKeys[sinkKey] {
+				// Sink has a record, DB does not — anchor row was deleted.
+				sinkRootBytes, _ := hexToBytes(sinkRootHex)
+				res.SinkMismatches = append(res.SinkMismatches, AnchorMismatch{
+					AnchorID:   "", // no DB ID — record deleted
+					SeqLo:      parseSinkKeySeqLo(sinkKey),
+					SeqHi:      parseSinkKeySeqHi(sinkKey),
+					Recomputed: sinkRootBytes, // what sink says existed
+					// Stored = nil signals "anchor deleted from DB"
+				})
+			}
+		}
+	}
+
+	// If DB has no anchors (possibly deleted) and sink check already caught that,
+	// proceed to report. Don't early-return OK just because DB is empty.
+	if len(anchors) == 0 {
+		res.OK = len(res.SinkMismatches) == 0 && len(res.SeqGaps) == 0
+		return res, nil
 	}
 
 	// Check anchor coverage continuity.
@@ -408,8 +476,9 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, sinkPath string) 
 		}
 	}
 
+	// Forward checks: DB anchor → recomputed Merkle + sink cross-reference.
 	for _, a := range anchors {
-		// 1. DB integrity check: recompute Merkle from current DB row_hashes.
+		// DB integrity: recompute Merkle from current row_hashes.
 		hashes, err := repo.FetchRowHashes(ctx, tableName, a.SeqLo-1, a.SeqHi)
 		if err != nil {
 			return res, fmt.Errorf("verify anchors %s: fetch hashes [%d,%d]: %w",
@@ -426,32 +495,28 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, sinkPath string) 
 			})
 		}
 
-		// 2. External witness check: compare DB anchor root to sink file root.
-		if sinkIndex != nil {
+		// External witness: compare DB anchor root to sink root.
+		if combinedSinkIndex != nil {
 			key := fmt.Sprintf("%s:%d:%d", tableName, a.SeqLo, a.SeqHi)
-			sinkRootHex, found := sinkIndex[key]
-			if !found {
-				// Anchor exists in DB but not in sink — possible if sink write failed
-				// (sink_ok=false) or sink file was modified/truncated.
-				if a.SinkOK {
-					// sink_ok=true but no matching record → sink tampered or lost.
-					res.SinkMismatches = append(res.SinkMismatches, AnchorMismatch{
-						AnchorID: a.ID,
-						SeqLo:    a.SeqLo,
-						SeqHi:    a.SeqHi,
-						Stored:   a.MerkleRoot,
-						// Recomputed = nil signals "not found in sink"
-					})
-				}
-			} else {
+			sinkRootHex, found := combinedSinkIndex[key]
+			if !found && a.SinkOK {
+				// DB says sink was written successfully, but we can't find it.
+				res.SinkMismatches = append(res.SinkMismatches, AnchorMismatch{
+					AnchorID: a.ID,
+					SeqLo:    a.SeqLo,
+					SeqHi:    a.SeqHi,
+					Stored:   a.MerkleRoot,
+					// Recomputed = nil → "missing from sink file"
+				})
+			} else if found {
 				sinkRootBytes, _ := hexToBytes(sinkRootHex)
 				if !merkleEqual(sinkRootBytes, a.MerkleRoot) {
 					res.SinkMismatches = append(res.SinkMismatches, AnchorMismatch{
 						AnchorID:   a.ID,
 						SeqLo:      a.SeqLo,
 						SeqHi:      a.SeqHi,
-						Stored:     a.MerkleRoot,    // DB anchor root
-						Recomputed: sinkRootBytes,   // what sink says
+						Stored:     a.MerkleRoot,  // DB anchor root
+						Recomputed: sinkRootBytes,  // what sink says
 					})
 				}
 			}
@@ -462,15 +527,15 @@ func VerifyAnchors(ctx context.Context, db *sql.DB, tableName, sinkPath string) 
 	return res, nil
 }
 
-// loadSinkAnchors reads the NDJSON anchor file and builds an index
-// keyed by "table:seqLo:seqHi" → merkle_root_hex.
-func loadSinkAnchors(sinkPath string) (map[string]string, error) {
+// loadSinkAnchors reads the NDJSON anchor file and builds an index.
+// strict=true returns error for malformed NDJSON lines (Fix #3).
+func loadSinkAnchors(sinkPath string, strict bool) (map[string]string, error) {
 	data, err := os.ReadFile(sinkPath)
 	if err != nil {
 		return nil, fmt.Errorf("read sink file: %w", err)
 	}
 	index := make(map[string]string)
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	for lineNum, raw := range bytes.Split(data, []byte("\n")) {
 		raw = bytes.TrimSpace(raw)
 		if len(raw) == 0 {
 			continue
@@ -483,7 +548,10 @@ func loadSinkAnchors(sinkPath string) (map[string]string, error) {
 			MerkleRootHex string `json:"merkle_root_hex"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil {
-			continue // malformed line — skip, don't abort
+			if strict {
+				return nil, fmt.Errorf("malformed NDJSON line %d in %s: %w", lineNum+1, sinkPath, err)
+			}
+			continue
 		}
 		if rec.V == 1 && rec.Table != "" {
 			key := fmt.Sprintf("%s:%d:%d", rec.Table, rec.SeqLo, rec.SeqHi)
@@ -491,6 +559,28 @@ func loadSinkAnchors(sinkPath string) (map[string]string, error) {
 		}
 	}
 	return index, nil
+}
+
+// parseSinkKeySeqLo/Hi extract seq_lo and seq_hi from "table:seqLo:seqHi".
+func parseSinkKeySeqLo(key string) int64 {
+	parts := strings.SplitN(key, ":", 3)
+	if len(parts) < 3 {
+		return 0
+	}
+	// parts[1] = seqLo
+	var v int64
+	fmt.Sscanf(parts[1], "%d", &v)
+	return v
+}
+
+func parseSinkKeySeqHi(key string) int64 {
+	parts := strings.SplitN(key, ":", 3)
+	if len(parts) < 3 {
+		return 0
+	}
+	var v int64
+	fmt.Sscanf(parts[2], "%d", &v)
+	return v
 }
 
 // hexToBytes converts hex string to bytes; returns nil on error.
