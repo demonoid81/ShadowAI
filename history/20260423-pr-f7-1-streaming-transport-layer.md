@@ -202,10 +202,73 @@ Core + enterprise + PG integration — все зелёные.
   работает только с RawBytes; re-encode path адаптеров зарезервирован).
 - Buffered path не удалён.
 
+## Follow-up (PR-F7.1.1 review fix)
+
+Три проблемы из review `4064f4c+1`:
+
+### Fix #1 (High): prod silent downgrade
+
+`STREAMING_MODE=incremental` можно было включить в prod без явного
+признания того, что F7.1 incremental отключает response-side
+firewall/DLP и делает budget soft-record.
+
+Решение:
+- Новое поле `Config.StreamingAllowIncrementalInProd` + env var
+  `STREAMING_ALLOW_INCREMENTAL_IN_PROD` (default `false`).
+- `ValidateStartupConfig` отвергает startup при
+  `AppEnv=production` + `StreamingMode=incremental` + !override.
+- Error message именует оба compromise'а и ссылается на RFC §13.2.
+- 5-subtest coverage (`TestValidateStartupConfig_StreamingModeProdGuard`).
+
+### Fix #2 (Medium): budget divergence без признания
+
+Buffered path при over-budget возвращает 402 + блок body; incremental
+F7.1 не может это сделать (body уже ушёл), но audit писал обычный
+allow без маркировки. Это behavioural regression, которая терялась
+в audit.
+
+Решение:
+- Константа `PolicyActionStreamingBudgetExceededSoft =
+  "streaming_budget_exceeded_soft"` в handler_streaming_incremental.go.
+- При over-budget в incremental branch: `PolicyAction` ставится
+  этот маркер, `RecordBudgetBlock(true)` инкрементит для следующих
+  запросов, audit пишется с `StatusCode=200` (честно отражает, что
+  client получил body). Dashboards могут quering'овать разницу.
+- Тест `TestProxyChat_Streaming_IncrementalMode_BudgetSoftExceed_AuditMarker`
+  с `costlyOpenAIProvider` (ParseStreamUsage возвращает non-zero cost)
+  + `overBudgetRepo` (spent+cost > limit).
+
+### Fix #3 (Medium): transport error audit blind spot
+
+`runIncrementalStreamTransport` возвращал decoder/emitter error, но
+caller его `_ = transportErr` игнорировал. Audit писал
+`StatusCode=resp.StatusCode` независимо, что создавало blind spot.
+
+Решение:
+- Константа `PolicyActionStreamingTransportError =
+  "streaming_transport_error"`.
+- При `transportErr != nil`: audit пишется с
+  `StatusCode=http.StatusBadGateway` (502) + этот PolicyAction
+  маркер. Buffered path в аналогичной ситуации (io.ReadAll err)
+  audit не пишет вообще — incremental теперь честнее в audit
+  footprint.
+- Тест `TestProxyChat_Streaming_IncrementalMode_TransportError_AuditIs502`
+  через `failingResponseWriter` (Write возвращает `io.ErrClosedPipe`
+  после N байт).
+
+### RFC обновлён
+
+- §11 audit outcomes table: добавлены `streaming_transport_error`
+  и `streaming_budget_exceeded_soft` (соответствуют константам
+  кода).
+- §13.2 Stage 1: зафиксирован prod opt-in gate как условие
+  включения incremental в prod.
+
 ## Следующий PR
 
 **PR-F7.2** — incremental response inspection engine + inspector
 flags + fail modes + CM+judge buffered_fallback wiring (RFC §12.6).
+После F7.2+F7.3 prod opt-in gate будет пересмотрен.
 
 ## Файлы
 

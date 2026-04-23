@@ -10,6 +10,28 @@ import (
 	"github.com/shadowai/backend/internal/proxy/streaming"
 )
 
+// PR-F7.1 audit markers для incremental mode. Явные строки, чтобы
+// ops-дашборды могли queriify "какие стримы ушли через incremental
+// без full enforcement".
+//
+//   PolicyActionStreamingBudgetExceededSoft — post-call budget check
+//   вернул over-budget, но body уже ушёл клиенту. В buffered режиме
+//   это был бы 402 с блоком body; в incremental (F7.1) audit пишется
+//   с этим маркером + RecordBudgetBlock инкрементит счётчик для
+//   последующих запросов.
+//
+//   PolicyActionStreamingTransportError — decoder или emitter упал
+//   на non-cancel error (ctx.Err client-disconnect-like → не считается
+//   transport error'ом и пишется как allow). В audit отражается как
+//   502 Bad Gateway + этот маркер, чтобы отличать от успешного
+//   stream'а. Buffered path в аналогичной ситуации (io.ReadAll err)
+//   возвращает 502 клиенту и audit не пишет — incremental теперь
+//   честнее в audit footprint.
+const (
+	PolicyActionStreamingBudgetExceededSoft = "streaming_budget_exceeded_soft"
+	PolicyActionStreamingTransportError     = "streaming_transport_error"
+)
+
 // runIncrementalStreamTransport — PR-F7.1 transport-only pipeline.
 // Читает upstream через provider-specific decoder, немедленно эмитит
 // RawBytes каждого event'а в w (real-time passthrough), и параллельно

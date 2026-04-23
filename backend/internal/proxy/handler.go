@@ -470,24 +470,37 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 			}
-			// Post-call budget check: для incremental мы не можем
-			// изменить уже отправленный ответ, но запись и block на
-			// следующие запросы сохраняются.
-			if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
-				metrics.RecordBudgetBlock(true)
+			// Audit outcome classification для incremental path.
+			// transportErr приоритетнее budget-check (если транспорт
+			// упал, ресторан счёт уже не имеет смысла считать
+			// enforced).
+			auditStatus := resp.StatusCode
+			auditAction := policyAction
+			if transportErr != nil {
+				metrics.RecordStreamingEmitFail(providerName)
+				auditStatus = http.StatusBadGateway
+				auditAction = PolicyActionStreamingTransportError
+			} else {
+				// Post-call budget check. В buffered → 402 клиенту +
+				// audit с 402. В incremental body уже ушёл; F7.1
+				// compromise — soft-record. RecordBudgetBlock
+				// инкрементит counter для следующих запросов.
+				if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
+					metrics.RecordBudgetBlock(true)
+					auditAction = PolicyActionStreamingBudgetExceededSoft
+				}
 			}
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
 				ResponseBody: h.auditPayload(accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
 				Model:        model, Provider: providerName, Endpoint: endpoint,
-				StatusCode:   resp.StatusCode,
+				StatusCode:   auditStatus,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected: piiDetected, PIITypes: piiTypes,
-				PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				PolicyAction: auditAction, DurationMs: int(time.Since(start).Milliseconds()),
 			})
-			_ = transportErr // статус уже записан; ошибка транспорта залогирована через metric
 			return
 		}
 		metrics.RecordStreamingMode("buffered", providerName)
@@ -1549,21 +1562,30 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 				}
-				if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
-					metrics.RecordBudgetBlock(true)
+				// Audit outcome classification — симметрично ProxyChat.
+				auditStatus := resp.StatusCode
+				auditAction := policyAction
+				if transportErr != nil {
+					metrics.RecordStreamingEmitFail(candidate.Name)
+					auditStatus = http.StatusBadGateway
+					auditAction = PolicyActionStreamingTransportError
+				} else {
+					if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
+						metrics.RecordBudgetBlock(true)
+						auditAction = PolicyActionStreamingBudgetExceededSoft
+					}
 				}
 				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
 					ResponseBody: h.auditPayload(accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
 					Model:        providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
-					StatusCode:   resp.StatusCode,
+					StatusCode:   auditStatus,
 					PromptTokens: promptTokens, CompletionTokens: completionTokens,
 					TotalTokens: totalTokens, CostUSD: cost,
 					PIIDetected: piiDetected, PIITypes: piiTypes,
-					PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+					PolicyAction: auditAction, DurationMs: int(time.Since(start).Milliseconds()),
 				})
-				_ = transportErr
 				return
 			}
 			metrics.RecordStreamingMode("buffered", candidate.Name)

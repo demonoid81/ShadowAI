@@ -440,15 +440,17 @@ frame mix, undocumented keepalive, ParseStreamUsage soft-fail на
 outcomes (будут отражаться в `audit_logs.policy_action` +
 `audit_logs.metadata`):
 
-| Outcome                      | Когда                                                        |
-|------------------------------|--------------------------------------------------------------|
-| `stream_completed`           | normal clean flow, все chunks passed                         |
-| `stream_flagged`             | один или более flag, stream прошёл целиком                   |
-| `stream_sanitized`           | Stage 1 sanitize применён (deterministic chunk-local)        |
-| `stream_blocked_midflight`   | inspector вернул block, stream прерван                       |
-| `stream_upstream_error`      | provider вернул error mid-stream (5xx / stream error event)  |
-| `stream_usage_parse_failed`  | uplink ok, usage не извлечён — soft-fail (существующая метрика) |
-| `stream_buffered_fallback`   | promotion на legacy buffered path (explicit)                 |
+| Outcome                              | Когда                                                        |
+|--------------------------------------|--------------------------------------------------------------|
+| `stream_completed`                   | normal clean flow, все chunks passed                         |
+| `stream_flagged`                     | один или более flag, stream прошёл целиком                   |
+| `stream_sanitized`                   | Stage 1 sanitize применён (deterministic chunk-local)        |
+| `stream_blocked_midflight`           | inspector вернул block, stream прерван                       |
+| `stream_upstream_error`              | provider вернул error mid-stream (5xx / stream error event)  |
+| `stream_usage_parse_failed`          | uplink ok, usage не извлечён — soft-fail (существующая метрика) |
+| `stream_buffered_fallback`           | promotion на legacy buffered path (explicit)                 |
+| `streaming_transport_error`          | PR-F7.1: decoder/emitter failed с non-cancel error. Audit StatusCode=502. Buffered path в аналогичной ситуации (io.ReadAll err) audit не пишет вовсе — F7.1 incremental честнее. |
+| `streaming_budget_exceeded_soft`     | PR-F7.1: post-call CheckBudgetAfterUsage вернул over-budget, но body уже ушёл клиенту. Audit StatusCode=200 (отражает real client outcome); маркер явно признаёт divergence от buffered (где был бы 402 + блок body). RecordBudgetBlock инкрементит счётчик для следующих запросов. |
 
 ### 11.1 Request body
 
@@ -579,6 +581,21 @@ Judge (`firewall/judge.go`) — **LLM-based classifier**, который в
   buffered, divergence пишется в admin log. Flip на enforce делается
   только после того, как divergence rate < threshold на production
   traffic в течение установленного окна.
+
+**Prod opt-in gate (PR-F7.1, review fix)**: включение
+`STREAMING_MODE=incremental` в `APP_ENV=production` требует отдельного
+флага `STREAMING_ALLOW_INCREMENTAL_IN_PROD=true`. Без него
+`ValidateStartupConfig` отвергает startup. Причины:
+
+- F7.1 incremental отключает response-side firewall/DLP inspection
+  (F7.2 это вернёт);
+- budget enforcement в incremental mode становится soft-record:
+  audit пишет `streaming_budget_exceeded_soft`, но client получает
+  полный body (в buffered было бы 402 + блок body).
+
+Gate существует, чтобы эти compromise'ы не включились молча.
+После F7.2+F7.3 gate будет переосмыслен (возможно, удалён или
+преобразован в per-inspector override).
 
 ### 13.3 Stage 2
 
