@@ -504,11 +504,11 @@ func TestIncrementalTransport_MetricClassification(t *testing.T) {
 			failAt: 1, // первый Write ок (headers/first frame), второй fail
 		}
 		adapter, _ := streaming.AdapterForProvider("openai")
-		_, err := h.runIncrementalStreamTransport(
+		res := h.runIncrementalStreamTransport(
 			ctx, w, http.Header{}, bytes.NewReader(normal),
-			http.StatusOK, "openai", adapter,
+			http.StatusOK, "openai", adapter, nil, /* engine=nil: transport-only mode */
 		)
-		if err == nil {
+		if res.TransportErr == nil {
 			t.Fatal("expected transport err, got nil")
 		}
 
@@ -536,11 +536,11 @@ func TestIncrementalTransport_MetricClassification(t *testing.T) {
 		}
 		w := httptest.NewRecorder()
 		adapter, _ := streaming.AdapterForProvider("openai")
-		_, err := h.runIncrementalStreamTransport(
+		res := h.runIncrementalStreamTransport(
 			ctx, w, http.Header{}, reader,
-			http.StatusOK, "openai", adapter,
+			http.StatusOK, "openai", adapter, nil,
 		)
-		if err == nil {
+		if res.TransportErr == nil {
 			t.Fatal("expected decoder err, got nil")
 		}
 

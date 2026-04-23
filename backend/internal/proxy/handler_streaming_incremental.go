@@ -24,27 +24,76 @@ import (
 // streaming_transport_error маркером независимо от фазы.
 var errTransportEmit = errors.New("streaming: downstream emit failed")
 
-// PR-F7.1 audit markers для incremental mode. Явные строки, чтобы
-// ops-дашборды могли queriify "какие стримы ушли через incremental
-// без full enforcement".
+// PR-F7.1 / PR-F7.2 audit markers для incremental mode. Явные
+// строки, чтобы ops-дашборды могли queriify "какие стримы ушли
+// через incremental без full enforcement" vs "какие были
+// downgrade'нуты в buffered fallback".
 //
-//   PolicyActionStreamingBudgetExceededSoft — post-call budget check
-//   вернул over-budget, но body уже ушёл клиенту. В buffered режиме
-//   это был бы 402 с блоком body; в incremental (F7.1) audit пишется
-//   с этим маркером + RecordBudgetBlock инкрементит счётчик для
-//   последующих запросов.
+//   PolicyActionStreamingBudgetExceededSoft — PR-F7.1. Post-call
+//   budget check вернул over-budget, но body уже ушёл клиенту. В
+//   buffered режиме это был бы 402 с блоком body; в incremental
+//   audit пишется с этим маркером + RecordBudgetBlock инкрементит
+//   счётчик для последующих запросов.
 //
-//   PolicyActionStreamingTransportError — decoder или emitter упал
-//   на non-cancel error (ctx.Err client-disconnect-like → не считается
-//   transport error'ом и пишется как allow). В audit отражается как
-//   502 Bad Gateway + этот маркер, чтобы отличать от успешного
-//   stream'а. Buffered path в аналогичной ситуации (io.ReadAll err)
-//   возвращает 502 клиенту и audit не пишет — incremental теперь
-//   честнее в audit footprint.
+//   PolicyActionStreamingTransportError — PR-F7.1. Decoder или
+//   emitter упал на non-cancel error (ctx.Err client-disconnect-like
+//   → не считается transport error'ом и пишется как allow). В audit
+//   отражается как 502 Bad Gateway + этот маркер. Buffered path в
+//   аналогичной ситуации (io.ReadAll err) возвращает 502 клиенту и
+//   audit не пишет — incremental теперь честнее в audit footprint.
+//
+//   PolicyActionStreamingFlagged — PR-F7.2. Incremental inspection
+//   engine накопил flag на стриме (response-side inspector вернул
+//   ActionFlag или sanitize-downgrade'нуто до flag). Stream прошёл
+//   до конца без block'а. Audit StatusCode=200, marker — для
+//   ops-query'ей.
+//
+//   PolicyActionStreamingBlockedMidflight — PR-F7.2. Incremental
+//   inspector вернул ActionBlock на delta. Transport эмитнул
+//   terminal error frame, upstream закрыт. Audit StatusCode=403
+//   (consistent с buffered block audit), marker отличает "блок
+//   случился mid-stream, client получил partial" от "блок до
+//   первого flush'а".
+//
+//   PolicyActionStreamingBufferedFallback — PR-F7.2. Stream должен
+//   был пойти incremental, но capability-check на wire-time сказал
+//   "есть inspector, требующий buffered path" (на сейчас — только
+//   CM+judge.Enabled, RFC §12.6). Весь stream обрабатывается через
+//   legacy buffered branch, но audit помечается, чтобы было видно:
+//   client запросил incremental, но deployment не смог предоставить.
 const (
-	PolicyActionStreamingBudgetExceededSoft = "streaming_budget_exceeded_soft"
-	PolicyActionStreamingTransportError     = "streaming_transport_error"
+	PolicyActionStreamingBudgetExceededSoft  = "streaming_budget_exceeded_soft"
+	PolicyActionStreamingTransportError      = "streaming_transport_error"
+	PolicyActionStreamingFlagged             = "streaming_flagged"
+	PolicyActionStreamingBlockedMidflight    = "streaming_blocked_midflight"
+	PolicyActionStreamingBufferedFallback    = "streaming_buffered_fallback"
 )
+
+// errMidstreamBlock — sentinel для выхода из decoder callback'а
+// когда inspector сказал block. Обёрнут так, чтобы caller-side
+// различал его от emit/decoder ошибок.
+var errMidstreamBlock = errors.New("streaming: mid-stream block")
+
+// incrementalTransportResult — возвращаемое значение
+// runIncrementalStreamTransport v2. Объединяет accumulated bytes,
+// состояние blocked/flagged и transport error в одну структуру,
+// чтобы caller мог принять решение об audit StatusCode/PolicyAction.
+type incrementalTransportResult struct {
+	Accumulated []byte
+	// Blocked — inspector mid-stream вернул block (EmitError уже
+	// вызван внутри транспорта).
+	Blocked       bool
+	BlockInspector string
+	BlockReason    string
+	// Flagged — incremental engine накопил flag (любой из delta был
+	// flagged). Stream прошёл до EOF.
+	Flagged          bool
+	FlaggedInspector string
+	// TransportErr — non-cancel error от decoder/emitter. nil при
+	// успешном пропуске или при normal block. Обработка в caller
+	// (audit StatusCode=502 + streaming_transport_error marker).
+	TransportErr error
+}
 
 // runIncrementalStreamTransport — PR-F7.1 transport-only pipeline.
 // Читает upstream через provider-specific decoder, немедленно эмитит
@@ -90,66 +139,114 @@ func (h *Handler) runIncrementalStreamTransport(
 	statusCode int,
 	providerName string,
 	adapter streaming.Adapter,
-) (accumulated []byte, err error) {
+	engine *incrementalEngine,
+) incrementalTransportResult {
 	copyHeadersWithoutContentLength(w.Header(), srcHeaders)
 	w.WriteHeader(statusCode)
 
 	var buf bytes.Buffer
-	// tee: upstream → (buf для accounting/audit) + параллельный
-	// decoder. decoder читает из tee, так что всё, что он потребил,
-	// остаётся в buf.
 	teed := io.TeeReader(upstream, &buf)
 
+	var (
+		blocked        bool
+		blockInspector string
+		blockReason    string
+	)
+
 	decErr := adapter.Decoder.Decode(ctx, teed, func(ev streaming.Event) error {
-		// Malformed chunk — инкремент metric, но продолжаем (identity
-		// passthrough сохраняется: emitter запишет RawBytes).
+		// Malformed chunk — инкремент metric, но продолжаем.
 		if ev.Type == streaming.EventUnknownChunk {
-			// Различаем: keepalive comment'ы (OpenRouter "OPENROUTER
-			// PROCESSING") эмитят unknown_chunk тоже. Для F7.1
-			// считаем все unknown_chunk'и как "malformed" для
-			// метрики; F7.2 может разделить keepalive vs error.
 			metrics.RecordStreamingMalformedChunk(providerName)
 		}
+
+		// PR-F7.2: inspection hook на delta_text. Block → emit
+		// terminal error frame + sentinel для ранжи выхода. Flag
+		// накапливается в engine; emit продолжается.
+		if engine != nil && ev.Type == streaming.EventDeltaText && ev.Text != "" {
+			v := engine.EvaluateDelta(ctx, ev.Text)
+			if v.Block {
+				metrics.RecordStreamingMidstreamBlock(providerName, v.InspectorName)
+				// EmitError — transport primitive из F7.1 (provider-specific
+				// terminal frame). Ошибка emit'а на этом этапе учитывается
+				// как transport failure, но НЕ отменяет block intent
+				// (block сохраняется в result).
+				if emitErr := adapter.Emitter.EmitError(ctx, w, v.InspectorName, v.Reason); emitErr != nil {
+					metrics.RecordStreamingEmitFail(providerName)
+					// Не wrap'аем errMidstreamBlock сверху emitErr —
+					// block важнее чем emit failure при его доставке.
+				}
+				blocked = true
+				blockInspector = v.InspectorName
+				blockReason = v.Reason
+				return errMidstreamBlock
+			}
+			// v.Flag накапливается в engine; отдельной обработки
+			// здесь не требуется.
+		}
+
 		if emitErr := adapter.Emitter.Emit(ctx, w, ev); emitErr != nil {
 			metrics.RecordStreamingEmitFail(providerName)
-			// Wrap sentinel'ом, чтобы caller мог отличить emit-phase
-			// error от decoder-phase при классификации.
 			return fmt.Errorf("%w: %w", errTransportEmit, emitErr)
 		}
 		return nil
 	})
+
+	res := incrementalTransportResult{
+		Accumulated:      buf.Bytes(),
+		Blocked:          blocked,
+		BlockInspector:   blockInspector,
+		BlockReason:      blockReason,
+	}
+	if engine != nil {
+		res.Flagged = engine.Flagged()
+		res.FlaggedInspector = engine.FlaggedInspector()
+	}
+
 	if decErr != nil {
-		// ctx cancel (client disconnect) → не фатальная ошибка с
-		// точки зрения caller'а, но accumulated buf всё равно
-		// возвращаем — audit напишет partial data.
+		// 1. ctx cancel (client disconnect) → не фатальная ошибка.
 		if ctx.Err() != nil {
-			return buf.Bytes(), nil
+			return res
 		}
-		// Decoder-phase vs emit-phase classification для metrics:
-		//   - если error обёрнут errTransportEmit → emit уже учтён
-		//     в callback'е (не double-count'им);
-		//   - иначе это decoder-fatal (upstream read failure /
-		//     parser fatal) → отдельный счётчик.
+		// 2. mid-stream block sentinel — уже зафиксирован в res,
+		// не считается transport error'ом (metric уже записан).
+		if errors.Is(decErr, errMidstreamBlock) {
+			return res
+		}
+		// 3. Emit-phase: metric уже записан внутри callback'а.
+		// 4. Иначе — decoder fatal (upstream read / parser fatal).
 		if !errors.Is(decErr, errTransportEmit) {
 			metrics.RecordStreamingDecoderFatal(providerName)
 		}
-		return buf.Bytes(), decErr
+		res.TransportErr = decErr
 	}
-	return buf.Bytes(), nil
+	return res
 }
 
 // shouldUseIncrementalStream — возвращает (adapter, true) если можно
-// использовать F7.1 incremental path для данного provider'а. False
-// означает: caller должен остаться на buffered branch и инкрементить
-// соответствующий fallback metric.
+// использовать incremental path для данного provider'а. False
+// означает: caller остаётся на buffered branch; сопутствующий
+// fallback metric + audit marker уже обработаны здесь.
+//
+// PR-F7.2: в дополнение к F7.1 provider-check добавлена проверка
+// streamingCapability (pre-computed в SetStreamingMode из
+// DecideStreamingCapability). Если capability говорит fallback —
+// также включается audit marker через streamingFallbackActive
+// context flag (см. handler.go buffered branch).
 func (h *Handler) shouldUseIncrementalStream(providerName string) (streaming.Adapter, bool) {
 	if h.streamingMode != "incremental" {
 		return streaming.Adapter{}, false
 	}
 	a, ok := streaming.AdapterForProvider(providerName)
 	if !ok {
-		metrics.RecordStreamingFallback(providerName, "unsupported_provider")
+		metrics.RecordStreamingFallback(providerName, FallbackReasonUnsupportedProvider)
+		h.streamingFallbackLastReason = FallbackReasonUnsupportedProvider
 		return streaming.Adapter{}, false
 	}
+	if h.streamingCapability.IsFallback() {
+		metrics.RecordStreamingFallback(providerName, h.streamingCapability.Reason)
+		h.streamingFallbackLastReason = h.streamingCapability.Reason
+		return streaming.Adapter{}, false
+	}
+	h.streamingFallbackLastReason = ""
 	return a, true
 }

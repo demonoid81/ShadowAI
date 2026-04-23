@@ -119,11 +119,20 @@ var (
 
 	// StreamingFallbackTotal — transition из incremental в buffered
 	// path по причине. В F7.1 только "unsupported_provider"; в F7.2
-	// добавится "judge_inspector" (RFC §12.6) и прочие.
+	// добавилось "judge_inspector" (RFC §12.6).
 	StreamingFallbackTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadowai_streaming_fallback_total",
 		Help: "Streaming transitions from incremental to buffered fallback.",
 	}, []string{"provider", "reason"})
+
+	// PR-F7.2: mid-stream block counter. Inspector велел прервать
+	// stream; alerting signal — сколько stream'ов было заблокировано
+	// каким inspector'ом. Cardinality: ≤ 7 providers × ≤ 6
+	// response-side inspectors = 42 комбинации.
+	StreamingMidstreamBlockTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_midstream_block_total",
+		Help: "Streaming mid-stream block events by provider and inspector.",
+	}, []string{"provider", "inspector"})
 
 	// --- LLM-as-Judge observability ---
 	//
@@ -275,6 +284,12 @@ func RecordStreamingEmitFail(provider string) {
 // (upstream read failure / parser fatal). Отдельно от emit fails.
 func RecordStreamingDecoderFatal(provider string) {
 	StreamingDecoderFatalTotal.WithLabelValues(provider).Inc()
+}
+
+// RecordStreamingMidstreamBlock — PR-F7.2: incremental inspector
+// вернул ActionBlock на delta, stream прерван.
+func RecordStreamingMidstreamBlock(provider, inspector string) {
+	StreamingMidstreamBlockTotal.WithLabelValues(provider, inspector).Inc()
 }
 
 // RecordStreamingFallback — incremental path downgraded в buffered.

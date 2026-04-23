@@ -111,20 +111,38 @@ type Handler struct {
 	// PR-F7.1: streaming transport mode (см. docs/rfcs/2026-04-pr-f7-*).
 	// Допустимые значения: "" (== "buffered") | "incremental" | "shadow".
 	// Default пустой = buffered (исторический path unchanged).
-	// Incremental — transport-only pass-through через streaming/*
-	// adapter layer; response-side inspection не активирована в F7.1
-	// (придёт в F7.2). Operator должен opt-in'уть осознанно.
 	// Shadow в F7.1 эквивалентен buffered (зарезервирован под F7.2+).
 	streamingMode string
+	// PR-F7.2: кэшированное решение capability-проверки. Вычисляется
+	// один раз в SetStreamingMode через DecideStreamingCapability
+	// над текущим firewallPipeline. Если IsFallback() → incremental
+	// deployment не поддержан, весь stream идёт через buffered path
+	// с audit-маркером streaming_buffered_fallback.
+	streamingCapability CapabilityDecision
+	// PR-F7.2: last-fallback-reason устанавливается в
+	// shouldUseIncrementalStream когда capability заставила
+	// fallback. Buffered branch читает его при финальном audit
+	// write, чтобы поставить PolicyActionStreamingBufferedFallback.
+	// Empty при не-fallback.
+	//
+	// Safety: поле mutate'ится на каждый streaming-запрос. Handler
+	// обслуживает один request за раз в своей goroutine — race'а
+	// нет; но если когда-то будет sharing между goroutines, поле
+	// надо пересмотреть. На F7.2 это safe.
+	streamingFallbackLastReason string
 }
 
 // SetStreamingMode — F7.1: настройка transport mode после
 // конструктора. Оставлено как setter (не constructor arg), чтобы не
-// ломать существующих callers NewHandler. В prod wiring (main.go)
-// вызывается из cfg.StreamingMode через
-// config.NormalizeStreamingMode. Тесты могут вызывать напрямую.
+// ломать существующих callers NewHandler.
+//
+// PR-F7.2: дополнительно вычисляет streamingCapability из
+// firewallPipeline. Это позволяет capability-check в
+// shouldUseIncrementalStream работать без повторного walk'а
+// pipeline'а на каждый запрос.
 func (h *Handler) SetStreamingMode(mode string) {
 	h.streamingMode = mode
+	h.streamingCapability = DecideStreamingCapability(h.firewallPipeline)
 }
 
 // NewHandler creates a new multi-provider proxy handler.
@@ -454,12 +472,20 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		// скармливаются существующему parseStreamingUsage.
 		if adapter, ok := h.shouldUseIncrementalStream(providerName); ok {
 			metrics.RecordStreamingMode("incremental", providerName)
-			accumulated, transportErr := h.runIncrementalStreamTransport(
+			// PR-F7.2: inspection engine заменяет transport-only
+			// F7.1 поведение. firewallPipeline / dlpSvc прокидываются
+			// как есть; capability уже проверена на уровне
+			// shouldUseIncrementalStream (CM+judge → buffered_fallback).
+			engine := newIncrementalEngine(
+				h.firewallPipeline, h.dlpSvc,
+				model, providerName, claims.UserID,
+			)
+			res := h.runIncrementalStreamTransport(
 				r.Context(), w, resp.Header, resp.Body, resp.StatusCode,
-				providerName, adapter,
+				providerName, adapter, engine,
 			)
 			// Post-stream accounting (те же правила, что в buffered path).
-			streamUsage, parseErr := parseStreamingUsage(provider, accumulated, model)
+			streamUsage, parseErr := parseStreamingUsage(provider, res.Accumulated, model)
 			if parseErr != nil || !streamUsage.Found {
 				metrics.RecordStreamUsageParseFail(providerName)
 			}
@@ -470,33 +496,33 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 			}
-			// Audit outcome classification для incremental path.
-			// transportErr приоритетнее budget-check (если транспорт
-			// упал, ресторан счёт уже не имеет смысла считать
-			// enforced).
+			// Audit outcome classification. Приоритет:
+			//   1. mid-stream block (inspector верховодит).
+			//   2. transport error (decoder/emitter упал).
+			//   3. budget soft-exceed.
+			//   4. flag (прошёл до конца с пометкой).
+			//   5. обычное прохождение.
 			auditStatus := resp.StatusCode
 			auditAction := policyAction
-			if transportErr != nil {
-				// Metric уже инкрементирован внутри
-				// runIncrementalStreamTransport (либо emit-fail в
-				// callback, либо decoder-fatal после Decode). Здесь
-				// только audit-side классификация.
+			switch {
+			case res.Blocked:
+				auditStatus = http.StatusForbidden
+				auditAction = PolicyActionStreamingBlockedMidflight
+			case res.TransportErr != nil:
 				auditStatus = http.StatusBadGateway
 				auditAction = PolicyActionStreamingTransportError
-			} else {
-				// Post-call budget check. В buffered → 402 клиенту +
-				// audit с 402. В incremental body уже ушёл; F7.1
-				// compromise — soft-record. RecordBudgetBlock
-				// инкрементит counter для следующих запросов.
+			default:
 				if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
 					metrics.RecordBudgetBlock(true)
 					auditAction = PolicyActionStreamingBudgetExceededSoft
+				} else if res.Flagged {
+					auditAction = PolicyActionStreamingFlagged
 				}
 			}
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
-				ResponseBody: h.auditPayload(accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
+				ResponseBody: h.auditPayload(res.Accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
 				Model:        model, Provider: providerName, Endpoint: endpoint,
 				StatusCode:   auditStatus,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -640,6 +666,14 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 
 		copyHeadersWithoutContentLength(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
+		// PR-F7.2: если buffered branch выполнился как fallback из
+		// incremental (capability / unsupported provider) — пометить
+		// audit marker'ом, но только если более сильного сигнала
+		// (block/sanitize/flag) не было.
+		buffPolicyAction := policyAction
+		if h.streamingFallbackLastReason != "" && buffPolicyAction == string(dlp.DLPActionAllow) {
+			buffPolicyAction = PolicyActionStreamingBufferedFallback
+		}
 		h.auditLog(r.Context(), &domain.AuditLog{
 			ID: uuid.New().String(), UserID: claims.UserID,
 			RequestBody:  h.auditPayload(bodyBytes, findings, requestDecision),
@@ -649,7 +683,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,
 			TotalTokens: totalTokens, CostUSD: cost,
 			PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-			PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+			PolicyAction: buffPolicyAction, DurationMs: int(time.Since(start).Milliseconds()),
 		})
 		w.Write(responsePayload)
 		return
@@ -1549,12 +1583,16 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			// inspection отключена в F7.1 (F7.2 добавит).
 			if adapter, ok := h.shouldUseIncrementalStream(candidate.Name); ok {
 				metrics.RecordStreamingMode("incremental", candidate.Name)
-				accumulated, transportErr := h.runIncrementalStreamTransport(
+				engine := newIncrementalEngine(
+					h.firewallPipeline, h.dlpSvc,
+					providerModel, candidate.Name, claims.UserID,
+				)
+				res := h.runIncrementalStreamTransport(
 					r.Context(), w, resp.Header, resp.Body, resp.StatusCode,
-					candidate.Name, adapter,
+					candidate.Name, adapter, engine,
 				)
 				resp.Body.Close()
-				streamUsage, parseErr := parseStreamingUsage(provider, accumulated, providerModel)
+				streamUsage, parseErr := parseStreamingUsage(provider, res.Accumulated, providerModel)
 				if parseErr != nil || !streamUsage.Found {
 					metrics.RecordStreamUsageParseFail(candidate.Name)
 				}
@@ -1565,25 +1603,27 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
 				}
-				// Audit outcome classification — симметрично ProxyChat.
 				auditStatus := resp.StatusCode
 				auditAction := policyAction
-				if transportErr != nil {
-					// Metric уже инкрементирован внутри
-					// runIncrementalStreamTransport — см. ProxyChat
-					// аналог.
+				switch {
+				case res.Blocked:
+					auditStatus = http.StatusForbidden
+					auditAction = PolicyActionStreamingBlockedMidflight
+				case res.TransportErr != nil:
 					auditStatus = http.StatusBadGateway
 					auditAction = PolicyActionStreamingTransportError
-				} else {
+				default:
 					if allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost); err == nil && !allowedAfter {
 						metrics.RecordBudgetBlock(true)
 						auditAction = PolicyActionStreamingBudgetExceededSoft
+					} else if res.Flagged {
+						auditAction = PolicyActionStreamingFlagged
 					}
 				}
 				h.auditLog(r.Context(), &domain.AuditLog{
 					ID: uuid.New().String(), UserID: claims.UserID,
 					RequestBody:  h.auditPayload(requestPayload, findings, requestDecision),
-					ResponseBody: h.auditPayload(accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
+					ResponseBody: h.auditPayload(res.Accumulated, nil, dlp.Decision{Action: dlp.DLPActionAllow}),
 					Model:        providerModel, Provider: candidate.Name, Endpoint: "/proxy/chat",
 					StatusCode:   auditStatus,
 					PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -1710,6 +1750,12 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			}
 			recordStreamUsage()
 
+			// PR-F7.2: see ProxyChat аналог — если buffered branch
+			// выполнился как fallback, пометить audit.
+			buffPolicyAction := policyAction
+			if h.streamingFallbackLastReason != "" && buffPolicyAction == string(dlp.DLPActionAllow) {
+				buffPolicyAction = PolicyActionStreamingBufferedFallback
+			}
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
 				RequestBody: h.auditPayload(requestPayload, findings, requestDecision), ResponseBody: h.auditPayload(responsePayload, responseFindings, responseDecision),
@@ -1718,7 +1764,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, CostUSD: cost,
 				PIIDetected:  piiDetected || len(responseFindings) > 0, PIITypes: responsePIITypes,
-				PolicyAction: policyAction, DurationMs: int(time.Since(start).Milliseconds()),
+				PolicyAction: buffPolicyAction, DurationMs: int(time.Since(start).Milliseconds()),
 			})
 			copyHeadersWithoutContentLength(w.Header(), resp.Header)
 			w.Header().Set("X-Provider", candidate.Name)
