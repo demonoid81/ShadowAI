@@ -124,6 +124,14 @@ type Config struct {
 	FirewallEmbeddingDimension int
 	FirewallEmbeddingTimeout   time.Duration
 
+	// PR-W2: tamper-evident audit chain secret (RFC §7.2).
+	// AUDIT_CHAIN_SECRET: ключ для HMAC-SHA256 chain (HMAC(prev_hash||canonical, secret)).
+	// Не хранится в DB — только env var / secrets manager.
+	// Enterprise prod: ValidateStartupConfig требует >= 32 chars.
+	// Core build: если не задан, chain fields не пишутся (явный warning).
+	// Shadow/dev: допускается пустой (chain disabled, reduced guarantee).
+	AuditChainSecret string
+
 	// PR-F7.1 (streaming architecture, см. docs/rfcs/2026-04-pr-f7-*).
 	// StreamingMode: "buffered" | "incremental" | "shadow".
 	//   - buffered     — текущее поведение (full-buffer scan перед
@@ -232,6 +240,7 @@ func Load() *Config {
 
 		// PR-L1.2
 		LegalHoldTokenSecret: getEnv("LEGAL_HOLD_TOKEN_SECRET", ""),
+		AuditChainSecret:     getEnv("AUDIT_CHAIN_SECRET", ""),
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",

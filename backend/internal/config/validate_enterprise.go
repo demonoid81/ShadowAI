@@ -24,5 +24,14 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 	} else if len(c.LegalHoldTokenSecret) < 32 {
 		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be >=32 chars (current shorter — insufficient entropy for HMAC)")
 	}
+	// PR-W2: AUDIT_CHAIN_SECRET — keyed HMAC для tamper-evident audit chain.
+	// Enterprise prod требует secret для chain writes. Без него chain fields
+	// остаются NULL (chain disabled), что допустимо в dev/shadow-mode, но
+	// не в prod (reduced tamper-evidence guarantee).
+	if strings.TrimSpace(c.AuditChainSecret) == "" {
+		errs = append(errs, "AUDIT_CHAIN_SECRET must be set (>=32 chars) in prod for tamper-evident audit chain (RFC PR-W2)")
+	} else if len(c.AuditChainSecret) < 32 {
+		errs = append(errs, "AUDIT_CHAIN_SECRET must be >=32 chars (insufficient entropy for HMAC chain key)")
+	}
 	return errs
 }

@@ -339,6 +339,7 @@ func TestValidateStartupConfig_StreamingModeProdGuard(t *testing.T) {
 		AuditPayloadMode:            "redacted",
 		AuditRetentionDays:          30,
 		LegalHoldTokenSecret:        "super-secret-legal-hold-hmac-32!!!",
+		AuditChainSecret:            "super-secret-audit-chain-hmac-32!!",
 	}
 
 	t.Run("incremental_without_override_rejected", func(t *testing.T) {
@@ -447,6 +448,7 @@ func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
 		AuditRetentionDays:          0,
 		AuditAllowNoRetentionInProd: true,
 		LegalHoldTokenSecret:        "super-secret-legal-hold-hmac-32!!!",
+		AuditChainSecret:            "super-secret-audit-chain-hmac-32!!",
 	}
 
 	if err := cfg.ValidateStartupConfig(); err != nil {
@@ -467,6 +469,7 @@ func prodConfigBase() *Config {
 		AuditPayloadMode:     "redacted",
 		AuditRetentionDays:   30,
 		LegalHoldTokenSecret: "super-secret-legal-hold-hmac-32!!!",
+		AuditChainSecret:     "super-secret-audit-chain-hmac-32!!",
 	}
 }
 
