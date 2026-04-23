@@ -12,6 +12,8 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"crypto/ed25519"
+
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/auth"
@@ -349,7 +351,18 @@ func main() {
 			if err != nil {
 				log.Fatalf("anchor signing key: %v", err)
 			}
-			anchorSched = anchorSched.WithSigning(privKey, cfg.AuditAnchorPubKeyID, cfg.AuditAnchorPubKey != "")
+			// PR-W4.1 fix: parse AUDIT_ANCHOR_PUBKEY and use it for self-verification,
+			// so a wrong pubkey value is caught at write time (not only in audit-verify).
+			// Startup config validation (ValidateStartupConfig) also checks key pair match.
+			var selfVerifyKey ed25519.PublicKey
+			if cfg.AuditAnchorPubKey != "" {
+				pk, err := chain.ParsePublicKey(cfg.AuditAnchorPubKey)
+				if err != nil {
+					log.Fatalf("AUDIT_ANCHOR_PUBKEY: %v", err)
+				}
+				selfVerifyKey = pk
+			}
+			anchorSched = anchorSched.WithSigning(privKey, cfg.AuditAnchorPubKeyID, selfVerifyKey)
 		}
 		go anchorSched.Run(connectivityCtx)
 	}

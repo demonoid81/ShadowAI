@@ -612,3 +612,6 @@ func TestValidateStartupConfig_ProdRejectsLoopbackHosts(t *testing.T) {
 		})
 	}
 }
+
+// Note: TestValidateStartupConfig_W4_AnchorKeyMismatch moved to
+// validate_enterprise_test.go (requires //go:build enterprise).

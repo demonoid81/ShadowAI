@@ -38,9 +38,9 @@ type AnchorScheduler struct {
 	// W4.1: optional Ed25519 signing.
 	signingKey ed25519.PrivateKey
 	pubKeyID   string
-	// selfVerify: if true, verify signature immediately after signing
-	// (uses public key derived from private key). Catches misconfiguration early.
-	selfVerify bool
+	// selfVerify: if true, re-verify after signing using selfVerifyKey.
+	selfVerify    bool
+	selfVerifyKey ed25519.PublicKey // explicit pubkey; derived from privKey if nil
 }
 
 // NewAnchorScheduler создаёт scheduler. Если interval == 0 — Run() немедленно
@@ -58,12 +58,18 @@ func NewAnchorScheduler(repo AnchorRepoReader, sink AnchorSink, interval time.Du
 }
 
 // WithSigning configures Ed25519 signing for each anchor manifest.
-// pubKeyID is stored in anchor rows; selfVerify re-verifies immediately
-// after signing using the derived public key.
-func (s *AnchorScheduler) WithSigning(privKey ed25519.PrivateKey, pubKeyID string, selfVerify bool) *AnchorScheduler {
+// pubKeyID is stored in anchor rows.
+// selfVerifyKey: if non-nil, used for self-verification after each sign.
+//   If nil, self-verification is skipped.
+//   Pass the parsed AUDIT_ANCHOR_PUBKEY (not derived from priv) so that
+//   a wrong AUDIT_ANCHOR_PUBKEY value is caught at write time, not only in audit-verify.
+func (s *AnchorScheduler) WithSigning(privKey ed25519.PrivateKey, pubKeyID string, selfVerifyKey ed25519.PublicKey) *AnchorScheduler {
 	s.signingKey = privKey
 	s.pubKeyID = pubKeyID
-	s.selfVerify = selfVerify
+	if len(selfVerifyKey) > 0 {
+		s.selfVerify = true
+		s.selfVerifyKey = selfVerifyKey
+	}
 	return s
 }
 
@@ -155,9 +161,15 @@ func (s *AnchorScheduler) anchorTable(ctx context.Context, tableName string) err
 		}
 		// Self-verify: catch misconfiguration before persisting to DB.
 		if s.selfVerify {
-			pubKey := s.signingKey.Public().(ed25519.PublicKey)
-			if !VerifyAnchorSignature(a, pubKey) {
-				return fmt.Errorf("anchor %s: self-verify failed (signing misconfiguration)", tableName)
+			// Use the configured pubKey if provided; derive from privKey otherwise.
+			var verifyKey ed25519.PublicKey
+			if len(s.selfVerifyKey) > 0 {
+				verifyKey = s.selfVerifyKey
+			} else {
+				verifyKey = s.signingKey.Public().(ed25519.PublicKey)
+			}
+			if !VerifyAnchorSignature(a, verifyKey) {
+				return fmt.Errorf("anchor %s: self-verify failed (AUDIT_ANCHOR_PUBKEY mismatch)", tableName)
 			}
 		}
 	}

@@ -7,6 +7,9 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -53,5 +56,40 @@ func TestValidateStartupConfig_LegalHoldSecret_DevIgnored(t *testing.T) {
 	}
 	if err := cfg.ValidateStartupConfig(); err != nil {
 		t.Fatalf("dev env: unexpected error: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_W4_AnchorKeyMismatch — PR-W4.1 review fix:
+// AUDIT_ANCHOR_PUBKEY несовпадающий с AUDIT_ANCHOR_SIGNING_KEY → error на startup.
+func TestValidateStartupConfig_W4_AnchorKeyMismatch(t *testing.T) {
+	pub1, priv1, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv2, _ := ed25519.GenerateKey(rand.Reader)
+	_ = priv1
+
+	signingKeyB64 := base64.StdEncoding.EncodeToString([]byte(priv2))
+	pubKeyB64 := base64.StdEncoding.EncodeToString([]byte(pub1))
+
+	cfg := prodConfigBase()
+	cfg.AuditAnchorSigningKey = signingKeyB64
+	cfg.AuditAnchorPubKeyID = "ed25519-k1"
+	cfg.AuditAnchorPubKey = pubKeyB64
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for mismatched key pair")
+	}
+	if !strings.Contains(err.Error(), "AUDIT_ANCHOR_PUBKEY") {
+		t.Errorf("error should mention AUDIT_ANCHOR_PUBKEY: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_W4_AnchorKeyMatch — совпадающая пара → OK.
+func TestValidateStartupConfig_W4_AnchorKeyMatch(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	cfg := prodConfigBase()
+	cfg.AuditAnchorSigningKey = base64.StdEncoding.EncodeToString([]byte(priv))
+	cfg.AuditAnchorPubKeyID = "ed25519-k1"
+	cfg.AuditAnchorPubKey = base64.StdEncoding.EncodeToString([]byte(pub))
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		t.Fatalf("matching key pair should not error: %v", err)
 	}
 }

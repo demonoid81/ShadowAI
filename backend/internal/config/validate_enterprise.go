@@ -10,10 +10,48 @@
 package config
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// parseEd25519PrivKey и parseEd25519PubKey — thin helpers для startup
+// validation. Дублируют chain.ParsePrivateKey/ParsePublicKey логику,
+// чтобы config пакет не импортировал chain пакет (избегаем cycle).
+func parseEd25519PrivKey(b64 string) (ed25519.PrivateKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		raw, err = base64.URLEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+	}
+	switch len(raw) {
+	case ed25519.PrivateKeySize:
+		return ed25519.PrivateKey(raw), nil
+	case ed25519.SeedSize:
+		return ed25519.NewKeyFromSeed(raw), nil
+	default:
+		return nil, fmt.Errorf("expected %d or %d bytes, got %d", ed25519.PrivateKeySize, ed25519.SeedSize, len(raw))
+	}
+}
+
+func parseEd25519PubKey(b64 string) (ed25519.PublicKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		raw, err = base64.URLEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("expected %d bytes, got %d", ed25519.PublicKeySize, len(raw))
+	}
+	return ed25519.PublicKey(raw), nil
+}
 
 // appendEnterpriseValidations — enterprise-build check'ы, которые
 // не применимы к core. Вызывается из общего ValidateStartupConfig
@@ -28,6 +66,25 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 	} else if len(c.LegalHoldTokenSecret) < 32 {
 		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be >=32 chars (current shorter — insufficient entropy for HMAC)")
 	}
+	// PR-W4.1: если оба ключа заданы, проверяем что AUDIT_ANCHOR_PUBKEY
+	// совпадает с публичным ключом, derived из AUDIT_ANCHOR_SIGNING_KEY.
+	// Это ловит misconfiguration (wrong pubkey value) на startup, а не
+	// при первом anchor write.
+	if strings.TrimSpace(c.AuditAnchorSigningKey) != "" && strings.TrimSpace(c.AuditAnchorPubKey) != "" {
+		privKey, privErr := parseEd25519PrivKey(c.AuditAnchorSigningKey)
+		pubKey, pubErr := parseEd25519PubKey(c.AuditAnchorPubKey)
+		if privErr != nil {
+			errs = append(errs, fmt.Sprintf("AUDIT_ANCHOR_SIGNING_KEY invalid: %v", privErr))
+		} else if pubErr != nil {
+			errs = append(errs, fmt.Sprintf("AUDIT_ANCHOR_PUBKEY invalid: %v", pubErr))
+		} else {
+			derivedPub := privKey.Public().(ed25519.PublicKey)
+			if !bytes.Equal([]byte(derivedPub), []byte(pubKey)) {
+				errs = append(errs, "AUDIT_ANCHOR_PUBKEY does not match AUDIT_ANCHOR_SIGNING_KEY derived public key")
+			}
+		}
+	}
+
 	// PR-W3: AUDIT_ANCHOR_INTERVAL не должен превышать 24h в prod.
 	// Слишком большой интервал = слишком большой window без external witness
 	// (rows могут быть удалены и появиться в следующем anchor только через сутки).
