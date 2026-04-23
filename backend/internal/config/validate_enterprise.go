@@ -9,7 +9,11 @@
 
 package config
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // appendEnterpriseValidations — enterprise-build check'ы, которые
 // не применимы к core. Вызывается из общего ValidateStartupConfig
@@ -24,6 +28,18 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 	} else if len(c.LegalHoldTokenSecret) < 32 {
 		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be >=32 chars (current shorter — insufficient entropy for HMAC)")
 	}
+	// PR-W3: AUDIT_ANCHOR_INTERVAL не должен превышать 24h в prod.
+	// Слишком большой интервал = слишком большой window без external witness
+	// (rows могут быть удалены и появиться в следующем anchor только через сутки).
+	if c.AuditAnchorInterval > 24*time.Hour {
+		errs = append(errs, fmt.Sprintf(
+			"AUDIT_ANCHOR_INTERVAL=%s exceeds maximum 24h in prod (current compliance gap too large)",
+			c.AuditAnchorInterval))
+	}
+	if c.AuditAnchorSink == "file://" && strings.TrimSpace(c.AuditAnchorSinkPath) == "" {
+		errs = append(errs, "AUDIT_ANCHOR_SINK=file:// requires AUDIT_ANCHOR_SINK_PATH in prod")
+	}
+
 	// PR-W2: AUDIT_CHAIN_SECRET — keyed HMAC для tamper-evident audit chain.
 	// Enterprise prod требует secret для chain writes. Без него chain fields
 	// остаются NULL (chain disabled), что допустимо в dev/shadow-mode, но

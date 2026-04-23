@@ -43,6 +43,7 @@ import (
 func main() {
 	tableFlag := flag.String("table", "all", "Table to verify: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
 	verbose := flag.Bool("verbose", false, "Print detailed gap/break info")
+	includeAnchors := flag.Bool("include-anchors", false, "Also verify Merkle anchors (W3 tier: no chain_secret required)")
 	flag.Parse()
 
 	// Config errors exit with code 2 (not 1 which is chain failure).
@@ -128,6 +129,35 @@ func main() {
 			for _, b := range res.Breaks {
 				fmt.Printf("  CHAIN_BREAK seq_no=%d row_id=%s (row modified after insert)\n",
 					b.SeqNo, b.RowID)
+			}
+		}
+	}
+
+	// PR-W3: anchor verification (no chain_secret required).
+	if *includeAnchors {
+		anchorTables := tables
+		for _, table := range anchorTables {
+			ar, err := chain.VerifyAnchors(ctx, db, table)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR anchors %s: %v\n", table, err)
+				anyFail = true
+				continue
+			}
+			astatus := "OK"
+			if !ar.OK {
+				astatus = "FAIL"
+				anyFail = true
+			}
+			fmt.Printf("  anchors %-20s %-6s count=%d seq_gaps=%d mismatches=%d\n",
+				ar.Table, astatus, ar.AnchorCount, len(ar.SeqGaps), len(ar.Mismatches))
+			if *verbose {
+				for _, m := range ar.Mismatches {
+					fmt.Printf("    ANCHOR_MISMATCH anchor_id=%s range=[%d,%d] (rows deleted/modified)\n",
+						m.AnchorID, m.SeqLo, m.SeqHi)
+				}
+				for _, g := range ar.SeqGaps {
+					fmt.Printf("    ANCHOR_GAP seq_no=%d (rows not covered by any anchor)\n", g)
+				}
 			}
 		}
 	}

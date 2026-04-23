@@ -337,6 +337,90 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 	return res, nil
 }
 
+// AnchorVerifyResult — итог проверки anchor'ов для одной таблицы.
+type AnchorVerifyResult struct {
+	Table         string
+	AnchorCount   int
+	Mismatches    []AnchorMismatch
+	SeqGaps       []int64  // gaps between anchor ranges (missing rows not covered by any anchor)
+	OK            bool
+}
+
+// AnchorMismatch — anchor, у которого recomputed Merkle root не совпадает
+// с stored root (rows modified or deleted within that range).
+type AnchorMismatch struct {
+	AnchorID   string
+	SeqLo      int64
+	SeqHi      int64
+	Stored     []byte
+	Recomputed []byte
+}
+
+// VerifyAnchors recomputes Merkle roots from stored row_hashes and
+// compares to audit_chain_anchors records for the given table.
+//
+// W3 tier: does NOT require chain_secret. Only needs access to the DB
+// to read row_hash values. Detects row deletion/modification within
+// anchored ranges (mismatch) and gaps in anchor coverage.
+func VerifyAnchors(ctx context.Context, db *sql.DB, tableName string) (AnchorVerifyResult, error) {
+	res := AnchorVerifyResult{Table: tableName}
+	repo := NewAnchorRepository(db)
+
+	anchors, err := repo.ListAnchors(ctx, tableName)
+	if err != nil {
+		return res, fmt.Errorf("verify anchors %s: list: %w", tableName, err)
+	}
+	if len(anchors) == 0 {
+		res.OK = true
+		return res, nil
+	}
+	res.AnchorCount = len(anchors)
+
+	// Check anchor coverage continuity: each anchor's SeqLo should = prev SeqHi + 1.
+	for i := 1; i < len(anchors); i++ {
+		prev, curr := anchors[i-1], anchors[i]
+		if curr.SeqLo != prev.SeqHi+1 {
+			for gap := prev.SeqHi + 1; gap < curr.SeqLo; gap++ {
+				res.SeqGaps = append(res.SeqGaps, gap)
+			}
+		}
+	}
+
+	// Recompute Merkle root for each anchor and compare.
+	for _, a := range anchors {
+		hashes, err := repo.FetchRowHashes(ctx, tableName, a.SeqLo-1, a.SeqHi)
+		if err != nil {
+			return res, fmt.Errorf("verify anchors %s: fetch hashes [%d,%d]: %w",
+				tableName, a.SeqLo, a.SeqHi, err)
+		}
+		recomputed := ComputeMerkleRoot(hashes)
+		if !merkleEqual(recomputed, a.MerkleRoot) {
+			res.Mismatches = append(res.Mismatches, AnchorMismatch{
+				AnchorID:   a.ID,
+				SeqLo:      a.SeqLo,
+				SeqHi:      a.SeqHi,
+				Stored:     a.MerkleRoot,
+				Recomputed: recomputed,
+			})
+		}
+	}
+
+	res.OK = len(res.Mismatches) == 0 && len(res.SeqGaps) == 0
+	return res, nil
+}
+
+func merkleEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // pqArrayScan — helper для сканирования pq.StringArray в []string.
 // Упрощённый вариант без pq dependency в chain package.
 func pqArrayScan(dest *[]string) interface{} {

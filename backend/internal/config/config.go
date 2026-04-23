@@ -124,6 +124,24 @@ type Config struct {
 	FirewallEmbeddingDimension int
 	FirewallEmbeddingTimeout   time.Duration
 
+	// PR-W3: periodic Merkle anchor config (RFC §7.3 Layer 2).
+	//
+	// AuditAnchorInterval — период между anchor runs. Default 1h.
+	// Enterprise prod: ValidateStartupConfig отвергает > 24h.
+	// Anchor пишется только если есть новые chained rows.
+	// 0 = anchor scheduler disabled.
+	AuditAnchorInterval time.Duration
+
+	// AuditAnchorSink — тип sink'а для публикации Merkle root.
+	// W3: только "file://" поддержан.
+	// Пустая строка = sink disabled (anchor только в PG, без external witness).
+	AuditAnchorSink string
+
+	// AuditAnchorSinkPath — путь к файлу для file:// sink.
+	// Append-only NDJSON. Создаётся если не существует.
+	// Обязателен если AuditAnchorSink = "file://".
+	AuditAnchorSinkPath string
+
 	// PR-W2: tamper-evident audit chain secret (RFC §7.2).
 	// AUDIT_CHAIN_SECRET: ключ для HMAC-SHA256 chain (HMAC(prev_hash||canonical, secret)).
 	// Не хранится в DB — только env var / secrets manager.
@@ -219,6 +237,11 @@ func Load() *Config {
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
 		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
+
+		// PR-W3: Merkle anchor scheduler.
+		AuditAnchorInterval: getDuration("AUDIT_ANCHOR_INTERVAL", time.Hour),
+		AuditAnchorSink:     getEnv("AUDIT_ANCHOR_SINK", ""),
+		AuditAnchorSinkPath: getEnv("AUDIT_ANCHOR_SINK_PATH", ""),
 
 		// PR-A: audit privacy. Secure-by-default: redacted.
 		AuditPayloadMode:            getEnv("AUDIT_PAYLOAD_MODE", "redacted"),

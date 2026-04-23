@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/shadowai/backend/internal/audit"
+	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/budget"
 	"github.com/shadowai/backend/internal/config"
@@ -330,6 +331,20 @@ func main() {
 	// Полная реализация в enterprise_wire.go (-tags enterprise).
 	// Core-build получает no-op функцию из enterprise_stubs.go.
 	entBundle.StartSchedulers(connectivityCtx, cfg)
+
+	// PR-W3: Merkle anchor scheduler для audit_logs (core table).
+	// Enterprise tables (admin_event_logs, legal_hold_events, audit_purge_runs)
+	// якорятся через enterprise_wire.go StartSchedulers.
+	if cfg.AuditAnchorInterval > 0 {
+		anchorRepo := chain.NewAnchorRepository(db)
+		var anchorSink chain.AnchorSink = chain.NoOpSink{}
+		if cfg.AuditAnchorSink == "file://" && cfg.AuditAnchorSinkPath != "" {
+			anchorSink = chain.NewFileSink(cfg.AuditAnchorSinkPath)
+		}
+		anchorSched := chain.NewAnchorScheduler(anchorRepo, anchorSink, cfg.AuditAnchorInterval,
+			[]string{"audit_logs", "audit_purge_runs"})
+		go anchorSched.Run(connectivityCtx)
+	}
 
 	r := mux.NewRouter()
 
