@@ -240,9 +240,17 @@ func main() {
 				continue
 			}
 			var sinkFails, sinkOK int
+			var sigWarned bool
 			for _, a := range anchors {
 				if a.SinkName != "immudb://" {
 					continue
+				}
+				// Warn if signed anchor verified without pubkey (signature not checked).
+				if a.PubKeyID != "" && len(sinkPubKey) == 0 && !sigWarned {
+					fmt.Printf("  WARNING: signed anchor(s) for %s found (pubkey_id=%q) "+
+						"but no --pubkey provided — field parity only, signature NOT verified.\n",
+						table, a.PubKeyID)
+					sigWarned = true
 				}
 				aCopy := a
 				ok, err := chain.VerifyImmuDBSinkRecord(ctx, sink, &aCopy, sinkPubKey)
