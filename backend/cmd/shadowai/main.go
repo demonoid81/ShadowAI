@@ -53,7 +53,7 @@ func main() {
 
 	// Repositories
 	authRepo := auth.NewRepository(db)
-	auditRepo := audit.NewRepository(db)
+	auditRepo := audit.NewRepository(db).WithChainSecret(cfg.AuditChainSecret)
 	policyRepo := policy.NewRepository(db)
 	budgetRepo := budget.NewRepository(db)
 	internalDBRepo := internaldb.NewRepository(db)

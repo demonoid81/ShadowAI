@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/domain"
 )
 
@@ -60,15 +61,23 @@ func (r *Repository) PurgeOlderThan(ctx context.Context, cutoff time.Time, chunk
 }
 
 type Repository struct {
-	db *sql.DB
+	db          *sql.DB
+	chainSecret []byte
 }
 
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func (r *Repository) WithChainSecret(secret string) *Repository {
+	c := *r
+	c.chainSecret = []byte(secret)
+	return &c
+}
+
 // Insert сохраняет admin-event. Sync — admin actions редкие, lat.
 // оправдана простотой (без async-worker'а и drop-counter'ов).
+// PR-W2: при chainSecret != "" пишет seq_no + row_hash.
 func (r *Repository) Insert(ctx context.Context, e *domain.AdminEvent) error {
 	var actor any
 	if e.ActorUserID != nil && *e.ActorUserID != "" {
@@ -82,6 +91,11 @@ func (r *Repository) Insert(ctx context.Context, e *domain.AdminEvent) error {
 	if e.TargetID != "" {
 		target = e.TargetID
 	}
+
+	if len(r.chainSecret) > 0 {
+		return r.insertWithChain(ctx, e, actor, target, meta)
+	}
+
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO admin_event_logs
 		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json)
@@ -91,6 +105,47 @@ func (r *Repository) Insert(ctx context.Context, e *domain.AdminEvent) error {
 		return fmt.Errorf("adminaudit insert: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, actor, target, meta any) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("adminaudit chain: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	actorStr := ""
+	if e.ActorUserID != nil {
+		actorStr = *e.ActorUserID
+	}
+	canonical := chain.CanonicalAdminEventLog(
+		e.ID, actorStr, e.Action, e.Resource, e.TargetID,
+		e.Path, e.Method, e.StatusCode, e.Success,
+		e.CreatedAt.UTC().Unix(),
+	)
+	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
+		chain.TableAdminEventLogs, "admin_event_logs", chain.SeqAdminEventLogs,
+		canonical, r.chainSecret)
+	if err != nil {
+		return fmt.Errorf("adminaudit chain: acquire slot: %w", err)
+	}
+
+	var seqArg any
+	var hashArg any
+	if seqNo > 0 {
+		seqArg = seqNo
+		hashArg = rowHash
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO admin_event_logs
+		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		actor, e.Action, e.Resource, target, e.Path, e.Method, e.StatusCode, e.Success, meta,
+		seqArg, hashArg); err != nil {
+		return fmt.Errorf("adminaudit chain: insert: %w", err)
+	}
+	return tx.Commit()
 }
 
 // List возвращает страницу admin-event'ов с фильтрами. actorID/resource/

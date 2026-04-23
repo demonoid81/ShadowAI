@@ -28,7 +28,7 @@ import (
 // admin-only enterprise routes и retention-schedulers.
 func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	// Admin audit (PR-D).
-	adminAuditRepo := adminaudit.NewRepository(deps.DB)
+	adminAuditRepo := adminaudit.NewRepository(deps.DB).WithChainSecret(deps.Cfg.AuditChainSecret)
 	adminAuditSvc := adminaudit.NewService(adminAuditRepo)
 	adminAuditHandler := adminaudit.NewHandler(adminAuditRepo)
 
@@ -52,7 +52,7 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 
 	// PR-L1: Legal hold (migration 013). Wired до erasureSvc чтобы
 	// сразу передать HoldChecker.
-	legalHoldRepo := legalhold.NewPGRepository(deps.DB)
+	legalHoldRepo := legalhold.NewPGRepository(deps.DB).WithChainSecret(deps.Cfg.AuditChainSecret)
 	legalHoldSvc := legalhold.NewService(legalHoldRepo)
 	// PR-L1.2: keyed HMAC tokenizer для case_ref. Prod startup-guard
 	// (ValidateStartupConfig) уже гарантирует, что LegalHoldTokenSecret

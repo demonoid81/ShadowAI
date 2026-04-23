@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/legalholdcoord"
 )
 
@@ -47,11 +49,47 @@ var ErrNotPending = errors.New("legalhold: hold is not pending")
 var ErrSelfApproval = errors.New("legalhold: approver must differ from creator")
 
 type PGRepository struct {
-	db *sql.DB
+	db          *sql.DB
+	chainSecret []byte
 }
 
 func NewPGRepository(db *sql.DB) *PGRepository {
 	return &PGRepository{db: db}
+}
+
+func (r *PGRepository) WithChainSecret(secret string) *PGRepository {
+	c := *r
+	c.chainSecret = []byte(secret)
+	return &c
+}
+
+// insertHoldEvent writes a legal_hold_events row inside an existing tx (W2).
+// Если chainSecret пустой — chain fields остаются NULL (chain disabled).
+func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, action, newStatus, actorID string) error {
+	eventID := uuid.New().String()
+	var actorArg any
+	if actorID != "" {
+		actorArg = actorID
+	}
+	// Chain fields.
+	canonical := chain.CanonicalLegalHoldEvent(eventID, holdID, action, newStatus, actorID, time.Now().UTC().Unix())
+	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
+		chain.TableLegalHoldEvents, "legal_hold_events", chain.SeqLegalHoldEvents,
+		canonical, r.chainSecret)
+	if err != nil {
+		return fmt.Errorf("legalhold chain: acquire slot: %w", err)
+	}
+	var seqArg any
+	var hashArg any
+	if seqNo > 0 {
+		seqArg = seqNo
+		hashArg = rowHash
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO legal_hold_events (id, hold_id, action, new_status, actor_id, seq_no, row_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		eventID, holdID, action, newStatus, actorArg, seqArg, hashArg)
+	return err
 }
 
 // Create вставляет новую pending запись (L2.3: 4-eyes).
@@ -99,6 +137,14 @@ func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
 			return nil, ErrAlreadyActive
 		}
 		return nil, fmt.Errorf("legalhold: insert: %w", err)
+	}
+	// PR-W2: write legal_hold_events chain entry before commit.
+	creatorID := ""
+	if h.CreatedBy != nil {
+		creatorID = *h.CreatedBy
+	}
+	if err := r.insertHoldEvent(ctx, tx, id, "create", "pending", creatorID); err != nil {
+		return nil, fmt.Errorf("legalhold: hold event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("legalhold: commit: %w", err)
@@ -184,6 +230,9 @@ func (r *PGRepository) Approve(ctx context.Context, id, approverID string) (*Hol
 		&releasedBy, &h.Status, &h.IsActive,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: approve update: %w", err)
+	}
+	if err := r.insertHoldEvent(ctx, tx, id, "approve", "active", approverID); err != nil {
+		return nil, fmt.Errorf("legalhold: approve hold event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("legalhold: approve commit: %w", err)
@@ -275,6 +324,9 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: reject update: %w", err)
 	}
+	if err := r.insertHoldEvent(ctx, tx, id, "reject", "released", rejectorID); err != nil {
+		return nil, fmt.Errorf("legalhold: reject hold event: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("legalhold: reject commit: %w", err)
 	}
@@ -305,12 +357,17 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 // Release — переводит hold в inactive. Идемпотентно выбирается на
 // handler-level: если is_active=false, repo вернёт ErrNotActive,
 // handler превращает в "already_released" response.
+// PR-W2: выполняется в tx чтобы insertHoldEvent был атомарным.
 func (r *PGRepository) Release(ctx context.Context, id, releasedBy string) (*Hold, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("legalhold: repo not configured")
 	}
-	// L2.3: Release работает только на active hold (не на pending).
-	// Pending cancel идёт через Reject.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: release begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	const q = `UPDATE legal_holds
 	    SET status = 'released', is_active = false,
 	        released_at = now(), released_by = $2
@@ -329,17 +386,23 @@ func (r *PGRepository) Release(ctx context.Context, id, releasedBy string) (*Hol
 	if releasedBy != "" {
 		actor = releasedBy
 	}
-	err := r.db.QueryRowContext(ctx, q, id, actor).Scan(
+	err = tx.QueryRowContext(ctx, q, id, actor).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
 		&h.CreatedAt, &approvedAt, &approvedBy,
 		&releasedAt, &releasedOp, &h.Status, &h.IsActive,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// либо id не существует, либо hold не active.
 			return r.checkExistsInactive(ctx, id)
 		}
-		return nil, fmt.Errorf("legalhold: update: %w", err)
+		return nil, fmt.Errorf("legalhold: release update: %w", err)
+	}
+	// PR-W2: chain entry for 'release' transition.
+	if err := r.insertHoldEvent(ctx, tx, id, "release", "released", releasedBy); err != nil {
+		return nil, fmt.Errorf("legalhold: release hold event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("legalhold: release commit: %w", err)
 	}
 	h.ID = id
 	if createdBy.Valid {

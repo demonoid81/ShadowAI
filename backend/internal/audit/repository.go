@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
+	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/domain"
 )
 
@@ -40,25 +42,33 @@ func (r *Repository) ScrubUserDataTx(ctx context.Context, tx *sql.Tx, userID str
 }
 
 type Repository struct {
-	db *sql.DB
+	db          *sql.DB
+	chainSecret []byte // nil/empty = chain disabled
 }
 
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// WithChainSecret returns a Repository copy configured with the chain secret.
+// When non-empty, Insert will write seq_no + row_hash atomically.
+func (r *Repository) WithChainSecret(secret string) *Repository {
+	c := *r
+	c.chainSecret = []byte(secret)
+	return &c
+}
+
 func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
-	// shadow_decisions_json — JSONB NULL: пустую строку передаём как NULL,
-	// иначе Postgres отбросит INSERT c error "invalid input syntax for type json".
 	var shadowJSON any
 	if log.ShadowDecisionsJSON != "" {
 		shadowJSON = log.ShadowDecisionsJSON
 	}
 
-	// PR-F7.3: outcome/fallback_reason/usage_source добавляются к
-	// существующим 17 полям. Миграция 009 ставит их NOT NULL DEFAULT
-	// '' — empty string = "not applicable / non-streaming", что
-	// корректно для legacy non-streaming rows.
+	// PR-W2: chain write path. When chainSecret is set, we open a tx,
+	// acquire advisory lock, compute seq_no + row_hash, then insert.
+	if len(r.chainSecret) > 0 {
+		return r.insertWithChain(ctx, log, shadowJSON)
+	}
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
@@ -67,6 +77,63 @@ func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
 		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
 		log.Outcome, log.FallbackReason, log.UsageSource)
 	return err
+}
+
+func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, shadowJSON any) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("audit chain: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	canonical := chain.CanonicalAuditLog(
+		log.ID, log.UserID, log.Model, log.Provider, log.Endpoint,
+		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens,
+		chain.CostMicrocents(log.CostUSD),
+		log.PIIDetected, log.PIITypes,
+		log.PolicyAction, log.Outcome, log.FallbackReason, log.UsageSource,
+		log.CreatedAt.UTC().Unix(),
+	)
+
+	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
+		chain.TableAuditLogs, "audit_logs", chain.SeqAuditLogs,
+		canonical, r.chainSecret)
+	if err != nil {
+		return fmt.Errorf("audit chain: acquire slot: %w", err)
+	}
+
+	var seqArg any
+	var hashArg any
+	if seqNo > 0 {
+		seqArg = seqNo
+		hashArg = rowHash
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, seq_no, row_hash)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
+		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
+		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
+		log.Outcome, log.FallbackReason, log.UsageSource,
+		seqArg, hashArg); err != nil {
+		return fmt.Errorf("audit chain: insert: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// insertPurgeRunChainEntry пишет chain entry для audit_purge_runs ДО
+// purge операции. Используется PurgeOlderThan* методами.
+// Пока не реализован полностью (W2 roadmap item); заглушка не
+// препятствует purge при пустом chainSecret.
+func (r *Repository) insertPurgeRunChainEntry(ctx context.Context, tx *sql.Tx, cutoff time.Time, target string) error {
+	// W2: chain entry для purge_runs (аналогично AuditLog chain write).
+	// Фиксируем факт того, что purge начался: canonical(purge_id, cutoff, target).
+	// В W3 это войдёт в Merkle anchor. Пока — placeholder.
+	_ = cutoff
+	_ = target
+	return nil
 }
 
 func (r *Repository) List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
