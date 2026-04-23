@@ -28,6 +28,61 @@ import (
 // admin_event_logs. Используется CLI и scheduler'ом.
 const PurgeTarget = "admin_event_logs"
 
+// PurgeAndRecord — W2.3: atomic combination of admin_event_logs chunked
+// delete + evidence record in audit_purge_runs. Pattern mirrors
+// audit.Repository.PurgeAndRecord; cross-repo atomicity via shared tx in
+// final phase.
+//
+// recordFn is called inside the final tx: caller provides
+// auditRepo.RecordPurgeRunTx(ctx, tx, cutoff, total, target).
+// recordFn receives ctx, tx, AND the actual final total so it can write the
+// correct rows_deleted into audit_purge_runs.
+func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, recordFn func(context.Context, *sql.Tx, int) error) (int, error) {
+	if chunkSize <= 0 {
+		return 0, fmt.Errorf("admin purge: chunkSize must be > 0, got %d", chunkSize)
+	}
+	const q = `DELETE FROM admin_event_logs WHERE id IN (
+		SELECT id FROM admin_event_logs WHERE created_at < $1 LIMIT $2
+	)`
+	total := 0
+	// Phase 1: bulk deletes.
+	for {
+		res, err := r.db.ExecContext(ctx, q, cutoff, chunkSize)
+		if err != nil {
+			return total, fmt.Errorf("admin purge exec: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("admin purge RowsAffected: %w", err)
+		}
+		total += int(n)
+		if n < int64(chunkSize) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		default:
+		}
+	}
+	// Phase 2: atomic final tx.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return total, fmt.Errorf("admin purge final tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if res, err := tx.ExecContext(ctx, q, cutoff, chunkSize); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			total += int(n)
+		}
+	}
+	if err := recordFn(ctx, tx, total); err != nil {
+		return total, fmt.Errorf("admin purge record: %w", err)
+	}
+	return total, tx.Commit()
+}
+
 // PurgeOlderThan удаляет admin_event_logs-rows с created_at < cutoff
 // в чанках (защита от lock'ов). Аналогично audit.Repository.PurgeOlderThan,
 // но для admin-events-таблицы.

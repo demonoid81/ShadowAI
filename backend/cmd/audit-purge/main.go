@@ -120,20 +120,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
+	// W2.3: use atomic PurgeAndRecord so evidence row is in the same tx
+	// as the final DELETE chunk. Eliminates the evidence gap where delete
+	// succeeds but RecordPurgeRun fails in a separate transaction.
 	var deleted int
 	var purgeErr error
 	if *target == adminaudit.PurgeTarget {
-		deleted, purgeErr = adminaudit.NewRepository(db).PurgeOlderThan(ctx, cutoff, *chunkSize)
+		// adminRepo for DELETE; auditRepo.RecordPurgeRunTx for chained
+		// evidence record — both in same final tx.
+		adminRepo := adminaudit.NewRepository(db)
+		deleted, purgeErr = adminRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, func(c context.Context, tx *sql.Tx, total int) error {
+			return auditRepo.RecordPurgeRunTx(c, tx, cutoff, total, *target)
+		})
 	} else {
-		deleted, purgeErr = auditRepo.PurgeOlderThan(ctx, cutoff, *chunkSize)
+		deleted, purgeErr = auditRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, *target)
 	}
 	if purgeErr != nil {
 		fmt.Fprintf(stderr, "error: purge: %v\n", purgeErr)
 		recordPurgeAdminEvent(ctx, db, cutoff, 0, "cli", *target, purgeErr.Error())
 		return exitRuntime
-	}
-	if err := auditRepo.RecordPurgeRun(ctx, cutoff, deleted, *target); err != nil {
-		fmt.Fprintf(stderr, "warning: purge succeeded (%d rows deleted) but failed to record run: %v\n", deleted, err)
 	}
 	recordPurgeAdminEvent(ctx, db, cutoff, deleted, "cli", *target, "")
 	fmt.Fprintf(stdout, "deleted %d rows\n", deleted)

@@ -118,6 +118,81 @@ func uuidArrayLiteral(ids []string) string {
 	return string(b)
 }
 
+// PurgeAndRecord — W2.3: atomic combination of chunked delete +
+// chained evidence record. Replaces separate PurgeOlderThan + RecordPurgeRun
+// calls to eliminate the evidence gap.
+//
+// Pattern:
+//   Phase 1: chunked DELETEs outside tx (same as PurgeOlderThan, avoids long-held locks).
+//   Phase 2: short atomic tx — one final DELETE chunk (catches any rows added during phase 1)
+//            + recordPurgeRunChained (chain write). Either both commit or both rollback.
+//
+// Result: if the final tx commit fails, at most one chunk worth of rows is
+// re-purgeable on the next run. No evidence record appears without deletes,
+// no deletes appear without an evidence record in phase 2.
+func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, target string) (int, error) {
+	if chunkSize <= 0 {
+		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)
+	}
+	if target == "" {
+		target = PurgeTargetAuditLogs
+	}
+	total := 0
+	const q = `DELETE FROM audit_logs WHERE id IN (
+		SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2
+	)`
+
+	// Phase 1: bulk chunked deletes, no tx.
+	for {
+		res, err := r.db.ExecContext(ctx, q, cutoff, chunkSize)
+		if err != nil {
+			return total, fmt.Errorf("purge exec: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("purge RowsAffected: %w", err)
+		}
+		total += int(n)
+		if n < int64(chunkSize) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		default:
+		}
+	}
+
+	// Phase 2: atomic final tx — last possible rows + chained evidence record.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return total, fmt.Errorf("purge final tx begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Final optional chunk (usually 0 rows, handles race with concurrent inserts).
+	if res, err := tx.ExecContext(ctx, q, cutoff, chunkSize); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			total += int(n)
+		}
+	}
+	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, target); err != nil {
+		return total, fmt.Errorf("purge record run: %w", err)
+	}
+	return total, tx.Commit()
+}
+
+// RecordPurgeRunTx — W2.3: записывает chained audit_purge_runs row
+// внутри уже открытой транзакции. Используется cross-repo atomic purge
+// (например, adminaudit DELETE + audit.RecordPurgeRunTx в shared tx).
+// Caller открывает tx и отвечает за Commit/Rollback.
+func (r *Repository) RecordPurgeRunTx(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target string) error {
+	if target == "" {
+		target = PurgeTargetAuditLogs
+	}
+	return r.recordPurgeRunChained(ctx, tx, cutoff, rowsDeleted, target)
+}
+
 // RecordPurgeRun сохраняет запись о завершённом purge-run для указанной
 // target-таблицы ("audit_logs" | "admin_event_logs"). Вызывающий может
 // передать "" — интерпретируется как audit_logs (backward compat для

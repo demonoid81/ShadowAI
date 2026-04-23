@@ -14,6 +14,8 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/shadowai/backend/internal/adminaudit"
+	"database/sql"
+
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/config"
@@ -236,7 +238,22 @@ func runAdminEventsPurgeScheduler(ctx context.Context, cfg *config.Config, audit
 		cutoff := time.Now().UTC().Add(-time.Duration(cfg.AdminAuditRetentionDays) * 24 * time.Hour)
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
-		deleted, err := adminAuditRepo.PurgeOlderThan(rctx, cutoff, cfg.AuditPurgeChunkSize)
+		// W2.3: atomic PurgeAndRecord so admin_event_logs DELETE
+		// and audit_purge_runs evidence INSERT share the same final tx.
+		var deleted int
+		var err error
+		auditConcreteRepo, ok := auditRepoHandle.(*audit.Repository)
+		if !ok {
+			log.Printf("admin-events purge scheduler: audit repo type assertion failed — falling back to non-atomic path")
+			deleted, err = adminAuditRepo.PurgeOlderThan(rctx, cutoff, cfg.AuditPurgeChunkSize)
+			if err == nil {
+				_ = auditRepoHandle.RecordPurgeRun(rctx, cutoff, deleted, adminaudit.PurgeTarget)
+			}
+		} else {
+			deleted, err = adminAuditRepo.PurgeAndRecord(rctx, cutoff, cfg.AuditPurgeChunkSize, func(c context.Context, tx *sql.Tx, total int) error {
+				return auditConcreteRepo.RecordPurgeRunTx(c, tx, cutoff, total, adminaudit.PurgeTarget)
+			})
+		}
 		if err != nil {
 			log.Printf("admin-events purge scheduler: err: %v", err)
 			adminAuditSvc.Record(rctx, adminaudit.Event{
@@ -248,9 +265,6 @@ func runAdminEventsPurgeScheduler(ctx context.Context, cfg *config.Config, audit
 				},
 			})
 			return
-		}
-		if err := auditRepoHandle.RecordPurgeRun(rctx, cutoff, deleted, adminaudit.PurgeTarget); err != nil {
-			log.Printf("admin-events purge scheduler: record run failed: %v", err)
 		}
 		log.Printf("admin-events purge scheduler: deleted %d rows (cutoff=%s)", deleted, cutoff.Format(time.RFC3339))
 		adminAuditSvc.Record(rctx, adminaudit.Event{
