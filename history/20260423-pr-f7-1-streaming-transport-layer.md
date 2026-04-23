@@ -264,6 +264,25 @@ caller его `_ = transportErr` игнорировал. Audit писал
 - §13.2 Stage 1: зафиксирован prod opt-in gate как условие
   включения incremental в prod.
 
+## Follow-up PR-F7.1.2 — metric classification
+
+Review finding #4 (Low): `streaming_emit_fail_total` double-counted
+при transport error (инкремент внутри callback + снова на caller)
+и смешивал emit-phase с decoder-phase errors.
+
+Fix:
+- Новая метрика `shadowai_streaming_decoder_fatal_total{provider}`
+  для upstream read failure / parser fatal.
+- Sentinel `errTransportEmit` wrap внутри `runIncrementalStreamTransport`
+  callback → при non-cancel decErr отличает emit-phase (уже
+  учтён) от decoder-phase (инкрементит decoder_fatal).
+- Убран caller-side `metrics.RecordStreamingEmitFail` из обоих
+  ProxyChat и UnifiedChat incremental branches.
+- 2 новых теста (`TestIncrementalTransport_MetricClassification`):
+  emit_phase_fail → emit metric +1, decoder metric +0; decoder_phase_fail
+  → наоборот. Используют helper `counterValue` для точных
+  numeric assertions.
+
 ## Следующий PR
 
 **PR-F7.2** — incremental response inspection engine + inspector

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	promdto "github.com/prometheus/client_model/go"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/shadowai/backend/internal/audit"
@@ -19,7 +22,9 @@ import (
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/firewall"
+	"github.com/shadowai/backend/internal/metrics"
 	"github.com/shadowai/backend/internal/policy"
+	"github.com/shadowai/backend/internal/proxy/streaming"
 )
 
 // canonicalOpenAIStream — bytes, которые upstream вернёт тестовому
@@ -475,6 +480,112 @@ func (p *costlyOpenAIProvider) ParseStreamUsage(_ []byte, _ string) (StreamUsage
 		CostUSD:          p.cost,
 		Found:            true,
 	}, nil
+}
+
+// TestIncrementalTransport_MetricClassification — PR-F7.1.1 review
+// fix (#2): streaming_emit_fail_total должен считать ТОЛЬКО
+// emit-phase failures (без double-count); streaming_decoder_fatal_total
+// — только decoder-phase failures (upstream read / parser fatal).
+//
+// Тестируем runIncrementalStreamTransport напрямую (без полного
+// proxy flow), чтобы получить precise контроль над reader/writer.
+func TestIncrementalTransport_MetricClassification(t *testing.T) {
+	// Shared fixture-stream, адекватный для OpenAI-compat decoder'а.
+	normal := []byte(canonicalOpenAIStream)
+
+	t.Run("emit_phase_fail_records_emit_fail_only", func(t *testing.T) {
+		emitBefore := counterValue(t, metrics.StreamingEmitFailTotal, "openai")
+		decoderBefore := counterValue(t, metrics.StreamingDecoderFatalTotal, "openai")
+
+		h := &Handler{}
+		ctx := context.Background()
+		w := &failingResponseWriter{
+			header: make(http.Header),
+			failAt: 1, // первый Write ок (headers/first frame), второй fail
+		}
+		adapter, _ := streaming.AdapterForProvider("openai")
+		_, err := h.runIncrementalStreamTransport(
+			ctx, w, http.Header{}, bytes.NewReader(normal),
+			http.StatusOK, "openai", adapter,
+		)
+		if err == nil {
+			t.Fatal("expected transport err, got nil")
+		}
+
+		emitAfter := counterValue(t, metrics.StreamingEmitFailTotal, "openai")
+		decoderAfter := counterValue(t, metrics.StreamingDecoderFatalTotal, "openai")
+		if emitAfter-emitBefore != 1 {
+			t.Errorf("streaming_emit_fail_total delta = %v, want 1", emitAfter-emitBefore)
+		}
+		if decoderAfter-decoderBefore != 0 {
+			t.Errorf("decoder_fatal delta = %v, want 0 (emit-phase should not touch decoder metric)", decoderAfter-decoderBefore)
+		}
+	})
+
+	t.Run("decoder_phase_fail_records_decoder_fatal_only", func(t *testing.T) {
+		emitBefore := counterValue(t, metrics.StreamingEmitFailTotal, "openai")
+		decoderBefore := counterValue(t, metrics.StreamingDecoderFatalTotal, "openai")
+
+		h := &Handler{}
+		ctx := context.Background()
+		// Reader, который fails с non-EOF error сразу после первого
+		// read'а — симулирует upstream connection reset.
+		reader := &failingReader{
+			data:    normal[:60], // partial stream
+			failErr: errors.New("upstream connection reset"),
+		}
+		w := httptest.NewRecorder()
+		adapter, _ := streaming.AdapterForProvider("openai")
+		_, err := h.runIncrementalStreamTransport(
+			ctx, w, http.Header{}, reader,
+			http.StatusOK, "openai", adapter,
+		)
+		if err == nil {
+			t.Fatal("expected decoder err, got nil")
+		}
+
+		emitAfter := counterValue(t, metrics.StreamingEmitFailTotal, "openai")
+		decoderAfter := counterValue(t, metrics.StreamingDecoderFatalTotal, "openai")
+		if decoderAfter-decoderBefore != 1 {
+			t.Errorf("streaming_decoder_fatal_total delta = %v, want 1", decoderAfter-decoderBefore)
+		}
+		if emitAfter-emitBefore != 0 {
+			t.Errorf("emit_fail delta = %v, want 0 (decoder-phase should not touch emit metric)", emitAfter-emitBefore)
+		}
+	})
+}
+
+// failingReader — io.Reader, который отдаёт data целиком и затем
+// возвращает failErr вместо io.EOF. Симулирует upstream connection
+// reset mid-stream.
+type failingReader struct {
+	data    []byte
+	pos     int
+	failErr error
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, r.failErr
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+// counterValue извлекает numeric value для (metric, labels). Для
+// Counter.WithLabelValues вызывает внутренний Write в DTO.
+func counterValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	m := vec.WithLabelValues(labels...)
+	var dto promdto.Metric
+	if err := m.Write(&dto); err != nil {
+		t.Fatalf("metric write: %v", err)
+	}
+	if dto.Counter == nil {
+		return 0
+	}
+	return dto.Counter.GetValue()
 }
 
 // unsupportedNameProvider — Provider с именем, для которого нет

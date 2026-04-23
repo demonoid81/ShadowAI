@@ -477,7 +477,10 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			auditStatus := resp.StatusCode
 			auditAction := policyAction
 			if transportErr != nil {
-				metrics.RecordStreamingEmitFail(providerName)
+				// Metric уже инкрементирован внутри
+				// runIncrementalStreamTransport (либо emit-fail в
+				// callback, либо decoder-fatal после Decode). Здесь
+				// только audit-side классификация.
 				auditStatus = http.StatusBadGateway
 				auditAction = PolicyActionStreamingTransportError
 			} else {
@@ -1566,7 +1569,9 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				auditStatus := resp.StatusCode
 				auditAction := policyAction
 				if transportErr != nil {
-					metrics.RecordStreamingEmitFail(candidate.Name)
+					// Metric уже инкрементирован внутри
+					// runIncrementalStreamTransport — см. ProxyChat
+					// аналог.
 					auditStatus = http.StatusBadGateway
 					auditAction = PolicyActionStreamingTransportError
 				} else {

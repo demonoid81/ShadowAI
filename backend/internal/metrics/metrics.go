@@ -97,9 +97,24 @@ var (
 	// StreamingEmitFailTotal — emit error при записи в downstream
 	// writer. Обычно означает client disconnect, но может быть
 	// upstream http.Flusher contract violation.
+	//
+	// Invariant: инкрементится ТОЛЬКО в emit-phase; decoder-fatal
+	// errors идут в StreamingDecoderFatalTotal. Caller не должен
+	// повторно инкрементить этот счётчик при transport error
+	// (иначе double-count + смешение с decode failures).
 	StreamingEmitFailTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadowai_streaming_emit_fail_total",
-		Help: "Streaming downstream emit failures (client disconnect, writer errors).",
+		Help: "Streaming downstream emit failures (client disconnect, writer errors). Emit-phase only; decoder-fatal tracked separately.",
+	}, []string{"provider"})
+
+	// StreamingDecoderFatalTotal — decoder вернул non-cancel error.
+	// Это upstream read failure (connection reset, unexpected EOF с
+	// real data loss) или parser fatal. Отдельный счётчик от
+	// StreamingEmitFailTotal, чтобы alerting мог различать "client
+	// disconnect / writer broken" от "upstream / parser broken".
+	StreamingDecoderFatalTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_decoder_fatal_total",
+		Help: "Streaming decoder returned non-cancel fatal error (upstream read failure, parser fatal). Separate from emit failures.",
 	}, []string{"provider"})
 
 	// StreamingFallbackTotal — transition из incremental в buffered
@@ -251,9 +266,15 @@ func RecordStreamingMalformedChunk(provider string) {
 }
 
 // RecordStreamingEmitFail — emit в downstream writer не удался
-// (client disconnect / writer error).
+// (client disconnect / writer error). Только emit-phase.
 func RecordStreamingEmitFail(provider string) {
 	StreamingEmitFailTotal.WithLabelValues(provider).Inc()
+}
+
+// RecordStreamingDecoderFatal — decoder вернул non-cancel error
+// (upstream read failure / parser fatal). Отдельно от emit fails.
+func RecordStreamingDecoderFatal(provider string) {
+	StreamingDecoderFatalTotal.WithLabelValues(provider).Inc()
 }
 
 // RecordStreamingFallback — incremental path downgraded в buffered.

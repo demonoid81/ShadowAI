@@ -3,12 +3,26 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/shadowai/backend/internal/metrics"
 	"github.com/shadowai/backend/internal/proxy/streaming"
 )
+
+// errTransportEmit — sentinel, которым wrapping'ом помечаются emit
+// errors изнутри decoder callback'а. Позволяет отличить emit-phase
+// error (writer broken / client disconnect) от decoder-phase error
+// (upstream read fail / parser fatal) на стороне
+// runIncrementalStreamTransport caller'а.
+//
+// Classification используется ТОЛЬКО для precise metrics (чтобы
+// streaming_emit_fail_total не сливался с streaming_decoder_fatal_total).
+// Сам сигнал "transport failed" одинаковый: audit пишется с
+// streaming_transport_error маркером независимо от фазы.
+var errTransportEmit = errors.New("streaming: downstream emit failed")
 
 // PR-F7.1 audit markers для incremental mode. Явные строки, чтобы
 // ops-дашборды могли queriify "какие стримы ушли через incremental
@@ -98,7 +112,9 @@ func (h *Handler) runIncrementalStreamTransport(
 		}
 		if emitErr := adapter.Emitter.Emit(ctx, w, ev); emitErr != nil {
 			metrics.RecordStreamingEmitFail(providerName)
-			return emitErr
+			// Wrap sentinel'ом, чтобы caller мог отличить emit-phase
+			// error от decoder-phase при классификации.
+			return fmt.Errorf("%w: %w", errTransportEmit, emitErr)
 		}
 		return nil
 	})
@@ -108,6 +124,14 @@ func (h *Handler) runIncrementalStreamTransport(
 		// возвращаем — audit напишет partial data.
 		if ctx.Err() != nil {
 			return buf.Bytes(), nil
+		}
+		// Decoder-phase vs emit-phase classification для metrics:
+		//   - если error обёрнут errTransportEmit → emit уже учтён
+		//     в callback'е (не double-count'им);
+		//   - иначе это decoder-fatal (upstream read failure /
+		//     parser fatal) → отдельный счётчик.
+		if !errors.Is(decErr, errTransportEmit) {
+			metrics.RecordStreamingDecoderFatal(providerName)
 		}
 		return buf.Bytes(), decErr
 	}
