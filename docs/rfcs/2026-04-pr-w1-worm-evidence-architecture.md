@@ -447,25 +447,68 @@ audit-verify --include-anchors --anchor-sink file:///var/audit-anchors.log
 Existing legal hold (PR-L2.3) уже обеспечивает retention-protection:
 rows под active hold не purge'аются.
 
-**Решение (review fix)**: `legal_holds` table включается в W2 chain
-scope (не откладывается на W3+). Обоснование:
+**Решение (review fix §7.4, W1.2)**: `legal_holds` включается в W2 chain
+scope через **отдельную append-only `legal_hold_events` таблицу**, а не
+через прямой chain'инг UPDATE'ов на `legal_holds`. Обоснование выбора:
 
-- `legal_holds` — enterprise-only table (PR-L2.3), W2 уже enterprise-only.
-- Hold state machine (pending → active → released) с 4-eyes approval
-  (PR-L2.3) IS compliance evidence — его mutable state в W2 без
-  chain'а означает, что история одобрений/отзывов остаётся изменяемой
-  именно в том периоде, когда chain уже работает для audit_logs.
-- Low additional implementation cost: same seq_no + row_hash pattern,
-  одна дополнительная таблица.
+Три альтернативы рассмотрены:
 
-Chain / anchor для legal_holds добавляет:
-- Hold state (`status`, `approved_by`, `approved_at`) включается в
-  `row_hash` для каждой `legal_holds` mutation (create, approve, reject,
-  release).
-- Anchor log содержит count of active holds per epoch — auditor
-  видит что hold существовал в момент anchor'а.
-- Purge scheduler обязан писать в `audit_purge_runs` с chain entry
-  ДО удаления. Purge без chain entry = compliance violation.
+- **(A) Append-only `legal_hold_events` table (CHOSEN)**: каждый state
+  transition (create/approve/reject/release) пишет одну новую строку
+  в `legal_hold_events` с action, new_status, actor_id, seq_no, row_hash.
+  Chain работает на INSERT — consistent с W2 "chain write on INSERT"
+  design. `legal_holds` остаётся current-state мутируемой таблицей;
+  `legal_hold_events` — tamper-evident history. Аналогия: ledger +
+  state cache pattern.
+
+- **(B) Chain UPDATE mutations на `legal_holds`**: потребует нового
+  per-row_id event sequence (не монотонный per-table), отдельной
+  семантики для chain хэша при UPDATE, и разрыва с W2 "INSERT-only
+  chain" invariant. Значительно сложнее и более error-prone. ❌
+
+- **(C) Перенести в W3**: legal hold compliance story ослабевает
+  именно в тот период, когда chain уже работает для audit_logs/
+  admin_event_logs. Нецелесообразно. ❌
+
+**`legal_hold_events` schema (W2 migration, enterprise-only):**
+
+```sql
+CREATE TABLE legal_hold_events (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    hold_id     UUID NOT NULL REFERENCES legal_holds(id) ON DELETE RESTRICT,
+    action      VARCHAR(32) NOT NULL,  -- 'create'|'approve'|'reject'|'release'
+    new_status  VARCHAR(16) NOT NULL,  -- 'pending'|'active'|'released'
+    actor_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+    metadata_json JSONB,               -- inspector_name, reason, etc.
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- W2 chain fields:
+    seq_no      BIGINT NOT NULL,
+    row_hash    BYTEA NOT NULL
+);
+CREATE INDEX ON legal_hold_events(hold_id, seq_no);
+```
+
+Каждый action в `legalhold/repository.go` (Create, Approve, Reject,
+Release) добавляет row в `legal_hold_events` в рамках той же транзакции.
+Chain write через `pg_advisory_xact_lock(chain_ns, legal_hold_events_table_id)`
+— аналогично audit_logs.
+
+**Что обеспечивает:**
+- Hold state transitions tamper-evident с W2.
+- Auditor видит полную историю изменений hold'а в правильном порядке.
+- `ON DELETE RESTRICT` на hold_id — невозможно удалить hold из
+  `legal_holds` пока есть events (referential integrity).
+- Anchor log (W3) включает count of legal_hold_events per epoch.
+
+**Что НЕ обеспечивает в W2:**
+- Мутации в самой `legal_holds` таблице (current state) не chained.
+  DBA может модифицировать `approved_by`, `released_at` напрямую.
+  Mitigation: events в `legal_hold_events` являются authoritative history
+  — state в `legal_holds` можно верифицировать против events.
+  Full protection → W3 Merkle anchor + W4 WORM.
+
+Purge scheduler обязан писать в `audit_purge_runs` с chain entry ДО
+удаления. Purge без chain entry = compliance violation.
 
 ### 7.5 Backup/restore behavior
 
@@ -595,12 +638,15 @@ decision, зафиксированный RFC (review fix: устраняет inc
 ### W2 — Minimal chain + verifier
 
 Scope:
-- `seq_no` и `row_hash` columns в следующих таблицах (migration):
-  - `audit_logs` (core)
-  - `admin_event_logs` (enterprise)
-  - `legal_holds` (enterprise) — включено по review fix §7.4
-- Chain write на INSERT — Go application layer + `pg_advisory_xact_lock`
-  per-table (§7.2). Chain_secret в env var, never in DB.
+- `seq_no` и `row_hash` columns (migration) в:
+  - `audit_logs` (core) — chain on INSERT.
+  - `admin_event_logs` (enterprise) — chain on INSERT.
+  - **`legal_hold_events`** (enterprise, new table) — chain on INSERT,
+    каждый state transition (create/approve/reject/release) пишет row.
+    См. §7.4 для schema и rationale.
+- Chain write на INSERT только — Go application layer +
+  `pg_advisory_xact_lock` per-table (§7.2). Нет UPDATE chaining.
+  Chain_secret в env var, never in DB.
 - `audit_purge_runs` включает chain entry ДО purge.
 - `cmd/audit-verify` CLI: seq_no gap detection + chain continuity.
   W2 verifier требует chain_secret (internal compliance только — §8.4).
@@ -678,10 +724,11 @@ Scope:
   привилегированный инструмент, доступ должен быть ограничен compliance/
   security team и auditеd через `admin_event_logs`. True third-party
   verification (без secret) — W4+ с Ed25519.
-- **Legal hold rows в chain (W2 scope)**: `legal_holds` включена
-  в W2 chain scope (см. §7.4). hold mutation (create/approve/reject/
-  release) порождает chain entry — hold state history tamper-evident
-  с той же гарантией, что audit_logs и admin_event_logs, с W2.
+- **Legal hold events в chain (W2 scope)**: новая `legal_hold_events`
+  таблица chained on INSERT (см. §7.4 для schema). Каждый state
+  transition hold'а (create/approve/reject/release) порождает INSERT
+  → tamper-evident history с W2. Сама `legal_holds` таблица
+  (current state) не chained в W2 — full state protection в W3/W4.
 
 ---
 
