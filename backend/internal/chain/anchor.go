@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -115,6 +116,49 @@ func (r *AnchorRepository) WriteAnchor(ctx context.Context, a *AnchorRecord) err
 		return fmt.Errorf("anchor: write for %s: %w", a.TableName, err)
 	}
 	return nil
+}
+
+// ChainInventoryRow — hash digest row for W5 evidence bundle chain_inventory.jsonl.
+// Contains seq_no + row_hash only; no canonical row payload.
+// See evidencebundle.ChainInventoryLine for the serialization format.
+type ChainInventoryRow struct {
+	SeqNo      int64
+	RowIDHash  string // hex(SHA256(row_id)) — stable identifier, no PII
+	RowHashHex string // hex of stored HMAC chain hash
+}
+
+// FetchChainInventory returns ChainInventoryRow entries for all chained rows
+// in tableName, ordered by seq_no. Supports audit_logs, admin_event_logs,
+// legal_hold_events, audit_purge_runs — any table with (id, seq_no, row_hash).
+//
+// This is a digest-only export: it does NOT include canonical row content or
+// AUDIT_CHAIN_SECRET and therefore cannot prove HMAC chain correctness offline.
+// It enables gap analysis and anchor Merkle cross-referencing only.
+func (r *AnchorRepository) FetchChainInventory(ctx context.Context, tableName string) ([]ChainInventoryRow, error) {
+	rows, err := r.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id::text, seq_no, row_hash FROM %s
+		             WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
+		             ORDER BY seq_no`, tableName))
+	if err != nil {
+		return nil, fmt.Errorf("chain inventory %s: query: %w", tableName, err)
+	}
+	defer rows.Close()
+	var result []ChainInventoryRow
+	for rows.Next() {
+		var rowID string
+		var seqNo int64
+		var rowHash []byte
+		if err := rows.Scan(&rowID, &seqNo, &rowHash); err != nil {
+			return nil, fmt.Errorf("chain inventory %s: scan: %w", tableName, err)
+		}
+		h := sha256.Sum256([]byte(rowID))
+		result = append(result, ChainInventoryRow{
+			SeqNo:      seqNo,
+			RowIDHash:  hex.EncodeToString(h[:]),
+			RowHashHex: hex.EncodeToString(rowHash),
+		})
+	}
+	return result, rows.Err()
 }
 
 // ListAnchors возвращает anchor записи для таблицы в порядке seq_lo ASC.

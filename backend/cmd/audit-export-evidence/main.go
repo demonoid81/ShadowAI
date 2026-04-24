@@ -1,0 +1,340 @@
+// cmd/audit-export-evidence — W5.1: exports a portable evidence bundle
+// for auditors containing anchor records, chain inventory, verification
+// reports, and optional Ed25519 public key.
+//
+// The bundle is a directory (optionally zipped) that auditors can inspect
+// without access to the live database or AUDIT_CHAIN_SECRET.
+//
+// What auditors can verify offline from the bundle:
+//   - Ed25519 anchor signatures (if --pubkey-file provided)
+//   - File integrity via SHA256 hashes in bundle_manifest.json
+//   - Anchor seq_lo/seq_hi continuity (no coverage gaps)
+//   - chain_inventory.jsonl seq_no continuity (gap detection)
+//
+// What requires live infrastructure (documented in bundle README.txt):
+//   - W2 HMAC chain verification (requires AUDIT_CHAIN_SECRET + row content)
+//   - W4 immudb sink re-fetch (requires immudb connection)
+//
+// Usage:
+//
+//	audit-export-evidence \
+//	  --output <dir>              # required: output directory path
+//	  [--table <table|all>]       # default: all
+//	  [--pubkey-file <path>]      # optional: Ed25519 public key for sig reports
+//	  [--zip]                     # create <output>.zip after writing directory
+//
+// Environment:
+//
+//	DATABASE_URL  — required Postgres connection string
+//
+// Exit codes:
+//
+//	0 — export complete (reports may contain verification failures)
+//	1 — export failed (DB error, I/O error)
+//	2 — configuration error (missing flags, bad flag values)
+package main
+
+import (
+	"archive/zip"
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	_ "github.com/lib/pq"
+	"github.com/shadowai/backend/internal/chain"
+	"github.com/shadowai/backend/internal/evidencebundle"
+)
+
+// exporterCommit is injected at build time via -ldflags "-X main.exporterCommit=<git-sha>".
+var exporterCommit string
+
+func main() {
+	outputFlag  := flag.String("output", "", "Output directory path (required)")
+	tableFlag   := flag.String("table", "all", "Table: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
+	pubKeyFile  := flag.String("pubkey-file", "", "Path to base64 Ed25519 public key for signature verification reports")
+	doZip       := flag.Bool("zip", false, "Create <output>.zip after writing directory")
+	flag.Parse()
+
+	exitCfg := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "config error: "+format+"\n", args...)
+		os.Exit(2)
+	}
+	exitErr := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+		os.Exit(1)
+	}
+
+	if strings.TrimSpace(*outputFlag) == "" {
+		exitCfg("--output is required")
+	}
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		exitCfg("DATABASE_URL is required")
+	}
+
+	tables := []string{*tableFlag}
+	if *tableFlag == "all" {
+		tables = []string{"audit_logs", "admin_event_logs", "legal_hold_events", "audit_purge_runs"}
+	} else {
+		switch *tableFlag {
+		case "audit_logs", "admin_event_logs", "legal_hold_events", "audit_purge_runs":
+		default:
+			exitCfg("unknown table %q: must be audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all", *tableFlag)
+		}
+	}
+
+	// Load optional public key for signature verification reports.
+	var pubKeyB64 string
+	if *pubKeyFile != "" {
+		data, err := os.ReadFile(*pubKeyFile)
+		if err != nil {
+			exitCfg("pubkey-file: %v", err)
+		}
+		pubKeyB64 = strings.TrimSpace(string(data))
+		if _, err := chain.ParsePublicKey(pubKeyB64); err != nil {
+			exitCfg("pubkey-file: invalid Ed25519 public key: %v", err)
+		}
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		exitErr("db open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.PingContext(ctx); err != nil {
+		exitErr("db ping: %v", err)
+	}
+
+	outDir := *outputFlag
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		exitErr("create output dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(outDir, "reports"), 0o755); err != nil {
+		exitErr("create reports dir: %v", err)
+	}
+
+	repo := chain.NewAnchorRepository(db)
+	dbFingerprint := dbFingerprint(dsn)
+
+	fmt.Printf("Exporting evidence bundle → %s\n", outDir)
+	fmt.Printf("Tables: %v\n", tables)
+
+	// Collect all anchors and chain inventory across tables.
+	var allAnchors []evidencebundle.AnchorLine
+	var allInventory []evidencebundle.ChainInventoryLine
+
+	for _, table := range tables {
+		anchors, err := repo.ListAnchors(ctx, table)
+		if err != nil {
+			exitErr("list anchors %s: %v", table, err)
+		}
+		for _, a := range anchors {
+			line := evidencebundle.AnchorLine{
+				ID:            a.ID,
+				Table:         a.TableName,
+				SeqLo:         a.SeqLo,
+				SeqHi:         a.SeqHi,
+				RowCount:      a.RowCount,
+				MerkleRootHex: a.MerkleRootHex(),
+				SinkName:      a.SinkName,
+				SinkRef:       a.SinkRef,
+				SinkOK:        a.SinkOK,
+				PubKeyID:      a.PubKeyID,
+				CreatedAt:     a.CreatedAt,
+			}
+			if len(a.Signature) > 0 {
+				line.SignatureHex = hex.EncodeToString(a.Signature)
+			}
+			allAnchors = append(allAnchors, line)
+		}
+
+		inv, err := repo.FetchChainInventory(ctx, table)
+		if err != nil {
+			exitErr("chain inventory %s: %v", table, err)
+		}
+		for _, row := range inv {
+			allInventory = append(allInventory, evidencebundle.ChainInventoryLine{
+				Table:      table,
+				SeqNo:      row.SeqNo,
+				RowIDHash:  row.RowIDHash,
+				RowHashHex: row.RowHashHex,
+			})
+		}
+
+		fmt.Printf("  %s: %d anchors, %d chained rows\n", table, len(anchors), len(inv))
+	}
+
+	// Write anchors.jsonl.
+	if err := writeNDJSON(filepath.Join(outDir, "anchors.jsonl"), allAnchors); err != nil {
+		exitErr("write anchors.jsonl: %v", err)
+	}
+
+	// Write chain_inventory.jsonl.
+	if err := writeNDJSON(filepath.Join(outDir, "chain_inventory.jsonl"), allInventory); err != nil {
+		exitErr("write chain_inventory.jsonl: %v", err)
+	}
+
+	// Write public key if provided.
+	hasPubKey := pubKeyB64 != ""
+	if hasPubKey {
+		if err := os.WriteFile(filepath.Join(outDir, "public_key.b64"), []byte(pubKeyB64+"\n"), 0o644); err != nil {
+			exitErr("write public_key.b64: %v", err)
+		}
+	}
+
+	// Run anchor verification reports (W3 + W4.1).
+	for _, table := range tables {
+		// W3: anchor verify.
+		anchorResult, err := chain.VerifyAnchors(ctx, db, table, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: anchor verify %s failed: %v\n", table, err)
+		} else {
+			if err := writeJSON(filepath.Join(outDir, "reports", fmt.Sprintf("anchor_verify_%s.json", table)), anchorResult); err != nil {
+				exitErr("write anchor report %s: %v", table, err)
+			}
+		}
+
+		// W4.1: signature verify (only if pubkey provided).
+		if hasPubKey {
+			pubKey, _ := chain.ParsePublicKey(pubKeyB64)
+			sigResult, err := chain.VerifyAnchorSignatures(ctx, db, table, pubKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: signature verify %s failed: %v\n", table, err)
+			} else {
+				if err := writeJSON(filepath.Join(outDir, "reports", fmt.Sprintf("signature_verify_%s.json", table)), sigResult); err != nil {
+					exitErr("write sig report %s: %v", table, err)
+				}
+			}
+		}
+	}
+
+	// Write README.txt.
+	if err := evidencebundle.WriteReadme(outDir, tables, hasPubKey); err != nil {
+		exitErr("write README: %v", err)
+	}
+
+	// Compute file hashes and write bundle_manifest.json.
+	hashes, err := evidencebundle.ComputeBundleHashes(outDir)
+	if err != nil {
+		exitErr("compute bundle hashes: %v", err)
+	}
+	manifest := &evidencebundle.BundleManifest{
+		Version:        evidencebundle.BundleVersion,
+		ExportTime:     time.Now().UTC(),
+		Tables:         tables,
+		ExporterCommit: exporterCommit,
+		DBFingerprint:  dbFingerprint,
+		FileSHA256:     hashes,
+	}
+	if err := evidencebundle.WriteManifest(outDir, manifest); err != nil {
+		exitErr("write manifest: %v", err)
+	}
+
+	fmt.Printf("Bundle written: %s\n", outDir)
+	fmt.Printf("  anchors: %d  inventory rows: %d\n", len(allAnchors), len(allInventory))
+
+	if *doZip {
+		zipPath := outDir + ".zip"
+		if err := zipDir(outDir, zipPath); err != nil {
+			exitErr("zip: %v", err)
+		}
+		fmt.Printf("Zip written: %s\n", zipPath)
+	}
+}
+
+// dbFingerprint returns SHA256(host+"/"+dbname) from the DSN.
+// Falls back to hash of raw DSN if URL parse fails (no credentials exposed).
+func dbFingerprint(dsn string) string {
+	if u, err := url.Parse(dsn); err == nil && u.Host != "" {
+		dbname := strings.TrimPrefix(u.Path, "/")
+		return evidencebundle.DBFingerprint(u.Host, dbname)
+	}
+	// DSN key=value format: extract host and dbname best-effort.
+	host, dbname := parseDSNFields(dsn)
+	return evidencebundle.DBFingerprint(host, dbname)
+}
+
+func parseDSNFields(dsn string) (host, dbname string) {
+	for _, field := range strings.Fields(dsn) {
+		kv := strings.SplitN(field, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "host":
+			host = kv[1]
+		case "dbname":
+			dbname = kv[1]
+		}
+	}
+	return host, dbname
+}
+
+func writeNDJSON[T any](path string, records []T) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return evidencebundle.WriteNDJSON(f, records)
+}
+
+func writeJSON(path string, v any) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// zipDir creates a zip archive of dir at zipPath.
+func zipDir(dir, zipPath string) error {
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zf.Close()
+	zw := zip.NewWriter(zf)
+	defer zw.Close()
+
+	base := filepath.Base(dir)
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		w, err := zw.Create(filepath.Join(base, rel))
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(w, f)
+		return err
+	})
+}
+
