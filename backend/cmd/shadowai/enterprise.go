@@ -56,6 +56,11 @@ type enterpriseBundle struct {
 	// добавляются к anchor scheduler'у (main.go включает core tables
 	// audit_logs + audit_purge_runs; enterprise добавляет свои).
 	AnchorExtraTables []string
+
+	// RegisterPublicRoutes добавляет enterprise-only public routes
+	// (без AuthMiddleware), например OIDC login/callback.
+	// В Core-билде — no-op.
+	RegisterPublicRoutes func(publicAuth *mux.Router)
 }
 
 // enterpriseDeps — входные данные, которые wire получает от main,
@@ -68,4 +73,7 @@ type enterpriseDeps struct {
 	AuditRepo  *audit.Repository
 	BudgetRepo *budget.Repository
 	AuditSvc   *audit.Service
+	// PR-E1: OIDC user sync needs the auth repository and service.
+	AuthRepo   *auth.Repository
+	AuthSvc    *auth.Service
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -21,6 +22,7 @@ import (
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/legalhold"
+	"github.com/shadowai/backend/internal/oidcauth"
 	"github.com/shadowai/backend/internal/siem"
 )
 
@@ -91,10 +93,42 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	governanceSvc := governance.NewService(governanceRepo)
 	governanceHandler := governance.NewHandler(governanceSvc, adminAuditRecorder)
 
+	// PR-E1: OIDC enterprise auth.
+	// Handler is created at wire time; actual HTTP server context not yet available,
+	// so provider discovery is deferred to RegisterPublicRoutes (called after server start).
+	oidcCfg, oidcCfgErr := oidcauth.FromAppConfig(deps.Cfg)
+	if oidcCfgErr != nil {
+		log.Fatalf("oidc: config error: %v", oidcCfgErr)
+	}
+
 	return &enterpriseBundle{
 		AdminAudit: adminAuditRecorder,
 		Governance: governanceSvc,
 		Eraser:     erasureSvc,
+
+		// PR-E1: register OIDC public routes.
+		RegisterPublicRoutes: func(publicAuth *mux.Router) {
+			if oidcCfg == nil {
+				return // OIDC_ENABLED=false
+			}
+			syncer := oidcauth.NewUserSyncer(deps.AuthRepo, oidcCfg, deps.AuthSvc)
+			secure := !strings.HasPrefix(deps.Cfg.OIDCRedirectURL, "http://localhost")
+			oidcHandler, err := oidcauth.NewHandler(
+				context.Background(),
+				oidcCfg,
+				syncer,
+				deps.AuthSvc,
+				adminAuditRecorder,
+				secure,
+			)
+			if err != nil {
+				log.Fatalf("oidc: provider init: %v", err)
+			}
+			publicAuth.HandleFunc("/oidc/login", oidcHandler.Login).Methods("GET")
+			publicAuth.HandleFunc("/oidc/callback", oidcHandler.Callback).Methods("GET")
+			log.Printf("oidc: routes registered (issuer=%s auto_provision=%v link_by_email=%v)",
+				oidcCfg.IssuerURL, oidcCfg.AutoProvision, oidcCfg.LinkByEmail)
+		},
 
 		RegisterRoutes: func(admin *mux.Router, authHandler *auth.Handler) {
 			// PR-B: DSAR erasure. Admin-only, идемпотентный.

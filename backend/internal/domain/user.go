@@ -15,4 +15,8 @@ type User struct {
 	TokenVersion int       `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// PR-E1: OIDC identity. Set after first OIDC login or admin linking.
+	OIDCIssuer      *string   `json:"oidc_issuer,omitempty"`
+	OIDCSubject     *string   `json:"oidc_subject,omitempty"`
+	LastOIDCLoginAt *time.Time `json:"last_oidc_login_at,omitempty"`
 }

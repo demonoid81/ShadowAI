@@ -211,6 +211,79 @@ func TestValidateStartupConfig_SAV2_Disabled_NoValidation(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// PR-E1: OIDC prod validation tests
+// ---------------------------------------------------------------------------
+
+// TestValidateStartupConfig_OIDC_MissingIssuer — OIDC_ENABLED without issuer.
+func TestValidateStartupConfig_OIDC_MissingIssuer(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = true
+	cfg.OIDCClientID = "client"
+	cfg.OIDCClientSecret = "secret"
+	cfg.OIDCRedirectURL = "https://example.com/callback"
+	// IssuerURL missing
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "OIDC_ISSUER_URL") {
+		t.Fatalf("expected OIDC_ISSUER_URL error, got: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_OIDC_HttpIssuer_Rejected — http:// issuer must be rejected.
+func TestValidateStartupConfig_OIDC_HttpIssuer_Rejected(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = true
+	cfg.OIDCIssuerURL = "http://idp.example.com" // not HTTPS
+	cfg.OIDCClientID = "client"
+	cfg.OIDCClientSecret = "secret"
+	cfg.OIDCRedirectURL = "https://example.com/callback"
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("expected https requirement error for issuer, got: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_OIDC_HttpRedirect_Rejected — http:// redirect must be rejected.
+func TestValidateStartupConfig_OIDC_HttpRedirect_Rejected(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = true
+	cfg.OIDCIssuerURL = "https://idp.example.com"
+	cfg.OIDCClientID = "client"
+	cfg.OIDCClientSecret = "secret"
+	cfg.OIDCRedirectURL = "http://example.com/callback" // not HTTPS
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("expected https requirement error for redirect, got: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_OIDC_Disabled_NoValidation — disabled OIDC passes.
+func TestValidateStartupConfig_OIDC_Disabled_NoValidation(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = false
+	// All fields empty — should NOT trigger validation.
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "OIDC") {
+			t.Errorf("disabled OIDC: unexpected OIDC validation error: %v", err)
+		}
+	}
+}
+
+// TestValidateStartupConfig_OIDC_ValidConfig_Passes — full valid config.
+func TestValidateStartupConfig_OIDC_ValidConfig_Passes(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = true
+	cfg.OIDCIssuerURL = "https://idp.example.com"
+	cfg.OIDCClientID = "client-id"
+	cfg.OIDCClientSecret = "client-secret"
+	cfg.OIDCRedirectURL = "https://app.example.com/api/auth/oidc/callback"
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "OIDC") {
+			t.Errorf("valid OIDC config: unexpected error: %v", err)
+		}
+	}
+}
+
 // TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected — PR-W4.3.1:
 // immudb_v2 + AUDIT_IMMUDB_API_PREFIX вместе — это конфликт (v2 игнорирует APIPrefix).
 func TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected(t *testing.T) {

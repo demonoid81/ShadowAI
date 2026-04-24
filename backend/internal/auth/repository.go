@@ -106,3 +106,51 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count)
 	return count, err
 }
+
+// ---------------------------------------------------------------------------
+// PR-E1: OIDC identity repository methods.
+// ---------------------------------------------------------------------------
+
+// GetByOIDCSubject looks up a user by (oidc_issuer, oidc_subject).
+// Returns (nil, sql.ErrNoRows) if not found.
+func (r *Repository) GetByOIDCSubject(ctx context.Context, issuer, subject string) (*domain.User, error) {
+	u := &domain.User{}
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		        oidc_issuer, oidc_subject, last_oidc_login_at, created_at, updated_at
+		 FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2`,
+		issuer, subject).Scan(
+		&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+		&u.OIDCIssuer, &u.OIDCSubject, &u.LastOIDCLoginAt, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// CreateUserOIDC inserts a new user created via OIDC auto-provision.
+// Password is intentionally empty (OIDC users authenticate via IdP only).
+func (r *Repository) CreateUserOIDC(ctx context.Context, u *domain.User) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO users (id, email, password, role, department, api_key, is_active, token_version,
+		                   oidc_issuer, oidc_subject, last_oidc_login_at)
+		 VALUES ($1, $2, '', $3, $4, '', true, 0, $5, $6, $7)`,
+		u.ID, u.Email, u.Role, u.Department, u.OIDCIssuer, u.OIDCSubject, u.LastOIDCLoginAt)
+	return err
+}
+
+// UpdateUserOIDC updates OIDC identity fields + synced profile fields.
+// Increments token_version if role or email changed (forces re-login via existing sessions).
+func (r *Repository) UpdateUserOIDC(ctx context.Context, u *domain.User) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users
+		 SET email=$1, role=$2, department=$3,
+		     oidc_issuer=$4, oidc_subject=$5, last_oidc_login_at=$6,
+		     updated_at=now()
+		 WHERE id=$7`,
+		u.Email, u.Role, u.Department,
+		u.OIDCIssuer, u.OIDCSubject, u.LastOIDCLoginAt,
+		u.ID)
+	return err
+}

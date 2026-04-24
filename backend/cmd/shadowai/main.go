@@ -284,6 +284,7 @@ func main() {
 	// wiring в enterprise_wire.go.
 	entBundle := buildEnterpriseBundle(enterpriseDeps{
 		DB: db, Cfg: cfg, AuditRepo: auditRepo, BudgetRepo: budgetRepo, AuditSvc: auditSvc,
+		AuthRepo: authRepo, AuthSvc: authSvc,
 	})
 
 	// Handlers. Все принимают enterprise-интерфейсы опционально (nil-
@@ -416,6 +417,8 @@ func main() {
 	publicAuth := r.PathPrefix("/api/auth").Subrouter()
 	publicAuth.HandleFunc("/login", authHandler.Login).Methods("POST")
 	publicAuth.HandleFunc("/register", authHandler.Register).Methods("POST")
+	// PR-E1: OIDC routes (enterprise build only; no-op in core).
+	entBundle.RegisterPublicRoutes(publicAuth)
 	publicAuth.Use(mw.RateLimitPublic(redisClient, 20, time.Minute))
 
 	// Health check

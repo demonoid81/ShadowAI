@@ -124,6 +124,26 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-E1: OIDC в prod требует HTTPS issuer/redirect и все обязательные поля.
+	if c.OIDCEnabled {
+		if strings.TrimSpace(c.OIDCIssuerURL) == "" {
+			errs = append(errs, "OIDC_ISSUER_URL required when OIDC_ENABLED=true")
+		} else if !strings.HasPrefix(strings.ToLower(c.OIDCIssuerURL), "https://") {
+			errs = append(errs, "OIDC_ISSUER_URL must use https:// in prod (IdP discovery must be over TLS)")
+		}
+		if strings.TrimSpace(c.OIDCClientID) == "" {
+			errs = append(errs, "OIDC_CLIENT_ID required when OIDC_ENABLED=true")
+		}
+		if strings.TrimSpace(c.OIDCClientSecret) == "" {
+			errs = append(errs, "OIDC_CLIENT_SECRET required when OIDC_ENABLED=true")
+		}
+		if strings.TrimSpace(c.OIDCRedirectURL) == "" {
+			errs = append(errs, "OIDC_REDIRECT_URL required when OIDC_ENABLED=true")
+		} else if !strings.HasPrefix(strings.ToLower(c.OIDCRedirectURL), "https://") {
+			errs = append(errs, "OIDC_REDIRECT_URL must use https:// in prod (callback must be over TLS)")
+		}
+	}
+
 	// PR-F8: semantic_v2 в prod требует явно настроенный embedding stack.
 	// Validation не ограничивается non-empty check'ом: FIREWALL_EMBEDDING_ENDPOINT
 	// имеет дефолт http://localhost:11434, который проходит non-empty, но является
