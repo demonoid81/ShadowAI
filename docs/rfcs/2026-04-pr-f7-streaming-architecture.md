@@ -489,7 +489,7 @@ response-side inspector'ов + streaming-compatibility:
 | PII / DLP             | `firewall/pii_inspector.go`, `firewall/dlp_inspector.go` | fail-closed | incremental (pattern-based) |
 | ContentModeration (heuristic-only) | `firewall/content_moderation.go` | fail-closed | incremental |
 | ContentModeration + judge (enabled) | `firewall/content_moderation.go` + `firewall/judge.go` | fail-closed | **buffered_fallback** (см. §12.6) |
-| Semantic / SemanticV2 | `firewall/semantic.go`, `firewall/semantic_v2.go` | fail-open (latency-sensitive) | buffered_fallback |
+| Semantic / SemanticV2 | `firewall/semantic.go`, `firewall/semantic_v2.go` | fail-open (latency-sensitive) | **request-only** (InspectResponse is no-op; no buffered_fallback) |
 | PolicyInspector       | `firewall/policy_inspector.go`    | fail-closed      | incremental      |
 | Judge (direct)        | `firewall/judge.go`               | fail-open (latency-sensitive) | NOT activated mid-stream (см. §12.6) |
 

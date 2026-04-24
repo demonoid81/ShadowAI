@@ -120,10 +120,11 @@ func (s *SemanticV2Inspector) InspectRequest(ctx context.Context, p *Payload) (*
 
 	if sim >= s.config.BlockThreshold {
 		if s.config.ShadowOnly {
-			// Shadow rollout: downgrade block → flag. Оператор видит
-			// потенциальные блокировки через метрику result=flag без
-			// реального влияния на трафик.
-			metrics.RecordSemanticV2Inspect("flag")
+			// Shadow rollout: downgrade block → flag. Use result="would_block"
+			// to distinguish from natural threshold flags in metrics.
+			// Operators track would_block rate to decide when SA_v2 is safe to
+			// enforce (remove shadow_only=true).
+			metrics.RecordSemanticV2Inspect("would_block")
 			return &Decision{
 				Action:   ActionFlag,
 				Reason:   fmt.Sprintf("semantic_v2: high similarity to known threat (%s) [shadow_only: would block]", match.Category),

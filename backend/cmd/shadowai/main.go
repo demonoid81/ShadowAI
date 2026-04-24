@@ -162,6 +162,16 @@ func main() {
 		// сервер — V2 inspector просто не регистрируется, pipeline работает
 		// без него.
 		if cfg.FirewallSAV2Enabled {
+			// In prod, any SA_v2 init failure is fatal: an enabled inspector that
+			// silently falls back to fail-open gives false security confidence.
+			// In dev, failures are logged and the inspector is skipped (allow rapid
+			// iteration without a working embedding service).
+			siemInitFail := func(format string, args ...any) {
+				if cfg.IsProduction() {
+					log.Fatalf("semantic_v2: "+format+" (FATAL in prod: SA_v2 enabled but not running; disable FIREWALL_SA_V2_ENABLED or fix configuration)", args...)
+				}
+				log.Printf("semantic_v2: "+format+" (skipping inspector in dev)", args...)
+			}
 			embClient, err := embedding.NewClient(embedding.Config{
 				Provider:  cfg.FirewallEmbeddingProvider,
 				Endpoint:  cfg.FirewallEmbeddingEndpoint,
@@ -171,11 +181,11 @@ func main() {
 				Timeout:   cfg.FirewallEmbeddingTimeout,
 			})
 			if err != nil {
-				log.Printf("semantic_v2: embedding client init failed (skipping inspector): %v", err)
+				siemInitFail("embedding client init failed: %v", err)
 			} else {
 				corpus, err := embedding.LoadCorpus(cfg.FirewallSAV2CorpusPath)
 				if err != nil {
-					log.Printf("semantic_v2: corpus load failed (skipping inspector): %v", err)
+					siemInitFail("corpus load failed: %v", err)
 				} else {
 					sv2, err := firewall.NewSemanticV2Inspector(firewall.SemanticV2Config{
 						Enabled:        true,
@@ -184,7 +194,7 @@ func main() {
 						ShadowOnly:     cfg.FirewallSAV2ShadowOnly,
 					}, embClient, corpus)
 					if err != nil {
-						log.Printf("semantic_v2: init failed (skipping inspector): %v", err)
+						siemInitFail("inspector init failed: %v", err)
 					} else {
 						firewallPipeline.Register(sv2)
 						log.Printf("semantic_v2: registered (provider=%s model=%s dim=%d corpus_items=%d shadow_only=%v)",

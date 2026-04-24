@@ -228,12 +228,18 @@ func TestSemanticV2_ShadowOnly_BlockDowngradesToFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InspectRequest: %v", err)
 	}
+	// Action is downgraded to Flag, but the metric result is "would_block"
+	// (verified separately). The Action itself must be Flag so traffic passes.
 	if d.Action != ActionFlag {
 		t.Errorf("shadow_only: got Action=%q, want ActionFlag (block downgraded)", d.Action)
 	}
-	// Reason should mention shadow_only to distinguish from real flag.
+	// Reason must mention shadow_only to distinguish from natural Flag decisions.
 	if !containsStr(d.Reason, "shadow_only") {
 		t.Errorf("shadow_only reason should mention shadow_only: %q", d.Reason)
+	}
+	// Reason must mention "would block" so operators see this in audit logs.
+	if !containsStr(d.Reason, "would block") {
+		t.Errorf("shadow_only reason should mention 'would block': %q", d.Reason)
 	}
 }
 

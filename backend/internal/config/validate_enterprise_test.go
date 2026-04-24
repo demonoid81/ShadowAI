@@ -179,6 +179,25 @@ func TestValidateStartupConfig_SAV2_MissingCorpusPath(t *testing.T) {
 	}
 }
 
+// TestValidateStartupConfig_SAV2_LocalhostEndpoint_Rejected — default
+// http://localhost:11434 endpoint passes non-empty check but must be rejected
+// because it cannot work in a production container.
+func TestValidateStartupConfig_SAV2_LocalhostEndpoint_Rejected(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.FirewallSAV2Enabled = true
+	cfg.FirewallSAV2CorpusPath = "corpus.json"
+	cfg.FirewallEmbeddingProvider = "ollama"
+	// Default from Load() — non-empty but localhost.
+	cfg.FirewallEmbeddingEndpoint = "http://localhost:11434"
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for SA_v2 with localhost embedding endpoint, got nil")
+	}
+	if !strings.Contains(err.Error(), "localhost") && !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("error should mention localhost/loopback: %v", err)
+	}
+}
+
 // TestValidateStartupConfig_SAV2_Disabled_NoValidation — SA_v2 disabled
 // does not trigger embedding config validation.
 func TestValidateStartupConfig_SAV2_Disabled_NoValidation(t *testing.T) {

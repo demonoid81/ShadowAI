@@ -260,14 +260,16 @@ var (
 	//
 	// SemanticV2InspectTotal counts SA_v2 inspection outcomes.
 	// Labels:
-	//   result=allow      — similarity below threshold; request passed
-	//   result=flag       — threshold ≤ sim < block_threshold; or shadow_only block downgrade
-	//   result=block      — sim ≥ block_threshold AND shadow_only=false
-	//   result=fail_open  — embedding error; request passed without inspection
+	//   result=allow       — similarity below threshold; request passed
+	//   result=flag        — threshold ≤ sim < block_threshold (natural flag, no block downgrade)
+	//   result=block       — sim ≥ block_threshold AND shadow_only=false (enforcement active)
+	//   result=would_block — sim ≥ block_threshold AND shadow_only=true (downgraded; not enforced)
+	//   result=fail_open   — embedding error; request passed without inspection
 	//
-	// Alert if rate(fail_open) / rate(allow+flag+block+fail_open) > 5%:
-	//   inspector is degraded (embedder unavailable), all requests pass through.
-	// Alert if rate(flag+block) rising: potential new threat pattern.
+	// Rollout decision: when rate(would_block) is stable and acceptable,
+	//   set FIREWALL_SA_V2_SHADOW_ONLY=false to enable enforcement.
+	// Alert if rate(fail_open) / total > 5%: embedder degraded, inspector offline.
+	// Alert if rate(flag+block+would_block) rising: potential new threat pattern.
 	SemanticV2InspectTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadowai_semantic_v2_inspect_total",
 		Help: "Semantic V2 inspection outcomes: allow|flag|block|fail_open.",

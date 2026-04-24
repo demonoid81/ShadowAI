@@ -124,12 +124,17 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
-	// PR-F8: semantic_v2 в prod требует полный набор embedding конфигурации.
-	// Без endpoint/provider/corpus SA_v2 молча деградирует в fail-open на
-	// каждом запросе — невидимо для оператора.
+	// PR-F8: semantic_v2 в prod требует явно настроенный embedding stack.
+	// Validation не ограничивается non-empty check'ом: FIREWALL_EMBEDDING_ENDPOINT
+	// имеет дефолт http://localhost:11434, который проходит non-empty, но является
+	// localhost — гарантированно нерабочим в production-контейнере.
+	// Аналогично DATABASE_URL/REDIS_URL loopback guard'у.
 	if c.FirewallSAV2Enabled {
-		if strings.TrimSpace(c.FirewallEmbeddingEndpoint) == "" {
+		endpoint := strings.TrimSpace(c.FirewallEmbeddingEndpoint)
+		if endpoint == "" {
 			errs = append(errs, "FIREWALL_EMBEDDING_ENDPOINT required when FIREWALL_SA_V2_ENABLED=true in prod (without endpoint every inspection fail-opens silently)")
+		} else if pointsToLocalhost(endpoint) {
+			errs = append(errs, "FIREWALL_EMBEDDING_ENDPOINT must not point to localhost/loopback in prod when FIREWALL_SA_V2_ENABLED=true (default http://localhost:11434 is not a real endpoint; SA_v2 would fail-open on every request)")
 		}
 		if strings.TrimSpace(c.FirewallEmbeddingProvider) == "" {
 			errs = append(errs, "FIREWALL_EMBEDDING_PROVIDER required when FIREWALL_SA_V2_ENABLED=true in prod")

@@ -420,10 +420,13 @@ func (c *Config) ValidateStartupConfig() error {
 	default:
 		errs = append(errs, fmt.Sprintf("STREAMING_MODE=%q invalid; must be buffered|incremental|shadow", c.StreamingMode))
 	}
-	// PR-F7.1 safety gate: incremental в prod требует explicit
-	// opt-in, потому что в F7.1 этот режим отключает response-side
-	// firewall/DLP inspection и конвертирует post-call budget check
-	// в soft-record (client получает full body даже при превышении).
+	// PR-F7.1/F7.2/F7.3 safety gate: incremental в prod требует explicit opt-in.
+	// Актуальные tradeoffs (post-F7.2/F7.3):
+	//   - CM+judge → auto buffered_fallback (не отключён, просто fallback).
+	//   - Heuristic response inspectors (PII/DLP/OV/CM-heuristic) работают
+	//     через sliding window — они НЕ отключены.
+	//   - Post-call budget: soft-record-only (client получает full body даже
+	//     при превышении; в buffered было бы 402).
 	// См. docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2.
 	if c.StreamingMode == "incremental" && !c.StreamingAllowIncrementalInProd {
 		errs = append(errs, "STREAMING_MODE=incremental requires STREAMING_ALLOW_INCREMENTAL_IN_PROD=true in prod " +
