@@ -1,6 +1,7 @@
 package evidencebundle
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -337,5 +338,126 @@ func TestWriteReadme_MentionsDatabaseLimitation(t *testing.T) {
 	}
 	if !strings.Contains(content, "W5.2") {
 		t.Error("README should reference W5.2 for future --bundle support")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ZipBundleDir tests (Fix: trailing slash + self-inclusion guard)
+// ---------------------------------------------------------------------------
+
+// TestZipBundleDir_TrailingSlash verifies that --output /tmp/bundle/ (trailing
+// slash) produces /tmp/bundle.zip, not /tmp/bundle/.zip inside the directory.
+func TestZipBundleDir_TrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "anchors.jsonl"), []byte(`{"id":"a1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Simulate --output with trailing slash.
+	dirWithSlash := dir + string(filepath.Separator)
+	zipPath := filepath.Clean(dirWithSlash) + ".zip"
+
+	// zipPath must be outside dir (not inside it).
+	if strings.HasPrefix(zipPath, dir+string(filepath.Separator)) {
+		t.Errorf("zipPath %q is inside dir %q — filepath.Clean did not remove trailing slash", zipPath, dir)
+	}
+
+	// Also run ZipBundleDir and verify the archive is readable.
+	if err := ZipBundleDir(dirWithSlash, zipPath); err != nil {
+		t.Fatalf("ZipBundleDir: %v", err)
+	}
+	if _, err := os.Stat(zipPath); err != nil {
+		t.Fatalf("zip not created at %s: %v", zipPath, err)
+	}
+
+	// The zip must contain anchors.jsonl and must NOT contain itself.
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer r.Close()
+	var names []string
+	for _, f := range r.File {
+		names = append(names, f.Name)
+	}
+	foundAnchors := false
+	for _, n := range names {
+		if strings.HasSuffix(n, "anchors.jsonl") {
+			foundAnchors = true
+		}
+		if strings.HasSuffix(n, ".zip") {
+			t.Errorf("zip must not include itself; found %q in archive", n)
+		}
+	}
+	if !foundAnchors {
+		t.Errorf("zip should contain anchors.jsonl; entries: %v", names)
+	}
+}
+
+// TestZipBundleDir_SelfInclusionGuard verifies that if zipPath is somehow
+// inside dir (e.g. caller bugs), the file is skipped — archive doesn't include itself.
+func TestZipBundleDir_SelfInclusionGuard(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bundle_manifest.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Deliberately put zipPath INSIDE dir to trigger the skip guard.
+	zipPath := filepath.Join(dir, "inside.zip")
+	if err := ZipBundleDir(dir, zipPath); err != nil {
+		t.Fatalf("ZipBundleDir: %v", err)
+	}
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		if strings.HasSuffix(f.Name, ".zip") {
+			t.Errorf("zip must not include itself; found %q in archive", f.Name)
+		}
+	}
+}
+
+// TestZipBundleDir_ContainsExpectedFiles verifies that zip entries match dir contents.
+func TestZipBundleDir_ContainsExpectedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	files := map[string]string{
+		"anchors.jsonl":                     `{"id":"a1"}`,
+		"chain_inventory.jsonl":             `{"table":"audit_logs"}`,
+		"bundle_manifest.json":              `{"version":"1"}`,
+		"reports/anchor_verify_audit_logs.json": `{}`,
+	}
+	for rel, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	zipPath := filepath.Clean(dir) + ".zip"
+	if err := ZipBundleDir(dir, zipPath); err != nil {
+		t.Fatalf("ZipBundleDir: %v", err)
+	}
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer r.Close()
+
+	found := make(map[string]bool)
+	for _, f := range r.File {
+		// Strip the base dir prefix to get the relative path.
+		parts := strings.SplitN(f.Name, "/", 2)
+		if len(parts) == 2 {
+			found[parts[1]] = true
+		}
+	}
+	for rel := range files {
+		normalRel := filepath.ToSlash(rel)
+		if !found[normalRel] {
+			t.Errorf("expected %q in zip, not found; entries: %v", normalRel, found)
+		}
 	}
 }

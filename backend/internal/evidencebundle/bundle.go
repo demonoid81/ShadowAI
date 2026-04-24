@@ -26,6 +26,7 @@
 package evidencebundle
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -185,6 +186,65 @@ func RequireEmptyOrAbsentDir(dir string) error {
 		return fmt.Errorf("directory is not empty (%d entries); exporting into an existing directory can contaminate the bundle with stale files", len(entries))
 	}
 	return nil
+}
+
+// ZipBundleDir creates a zip archive of dir at zipPath.
+//
+// zipPath is derived by the caller; this function additionally skips
+// zipPath if it happens to land inside dir (defensive guard against
+// self-inclusion when the caller computes the path from a dir with a
+// trailing slash).
+//
+// Recommended usage: zipPath = filepath.Clean(dir) + ".zip"
+func ZipBundleDir(dir, zipPath string) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("zip: abs dir: %w", err)
+	}
+	absZip, err := filepath.Abs(zipPath)
+	if err != nil {
+		return fmt.Errorf("zip: abs zip: %w", err)
+	}
+
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zf.Close()
+	zw := zip.NewWriter(zf)
+	defer zw.Close()
+
+	base := filepath.Base(absDir)
+	return filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if absPath == absZip {
+			return nil // skip the zip file itself
+		}
+		rel, err := filepath.Rel(absDir, absPath)
+		if err != nil {
+			return err
+		}
+		w, err := zw.Create(filepath.Join(base, rel))
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(w, f)
+		return err
+	})
 }
 
 // WriteReadme writes README.txt explaining what the bundle contains,

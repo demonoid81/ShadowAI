@@ -35,14 +35,12 @@
 package main
 
 import (
-	"archive/zip"
 	"context"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -248,8 +246,12 @@ func main() {
 	fmt.Printf("  anchors: %d  inventory rows: %d\n", len(allAnchors), len(allInventory))
 
 	if *doZip {
-		zipPath := outDir + ".zip"
-		if err := zipDir(outDir, zipPath); err != nil {
+		// filepath.Clean removes trailing slashes before appending .zip so that
+		// --output /tmp/bundle/ produces /tmp/bundle.zip, not /tmp/bundle/.zip
+		// (which would land inside the bundle directory and be included in its
+		// own archive during the walk).
+		zipPath := filepath.Clean(outDir) + ".zip"
+		if err := evidencebundle.ZipBundleDir(outDir, zipPath); err != nil {
 			exitErr("zip: %v", err)
 		}
 		fmt.Printf("Zip written: %s\n", zipPath)
@@ -305,39 +307,4 @@ func writeJSON(path string, v any) error {
 	return enc.Encode(v)
 }
 
-// zipDir creates a zip archive of dir at zipPath.
-func zipDir(dir, zipPath string) error {
-	zf, err := os.Create(zipPath)
-	if err != nil {
-		return err
-	}
-	defer zf.Close()
-	zw := zip.NewWriter(zf)
-	defer zw.Close()
-
-	base := filepath.Base(dir)
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		w, err := zw.Create(filepath.Join(base, rel))
-		if err != nil {
-			return err
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(w, f)
-		return err
-	})
-}
 
