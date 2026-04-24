@@ -20,11 +20,15 @@
 //	# Both chain + anchor:
 //	audit-verify --include-anchors [--anchor-sink-path <file>] [--table <table>]
 //
+//	# W5.2: offline bundle verification (no DATABASE_URL required):
+//	audit-verify --bundle <dir|zip> [--pubkey-file <key>] [--verbose]
+//
 // --table: "audit_logs" | "admin_event_logs" | "legal_hold_events" |
 //
 //	"audit_purge_runs" | "all" (default)
 //
 // --anchor-sink-path: path to NDJSON file:// sink file for external cross-reference.
+// --bundle: path to evidence bundle directory or .zip (W5.2 offline mode).
 //
 // Exit codes:
 //
@@ -44,6 +48,7 @@ import (
 
 	_ "github.com/lib/pq"
 	"github.com/shadowai/backend/internal/chain"
+	"github.com/shadowai/backend/internal/evidencebundle"
 )
 
 func main() {
@@ -55,6 +60,8 @@ func main() {
 	verifySignatures := flag.Bool("verify-signatures", false, "W4.1: verify Ed25519 anchor signatures (--pubkey or --pubkey-file required)")
 	pubKeyFlag := flag.String("pubkey", "", "Base64-encoded Ed25519 public key for signature verification")
 	pubKeyFile := flag.String("pubkey-file", "", "Path to file containing base64 Ed25519 public key")
+	// W5.2: offline bundle verification mode.
+	bundleFlag := flag.String("bundle", "", "W5.2: path to evidence bundle dir or .zip for offline verification (no DATABASE_URL required)")
 	// W4.2: immudb:// sink verification.
 	// Usage: audit-verify --verify-sink --immudb-addr 127.0.0.1:3322 --immudb-db shadowai
 	//        [--immudb-user immudb --immudb-pass immudb]
@@ -73,6 +80,49 @@ func main() {
 	exitConfig := func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "config error: "+format+"\n", args...)
 		os.Exit(2)
+	}
+
+	// W5.2: --bundle mode — entirely offline, no DATABASE_URL or chain secret required.
+	if *bundleFlag != "" {
+		var pubKey ed25519.PublicKey
+		// Resolve pubkey: --pubkey or --pubkey-file override bundle's own public_key.b64.
+		switch {
+		case *pubKeyFlag != "":
+			pk, err := chain.ParsePublicKey(*pubKeyFlag)
+			if err != nil {
+				exitConfig("--pubkey: %v", err)
+			}
+			pubKey = pk
+		case *pubKeyFile != "":
+			data, err := os.ReadFile(*pubKeyFile)
+			if err != nil {
+				exitConfig("--pubkey-file: %v", err)
+			}
+			pk, err := chain.ParsePublicKey(strings.TrimSpace(string(data)))
+			if err != nil {
+				exitConfig("--pubkey-file: invalid key: %v", err)
+			}
+			pubKey = pk
+		}
+		// pubKey may remain nil — VerifyBundle reads bundle's public_key.b64.
+
+		dir, cleanup, err := evidencebundle.OpenBundle(*bundleFlag)
+		if err != nil {
+			exitConfig("--bundle: %v", err)
+		}
+		defer cleanup()
+
+		result, err := evidencebundle.VerifyBundle(dir, pubKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: bundle verify: %v\n", err)
+			os.Exit(1)
+		}
+
+		printBundleResult(result, *verbose)
+		if !result.OK {
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Chain verification (W2 tier) requires AUDIT_CHAIN_SECRET.
@@ -333,5 +383,76 @@ func main() {
 
 	if anyFail {
 		os.Exit(1)
+	}
+}
+
+// printBundleResult prints W5.2 bundle verification results in the same
+// single-line-per-check style as the live audit-verify output.
+func printBundleResult(r evidencebundle.BundleVerifyResult, verbose bool) {
+	status := func(ok bool) string {
+		if ok {
+			return "OK"
+		}
+		return "FAIL"
+	}
+
+	// File integrity.
+	fi := r.FileIntegrity
+	fmt.Printf("bundle file_integrity          %-6s checked=%d fails=%d\n",
+		status(fi.OK), fi.Checked, len(fi.Fails))
+	if verbose {
+		for _, f := range fi.Fails {
+			if f.Missing {
+				fmt.Printf("  FILE_MISSING %s\n", f.File)
+			} else {
+				fmt.Printf("  FILE_TAMPERED %s (want=%s got=%s)\n", f.File, f.Expected[:8]+"…", f.Actual[:8]+"…")
+			}
+		}
+	}
+
+	// Anchor signatures.
+	as := r.AnchorSigs
+	fmt.Printf("bundle sigs                    %-6s total=%d unsigned=%d no_pubkey=%d fails=%d\n",
+		status(as.OK), as.Total, as.Unsigned, as.NoPubKey, len(as.Fails))
+	if verbose {
+		for _, f := range as.Fails {
+			fmt.Printf("  SIG_FAIL anchor_id=%s table=%s range=[%d,%d]\n",
+				f.AnchorID, f.Table, f.SeqLo, f.SeqHi)
+		}
+	}
+
+	// Range continuity per table.
+	for _, rc := range r.RangeContinuity {
+		fmt.Printf("bundle range  %-18s %-6s anchors=%d gaps=%d\n",
+			rc.Table, status(rc.OK), rc.AnchorCount, len(rc.Gaps))
+		if verbose {
+			for _, g := range rc.Gaps {
+				fmt.Printf("  RANGE_GAP prev_seq_hi=%d next_seq_lo=%d (rows %d..%d have no anchor)\n",
+					g.PrevSeqHi, g.NextSeqLo, g.PrevSeqHi+1, g.NextSeqLo-1)
+			}
+		}
+	}
+
+	// Inventory continuity per table.
+	for _, ic := range r.InventoryContinuity {
+		fmt.Printf("bundle inv    %-18s %-6s rows=%d gaps=%d\n",
+			ic.Table, status(ic.OK), ic.RowCount, len(ic.Gaps))
+		if verbose {
+			for _, g := range ic.Gaps {
+				fmt.Printf("  INV_GAP seq_no=%d\n", g)
+			}
+		}
+	}
+
+	// Inventory count vs anchor row_count.
+	for _, ic := range r.InventoryCount {
+		fmt.Printf("bundle count  %-18s %-6s anchors=%d mismatches=%d\n",
+			ic.Table, status(ic.OK), ic.Anchors, len(ic.Mismatches))
+		if verbose {
+			for _, m := range ic.Mismatches {
+				fmt.Printf("  COUNT_MISMATCH anchor_id=%s range=[%d,%d] anchor_count=%d inventory_count=%d\n",
+					m.AnchorID, m.SeqLo, m.SeqHi, m.AnchorRowCount, m.InventoryCount)
+			}
+		}
 	}
 }
