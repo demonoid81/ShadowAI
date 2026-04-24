@@ -155,8 +155,9 @@ type Config struct {
 	AuditImmuDBUsername string // AUDIT_IMMUDB_USERNAME
 	AuditImmuDBPassword string // AUDIT_IMMUDB_PASSWORD
 	AuditImmuDBDatabase  string // AUDIT_IMMUDB_DATABASE
-	// AUDIT_IMMUDB_API_PREFIX — REST API base path for immudb/immugw.
-	// Default: "/v1/immurestproxy" (immugw). For immudb 2.x built-in REST: "/api/v2".
+	// AUDIT_IMMUDB_API_PREFIX — REST API base path override for immugw_v1 profile only.
+	// Default (empty): "/v1/immurestproxy". Ignored when AUDIT_IMMUDB_REST_PROFILE=immudb_v2
+	// (that profile uses fixed absolute /api/v2/... paths).
 	AuditImmuDBAPIPrefix string
 	// AUDIT_IMMUDB_REST_PROFILE — selects the REST API variant.
 	// "immugw_v1" (default) — immugw REST proxy, base64 creds, Bearer token.

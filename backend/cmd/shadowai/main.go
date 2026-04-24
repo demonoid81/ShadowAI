@@ -353,7 +353,11 @@ func main() {
 				opts.APIPrefix = cfg.AuditImmuDBAPIPrefix
 			}
 			if cfg.AuditImmuDBRestProfile != "" {
-				opts.Profile = chain.ImmuDBRESTProfile(cfg.AuditImmuDBRestProfile)
+				parsedProfile, profileErr := chain.ParseImmuDBRESTProfile(cfg.AuditImmuDBRestProfile)
+				if profileErr != nil {
+					log.Fatalf("anchor scheduler: AUDIT_IMMUDB_REST_PROFILE: %v", profileErr)
+				}
+				opts.Profile = parsedProfile
 			}
 			immuClient, err := chain.DialImmuDBWithOptions(
 				context.Background(),

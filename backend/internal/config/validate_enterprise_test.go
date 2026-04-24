@@ -93,3 +93,48 @@ func TestValidateStartupConfig_W4_AnchorKeyMatch(t *testing.T) {
 		t.Fatalf("matching key pair should not error: %v", err)
 	}
 }
+
+// TestValidateStartupConfig_ImmuDBRestProfile_Invalid — PR-W4.3.1: опечатка
+// в AUDIT_IMMUDB_REST_PROFILE должна быть отвергнута (не молчаливый fallback).
+func TestValidateStartupConfig_ImmuDBRestProfile_Invalid(t *testing.T) {
+	for _, bad := range []string{"immudb_v22", "IMMUDB_V2", "v2", "immugw"} {
+		cfg := prodConfigBase()
+		cfg.AuditImmuDBRestProfile = bad
+		err := cfg.ValidateStartupConfig()
+		if err == nil {
+			t.Errorf("profile %q: expected error, got nil", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "AUDIT_IMMUDB_REST_PROFILE") {
+			t.Errorf("profile %q: error should mention AUDIT_IMMUDB_REST_PROFILE: %v", bad, err)
+		}
+	}
+}
+
+// TestValidateStartupConfig_ImmuDBRestProfile_Valid — known profile values pass.
+func TestValidateStartupConfig_ImmuDBRestProfile_Valid(t *testing.T) {
+	for _, ok := range []string{"", "immugw_v1", "immudb_v2"} {
+		cfg := prodConfigBase()
+		cfg.AuditImmuDBRestProfile = ok
+		err := cfg.ValidateStartupConfig()
+		// Profile validation should not cause an error.
+		if err != nil && strings.Contains(err.Error(), "AUDIT_IMMUDB_REST_PROFILE") {
+			t.Errorf("profile %q: unexpected profile error: %v", ok, err)
+		}
+	}
+}
+
+// TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected — PR-W4.3.1:
+// immudb_v2 + AUDIT_IMMUDB_API_PREFIX вместе — это конфликт (v2 игнорирует APIPrefix).
+func TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditImmuDBRestProfile = "immudb_v2"
+	cfg.AuditImmuDBAPIPrefix = "/api/v2"
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for v2 profile + APIPrefix conflict, got nil")
+	}
+	if !strings.Contains(err.Error(), "AUDIT_IMMUDB_API_PREFIX") {
+		t.Errorf("error should mention AUDIT_IMMUDB_API_PREFIX: %v", err)
+	}
+}

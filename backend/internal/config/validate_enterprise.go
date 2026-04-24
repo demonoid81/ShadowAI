@@ -85,6 +85,21 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-W4.3.1: AUDIT_IMMUDB_REST_PROFILE должен быть известным значением если задан.
+	// Неизвестный профиль (опечатка) молча fallback'ился бы на immugw_v1, что маскирует
+	// misconfiguration. Validate всегда, не только когда sink == immudb://.
+	if p := strings.TrimSpace(c.AuditImmuDBRestProfile); p != "" && p != "immugw_v1" && p != "immudb_v2" {
+		errs = append(errs, fmt.Sprintf(
+			"AUDIT_IMMUDB_REST_PROFILE=%q invalid; must be empty (default immugw_v1), %q, or %q",
+			p, "immugw_v1", "immudb_v2"))
+	}
+
+	// PR-W4.3.1: immudb_v2 profile ignores AUDIT_IMMUDB_API_PREFIX (fixed /api/v2/... paths).
+	// Setting both is almost certainly a misconfiguration; fail loud.
+	if c.AuditImmuDBRestProfile == "immudb_v2" && strings.TrimSpace(c.AuditImmuDBAPIPrefix) != "" {
+		errs = append(errs, "AUDIT_IMMUDB_API_PREFIX is not applicable to AUDIT_IMMUDB_REST_PROFILE=immudb_v2 (v2 uses fixed /api/v2/... paths; remove AUDIT_IMMUDB_API_PREFIX)")
+	}
+
 	// PR-W4.2: immudb:// sink требует всех четырёх connection fields в prod.
 	// Также при immudb:// в prod требуются signing key + pubkey_id.
 	if c.AuditAnchorSink == "immudb://" {

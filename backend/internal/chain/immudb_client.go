@@ -30,6 +30,21 @@ const (
 	ProfileImmudbV2 ImmuDBRESTProfile = "immudb_v2"
 )
 
+// ParseImmuDBRESTProfile normalises and validates a profile string.
+// Empty string → ProfileImmugwV1 (backward-compatible default).
+// Returns an error for any unrecognised value so callers fail loudly on typos.
+func ParseImmuDBRESTProfile(s string) (ImmuDBRESTProfile, error) {
+	switch ImmuDBRESTProfile(s) {
+	case "", ProfileImmugwV1:
+		return ProfileImmugwV1, nil
+	case ProfileImmudbV2:
+		return ProfileImmudbV2, nil
+	default:
+		return "", fmt.Errorf("unknown immudb REST profile %q: must be %q or %q",
+			s, ProfileImmugwV1, ProfileImmudbV2)
+	}
+}
+
 // HTTPImmuDBClient — immudb REST client supporting immugw v1 and immudb v2 profiles.
 //
 // Select the profile via ImmuDBOptions.Profile when calling DialImmuDBWithOptions.
@@ -47,11 +62,12 @@ type HTTPImmuDBClient struct {
 // ImmuDBOptions configures the immudb REST client.
 type ImmuDBOptions struct {
 	// Profile selects the REST API variant. Default: ProfileImmugwV1.
+	// Use ParseImmuDBRESTProfile to validate user-supplied strings.
 	Profile ImmuDBRESTProfile
-	// APIPrefix overrides the default REST API base path.
-	// If empty, derived from Profile:
-	//   ProfileImmugwV1 → "/v1/immurestproxy"
-	//   ProfileImmudbV2 → "/api/v2"  (only used for v1 paths; v2 uses absolute paths)
+	// APIPrefix overrides the REST API base path for ProfileImmugwV1.
+	// Ignored for ProfileImmudbV2 — that profile uses absolute /api/v2/...
+	// paths that are not configurable (built-in immudb REST server).
+	// If empty, defaults to "/v1/immurestproxy" for ProfileImmugwV1.
 	APIPrefix string
 }
 
@@ -77,18 +93,16 @@ func DialImmuDBWithOptions(ctx context.Context, addr, username, password, databa
 		baseURL = "http://" + addr
 	}
 
-	profile := opts.Profile
-	if profile == "" {
-		profile = ProfileImmugwV1
+	profile, err := ParseImmuDBRESTProfile(string(opts.Profile))
+	if err != nil {
+		return nil, fmt.Errorf("immudb dial: %w", err)
 	}
 
 	apiPrefix := opts.APIPrefix
-	if apiPrefix == "" {
-		if profile == ProfileImmugwV1 {
-			apiPrefix = "/v1/immurestproxy"
-		}
-		// ProfileImmudbV2 uses absolute paths (/api/v2/*) regardless.
+	if apiPrefix == "" && profile == ProfileImmugwV1 {
+		apiPrefix = "/v1/immurestproxy"
 	}
+	// ProfileImmudbV2 uses absolute /api/v2/... paths — APIPrefix is ignored.
 
 	c := &HTTPImmuDBClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),

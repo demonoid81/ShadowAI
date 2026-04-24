@@ -212,7 +212,11 @@ func main() {
 			opts.APIPrefix = *immudbAPIPrefix
 		}
 		if *immudbProfile != "" {
-			opts.Profile = chain.ImmuDBRESTProfile(*immudbProfile)
+			parsed, err := chain.ParseImmuDBRESTProfile(*immudbProfile)
+			if err != nil {
+				exitConfig("--immudb-rest-profile: %v", err)
+			}
+			opts.Profile = parsed
 		}
 		immuClient, err := chain.DialImmuDBWithOptions(ctx, *immudbAddr, *immudbUser, *immudbPass, *immudbDB, opts)
 		if err != nil {
