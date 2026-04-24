@@ -135,47 +135,54 @@ func OpenBundle(path string) (dir string, cleanup func(), err error) {
 	return tmp, cleanup, nil
 }
 
-func extractZipBundle(zipPath string) (string, error) {
+func extractZipBundle(zipPath string) (tmp string, retErr error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return "", err
 	}
 	defer r.Close()
 
-	tmp, err := os.MkdirTemp("", "evidence_bundle_*")
+	tmp, err = os.MkdirTemp("", "evidence_bundle_*")
 	if err != nil {
 		return "", err
 	}
+	// Clean up the temp dir if extraction fails for any reason.
+	defer func() {
+		if retErr != nil {
+			os.RemoveAll(tmp)
+			tmp = ""
+		}
+	}()
 
 	for _, f := range r.File {
 		dest := filepath.Join(tmp, filepath.Clean(f.Name))
 		// Guard against zip-slip.
 		if !strings.HasPrefix(dest, filepath.Clean(tmp)+string(os.PathSeparator)) {
-			return "", fmt.Errorf("zip slip detected: %q", f.Name)
+			return tmp, fmt.Errorf("zip slip detected: %q", f.Name)
 		}
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(dest, 0o755); err != nil {
-				return "", err
+				return tmp, err
 			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return "", err
+			return tmp, err
 		}
 		out, err := os.Create(dest)
 		if err != nil {
-			return "", err
+			return tmp, err
 		}
 		rc, err := f.Open()
 		if err != nil {
 			out.Close()
-			return "", err
+			return tmp, err
 		}
 		_, copyErr := io.Copy(out, rc)
 		out.Close()
 		rc.Close()
 		if copyErr != nil {
-			return "", copyErr
+			return tmp, copyErr
 		}
 	}
 	return tmp, nil
@@ -352,9 +359,10 @@ func checkRangeContinuity(anchors []AnchorLine) []RangeContinuityResult {
 		for i := 1; i < len(tableAnchors); i++ {
 			prev := tableAnchors[i-1]
 			curr := tableAnchors[i]
-			// Consecutive anchors must share boundary: curr.SeqLo == prev.SeqHi.
-			// curr.SeqLo > prev.SeqHi → gap (rows without anchor coverage).
-			if curr.SeqLo != prev.SeqHi {
+			// Anchors use inclusive ranges [SeqLo, SeqHi].
+			// The scheduler stores SeqLo = prevAnchor.SeqHi + 1.
+			// Consecutive anchors without a gap satisfy: curr.SeqLo == prev.SeqHi + 1.
+			if curr.SeqLo != prev.SeqHi+1 {
 				r.OK = false
 				r.Gaps = append(r.Gaps, RangeGap{
 					PrevSeqHi: prev.SeqHi,
@@ -439,16 +447,17 @@ func checkInventoryCount(anchors []AnchorLine, inventory []ChainInventoryLine) [
 	return results
 }
 
-// countInRange counts elements in sorted slice where lo < v <= hi.
+// countInRange counts elements in sorted slice where lo <= v <= hi (inclusive).
+// Anchors use inclusive [SeqLo, SeqHi] ranges (scheduler stores SeqLo = lastSeqHi+1).
 func countInRange(sorted []int64, lo, hi int64) int {
 	if len(sorted) == 0 {
 		return 0
 	}
-	// Find first index where v > lo.
-	lo_idx := sort.Search(len(sorted), func(i int) bool { return sorted[i] > lo })
+	// Find first index where v >= lo (inclusive lower bound).
+	loIdx := sort.Search(len(sorted), func(i int) bool { return sorted[i] >= lo })
 	// Find first index where v > hi.
-	hi_idx := sort.Search(len(sorted), func(i int) bool { return sorted[i] > hi })
-	return hi_idx - lo_idx
+	hiIdx := sort.Search(len(sorted), func(i int) bool { return sorted[i] > hi })
+	return hiIdx - loIdx
 }
 
 // ---------------------------------------------------------------------------

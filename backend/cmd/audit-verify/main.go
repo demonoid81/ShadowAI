@@ -427,7 +427,7 @@ func printBundleResult(r evidencebundle.BundleVerifyResult, verbose bool) {
 			rc.Table, status(rc.OK), rc.AnchorCount, len(rc.Gaps))
 		if verbose {
 			for _, g := range rc.Gaps {
-				fmt.Printf("  RANGE_GAP prev_seq_hi=%d next_seq_lo=%d (rows %d..%d have no anchor)\n",
+				fmt.Printf("  RANGE_GAP prev_seq_hi=%d next_seq_lo=%d (rows %d..%d not covered by any anchor)\n",
 					g.PrevSeqHi, g.NextSeqLo, g.PrevSeqHi+1, g.NextSeqLo-1)
 			}
 		}

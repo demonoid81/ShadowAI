@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/shadowai/backend/internal/chain"
 )
 
 // ---------------------------------------------------------------------------
@@ -32,14 +34,32 @@ func newTestBundle(t *testing.T) *testBundle {
 
 func (b *testBundle) anchors(anchors []AnchorLine) *testBundle {
 	b.t.Helper()
-	b.writeNDJSON("anchors.jsonl", anchors)
+	b.writeSlice("anchors.jsonl", len(anchors), func(enc *json.Encoder, i int) {
+		enc.Encode(anchors[i]) //nolint
+	})
 	return b
 }
 
 func (b *testBundle) inventory(entries []ChainInventoryLine) *testBundle {
 	b.t.Helper()
-	b.writeNDJSON("chain_inventory.jsonl", entries)
+	b.writeSlice("chain_inventory.jsonl", len(entries), func(enc *json.Encoder, i int) {
+		enc.Encode(entries[i]) //nolint
+	})
 	return b
+}
+
+func (b *testBundle) writeSlice(name string, n int, fn func(*json.Encoder, int)) {
+	b.t.Helper()
+	f, err := os.Create(filepath.Join(b.dir, name))
+	if err != nil {
+		b.t.Fatalf("create %s: %v", name, err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	for i := 0; i < n; i++ {
+		fn(enc, i)
+	}
 }
 
 func (b *testBundle) pubKey(pub ed25519.PublicKey) *testBundle {
@@ -68,31 +88,8 @@ func (b *testBundle) withManifest() *testBundle {
 	return b
 }
 
-func (b *testBundle) writeNDJSON(name string, records any) {
-	b.t.Helper()
-	f, err := os.Create(filepath.Join(b.dir, name))
-	if err != nil {
-		b.t.Fatalf("create %s: %v", name, err)
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	switch v := records.(type) {
-	case []AnchorLine:
-		for _, r := range v {
-			if err := enc.Encode(r); err != nil {
-				b.t.Fatalf("encode: %v", err)
-			}
-		}
-	case []ChainInventoryLine:
-		for _, r := range v {
-			if err := enc.Encode(r); err != nil {
-				b.t.Fatalf("encode: %v", err)
-			}
-		}
-	}
-}
-
+// makeAnchor creates an AnchorLine with inclusive [seqLo, seqHi] range.
+// In real production anchors: SeqLo = prevSeqHi + 1 (set by scheduler).
 func makeAnchor(id, table string, seqLo, seqHi int64, rowCount int) AnchorLine {
 	merkle := make([]byte, 32)
 	for i := range merkle {
@@ -109,9 +106,10 @@ func makeAnchor(id, table string, seqLo, seqHi int64, rowCount int) AnchorLine {
 	}
 }
 
-func inventoryRange(table string, seqLo, seqHi int64) []ChainInventoryLine {
+// inventoryRange generates ChainInventoryLine for seq_no lo..hi (inclusive).
+func inventoryRange(table string, lo, hi int64) []ChainInventoryLine {
 	var result []ChainInventoryLine
-	for i := seqLo; i <= seqHi; i++ {
+	for i := lo; i <= hi; i++ {
 		result = append(result, ChainInventoryLine{
 			Table:      table,
 			SeqNo:      i,
@@ -120,6 +118,20 @@ func inventoryRange(table string, seqLo, seqHi int64) []ChainInventoryLine {
 		})
 	}
 	return result
+}
+
+// signAnchorLine signs an AnchorLine using chain.SignAnchor and returns the
+// signed copy with SignatureHex set.
+func signAnchorLine(t *testing.T, a AnchorLine, priv ed25519.PrivateKey, pubKeyID string) AnchorLine {
+	t.Helper()
+	rec := anchorLineToRecord(a)
+	rec.PubKeyID = pubKeyID
+	if err := chain.SignAnchor(&rec, priv, pubKeyID); err != nil {
+		t.Fatalf("SignAnchor: %v", err)
+	}
+	a.PubKeyID = pubKeyID
+	a.SignatureHex = hex.EncodeToString(rec.Signature)
+	return a
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +158,7 @@ func TestVerifyBundle_FileIntegrity_TamperedFile(t *testing.T) {
 		inventory(nil).
 		withManifest()
 	// Tamper with anchors.jsonl after manifest was written.
-	if err := os.WriteFile(filepath.Join(b.dir, "anchors.jsonl"), []byte("tampered content\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(b.dir, "anchors.jsonl"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
 	result, err := VerifyBundle(b.dir, nil)
@@ -168,82 +180,111 @@ func TestVerifyBundle_FileIntegrity_TamperedFile(t *testing.T) {
 // Anchor signature tests
 // ---------------------------------------------------------------------------
 
-func TestVerifyBundle_AnchorSigs_NoPubKey_Passes(t *testing.T) {
+// TestVerifyBundle_AnchorSigs_ValidSignature uses chain.SignAnchor to produce
+// a real Ed25519 signature and asserts AnchorSigs.OK == true.
+func TestVerifyBundle_AnchorSigs_ValidSignature(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	_ = priv
-	_ = pub
-	// Anchor without signature — no pubkey — should pass.
-	anchor := makeAnchor("a1", "audit_logs", 0, 10, 10)
+
+	// Inclusive range [1, 10] — matches real scheduler output.
+	anchor := signAnchorLine(t, makeAnchor("a1", "audit_logs", 1, 10, 10), priv, "test-key-1")
+
+	b := newTestBundle(t).
+		pubKey(pub).
+		anchors([]AnchorLine{anchor}).
+		inventory(inventoryRange("audit_logs", 1, 10)).
+		withManifest()
+
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	if !result.AnchorSigs.OK {
+		t.Errorf("valid signature: expected AnchorSigs.OK=true, fails: %+v", result.AnchorSigs.Fails)
+	}
+	if result.AnchorSigs.Total != 1 {
+		t.Errorf("Total = %d, want 1", result.AnchorSigs.Total)
+	}
+}
+
+// TestVerifyBundle_AnchorSigs_TamperedSignature verifies that a signature with
+// wrong bytes is detected and causes AnchorSigs.OK == false.
+func TestVerifyBundle_AnchorSigs_TamperedSignature(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	anchor := signAnchorLine(t, makeAnchor("a1", "audit_logs", 1, 10, 10), priv, "test-key-1")
+	// Corrupt the signature: flip every byte.
+	sig, _ := hex.DecodeString(anchor.SignatureHex)
+	for i := range sig {
+		sig[i] ^= 0xFF
+	}
+	anchor.SignatureHex = hex.EncodeToString(sig)
+
+	b := newTestBundle(t).
+		pubKey(pub).
+		anchors([]AnchorLine{anchor}).
+		inventory(nil).
+		withManifest()
+
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	if result.AnchorSigs.OK {
+		t.Error("tampered signature: expected AnchorSigs.OK=false, got true")
+	}
+	if len(result.AnchorSigs.Fails) != 1 {
+		t.Errorf("expected 1 sig fail, got %d", len(result.AnchorSigs.Fails))
+	}
+	if result.AnchorSigs.Fails[0].AnchorID != "a1" {
+		t.Errorf("fail anchor_id = %q, want a1", result.AnchorSigs.Fails[0].AnchorID)
+	}
+	if result.OK {
+		t.Error("overall result must be FAIL with tampered signature")
+	}
+}
+
+func TestVerifyBundle_AnchorSigs_NoPubKey_UnsignedPasses(t *testing.T) {
+	anchor := makeAnchor("a1", "audit_logs", 1, 10, 10) // no signature
 	b := newTestBundle(t).anchors([]AnchorLine{anchor}).inventory(nil).withManifest()
 	result, err := VerifyBundle(b.dir, nil)
 	if err != nil {
 		t.Fatalf("VerifyBundle: %v", err)
 	}
 	if !result.AnchorSigs.OK {
-		t.Errorf("no pubkey, unsigned anchor: expected OK, got FAIL")
+		t.Error("unsigned anchor, no pubkey: expected OK, got FAIL")
 	}
 	if result.AnchorSigs.Unsigned != 1 {
 		t.Errorf("Unsigned = %d, want 1", result.AnchorSigs.Unsigned)
 	}
 }
 
-func TestVerifyBundle_AnchorSigs_ValidSignature(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-
-	anchor := makeAnchor("a1", "audit_logs", 0, 10, 10)
-	// Sign the anchor using chain.SignAnchor logic manually:
-	// Build the anchor record, sign it, extract signature_hex.
-	rec := anchorLineToRecord(anchor)
-	rec.PubKeyID = "test-key"
-	canonical := []byte("v1|audit_logs|0|10|10|" + anchor.MerkleRootHex + "|" +
-		itoa(rec.CreatedAt.UTC().Unix()) + "|||test-key")
-	sig := ed25519.Sign(priv, canonical)
-	anchor.SignatureHex = hex.EncodeToString(sig)
-	anchor.PubKeyID = "test-key"
-
-	b := newTestBundle(t).pubKey(pub).anchors([]AnchorLine{anchor}).inventory(nil).withManifest()
-	result, err := VerifyBundle(b.dir, nil)
-	if err != nil {
-		t.Fatalf("VerifyBundle: %v", err)
-	}
-	// Note: this test verifies the plumbing. The actual canonical form
-	// is determined by chain.ManifestCanonical — use chain.SignAnchor for
-	// real tests. Here we just verify the code path handles sigs without crashing.
-	// The result may be FAIL if our manually computed canonical differs from chain's.
-	_ = result // actual sig check tested via chain.SignAnchor integration
-}
-
 func TestVerifyBundle_AnchorSigs_UseBundlePubKey(t *testing.T) {
-	// Bundle contains public_key.b64 — VerifyBundle should read it automatically.
+	// public_key.b64 in bundle should be auto-loaded by VerifyBundle.
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	_ = priv
+	anchor := signAnchorLine(t, makeAnchor("a1", "audit_logs", 1, 5, 5), priv, "key1")
 
-	anchor := makeAnchor("a1", "audit_logs", 0, 10, 10)
-	// Anchor with obviously wrong signature — verification should fail.
-	anchor.SignatureHex = hex.EncodeToString(make([]byte, 64))
-	anchor.PubKeyID = "key1"
+	b := newTestBundle(t).
+		pubKey(pub).
+		anchors([]AnchorLine{anchor}).
+		inventory(inventoryRange("audit_logs", 1, 5)).
+		withManifest()
 
-	b := newTestBundle(t).pubKey(pub).anchors([]AnchorLine{anchor}).inventory(nil).withManifest()
-	// Pass nil pubKey — should pick up from bundle.
-	result, err := VerifyBundle(b.dir, nil)
+	result, err := VerifyBundle(b.dir, nil) // nil pubKey — reads from bundle
 	if err != nil {
 		t.Fatalf("VerifyBundle: %v", err)
 	}
-	if result.AnchorSigs.OK {
-		t.Error("bad signature should cause FAIL")
-	}
-	if len(result.AnchorSigs.Fails) != 1 {
-		t.Errorf("expected 1 sig fail, got %d", len(result.AnchorSigs.Fails))
+	if !result.AnchorSigs.OK {
+		t.Errorf("bundle pubkey: expected OK, fails: %+v", result.AnchorSigs.Fails)
 	}
 }
 
-func TestVerifyBundle_AnchorSigs_NoPubKeyWithSignedAnchor_NoPubKeyCount(t *testing.T) {
-	anchor := makeAnchor("a1", "audit_logs", 0, 10, 10)
+func TestVerifyBundle_AnchorSigs_SignedWithoutPubKey_NoPubKeyCount(t *testing.T) {
+	anchor := makeAnchor("a1", "audit_logs", 1, 10, 10)
 	anchor.SignatureHex = hex.EncodeToString(make([]byte, 64))
 	anchor.PubKeyID = "key1"
 
 	b := newTestBundle(t).anchors([]AnchorLine{anchor}).inventory(nil).withManifest()
-	// No pubkey in bundle, no pubkey passed — NoPubKey should be counted, OK=true.
+	// No pubkey in bundle, no pubkey passed → NoPubKey counted, OK=true.
 	result, err := VerifyBundle(b.dir, nil)
 	if err != nil {
 		t.Fatalf("VerifyBundle: %v", err)
@@ -257,14 +298,15 @@ func TestVerifyBundle_AnchorSigs_NoPubKeyWithSignedAnchor_NoPubKeyCount(t *testi
 }
 
 // ---------------------------------------------------------------------------
-// Range continuity tests
+// Range continuity tests (inclusive [SeqLo, SeqHi])
 // ---------------------------------------------------------------------------
 
 func TestVerifyBundle_RangeContinuity_OK(t *testing.T) {
+	// Real scheduler produces: [1,10], [11,20], [21,30]
 	anchors := []AnchorLine{
-		makeAnchor("a1", "audit_logs", 0, 10, 10),
-		makeAnchor("a2", "audit_logs", 10, 20, 10),
-		makeAnchor("a3", "audit_logs", 20, 30, 10),
+		makeAnchor("a1", "audit_logs", 1, 10, 10),
+		makeAnchor("a2", "audit_logs", 11, 20, 10),
+		makeAnchor("a3", "audit_logs", 21, 30, 10),
 	}
 	b := newTestBundle(t).anchors(anchors).inventory(nil).withManifest()
 	result, err := VerifyBundle(b.dir, nil)
@@ -279,10 +321,10 @@ func TestVerifyBundle_RangeContinuity_OK(t *testing.T) {
 }
 
 func TestVerifyBundle_RangeContinuity_Gap(t *testing.T) {
+	// Gap: anchor 2 starts at 16, but anchor 1 ends at 10, so rows 11..15 uncovered.
 	anchors := []AnchorLine{
-		makeAnchor("a1", "audit_logs", 0, 10, 10),
-		// Gap: next SeqLo should be 10 but is 15 → rows 11..15 unanchored.
-		makeAnchor("a2", "audit_logs", 15, 25, 10),
+		makeAnchor("a1", "audit_logs", 1, 10, 10),
+		makeAnchor("a2", "audit_logs", 16, 25, 10),
 	}
 	b := newTestBundle(t).anchors(anchors).inventory(nil).withManifest()
 	result, err := VerifyBundle(b.dir, nil)
@@ -295,8 +337,12 @@ func TestVerifyBundle_RangeContinuity_Gap(t *testing.T) {
 			if rc.OK {
 				t.Error("range gap: expected FAIL, got OK")
 			}
-			if len(rc.Gaps) != 1 || rc.Gaps[0].PrevSeqHi != 10 || rc.Gaps[0].NextSeqLo != 15 {
-				t.Errorf("unexpected gaps: %+v", rc.Gaps)
+			if len(rc.Gaps) != 1 {
+				t.Fatalf("expected 1 gap, got: %+v", rc.Gaps)
+			}
+			g := rc.Gaps[0]
+			if g.PrevSeqHi != 10 || g.NextSeqLo != 16 {
+				t.Errorf("gap = prev_seq_hi=%d next_seq_lo=%d, want 10,16", g.PrevSeqHi, g.NextSeqLo)
 			}
 			found = true
 		}
@@ -306,6 +352,37 @@ func TestVerifyBundle_RangeContinuity_Gap(t *testing.T) {
 	}
 	if result.OK {
 		t.Error("overall result must be FAIL with range gap")
+	}
+}
+
+// TestVerifyBundle_RangeContinuity_Regression_InclusiveSemantics is a regression
+// test for the production anchor range format: [1,10], [11,20] must be contiguous.
+func TestVerifyBundle_RangeContinuity_Regression_InclusiveSemantics(t *testing.T) {
+	// This is exactly what the W3 scheduler produces for 20 rows in two batches.
+	anchors := []AnchorLine{
+		makeAnchor("a1", "audit_logs", 1, 10, 10),
+		makeAnchor("a2", "audit_logs", 11, 20, 10),
+	}
+	inv := inventoryRange("audit_logs", 1, 20)
+	b := newTestBundle(t).anchors(anchors).inventory(inv).withManifest()
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	// Range continuity: no gap between [1,10] and [11,20].
+	for _, rc := range result.RangeContinuity {
+		if !rc.OK {
+			t.Errorf("range %s: unexpected FAIL (gaps=%v) — regression in inclusive semantics", rc.Table, rc.Gaps)
+		}
+	}
+	// Inventory count: anchor [1,10] → 10 rows; anchor [11,20] → 10 rows.
+	for _, ic := range result.InventoryCount {
+		if !ic.OK {
+			t.Errorf("count %s: unexpected FAIL (%+v) — regression in inclusive semantics", ic.Table, ic.Mismatches)
+		}
+	}
+	if !result.OK {
+		t.Errorf("clean production-format bundle should be OK: %+v", result)
 	}
 }
 
@@ -322,13 +399,13 @@ func TestVerifyBundle_InventoryContinuity_OK(t *testing.T) {
 	}
 	for _, ic := range result.InventoryContinuity {
 		if !ic.OK {
-			t.Errorf("inventory continuity %s: expected OK, got FAIL: gaps=%v", ic.Table, ic.Gaps)
+			t.Errorf("inventory continuity %s: expected OK, gaps=%v", ic.Table, ic.Gaps)
 		}
 	}
 }
 
 func TestVerifyBundle_InventoryContinuity_Gap(t *testing.T) {
-	// seq_no 1..5 then 8..10 — gap at 6,7.
+	// seq_no 1..5 then 8..10 — gaps at 6,7.
 	inv := append(inventoryRange("audit_logs", 1, 5), inventoryRange("audit_logs", 8, 10)...)
 	b := newTestBundle(t).anchors(nil).inventory(inv).withManifest()
 	result, err := VerifyBundle(b.dir, nil)
@@ -342,7 +419,7 @@ func TestVerifyBundle_InventoryContinuity_Gap(t *testing.T) {
 				t.Error("inventory gap: expected FAIL, got OK")
 			}
 			if len(ic.Gaps) != 2 {
-				t.Errorf("expected 2 gaps (seq 6,7), got: %v", ic.Gaps)
+				t.Errorf("expected 2 gaps (6,7), got: %v", ic.Gaps)
 			}
 			found = true
 		}
@@ -357,8 +434,8 @@ func TestVerifyBundle_InventoryContinuity_Gap(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestVerifyBundle_InventoryCount_OK(t *testing.T) {
-	// Anchor covers (0,10] — 10 rows (1..10).
-	anchors := []AnchorLine{makeAnchor("a1", "audit_logs", 0, 10, 10)}
+	// Inclusive anchor [1,10] has RowCount=10, inventory 1..10 has 10 entries.
+	anchors := []AnchorLine{makeAnchor("a1", "audit_logs", 1, 10, 10)}
 	inv := inventoryRange("audit_logs", 1, 10)
 	b := newTestBundle(t).anchors(anchors).inventory(inv).withManifest()
 	result, err := VerifyBundle(b.dir, nil)
@@ -373,9 +450,9 @@ func TestVerifyBundle_InventoryCount_OK(t *testing.T) {
 }
 
 func TestVerifyBundle_InventoryCount_Mismatch(t *testing.T) {
-	// Anchor says row_count=10 but inventory only has rows 1..8 (count=8).
-	anchors := []AnchorLine{makeAnchor("a1", "audit_logs", 0, 10, 10)}
-	inv := inventoryRange("audit_logs", 1, 8) // only 8 rows
+	// Anchor says row_count=10 but inventory only has rows 1..8 (8 entries).
+	anchors := []AnchorLine{makeAnchor("a1", "audit_logs", 1, 10, 10)}
+	inv := inventoryRange("audit_logs", 1, 8)
 	b := newTestBundle(t).anchors(anchors).inventory(inv).withManifest()
 	result, err := VerifyBundle(b.dir, nil)
 	if err != nil {
@@ -392,7 +469,7 @@ func TestVerifyBundle_InventoryCount_Mismatch(t *testing.T) {
 			} else {
 				m := ic.Mismatches[0]
 				if m.AnchorRowCount != 10 || m.InventoryCount != 8 {
-					t.Errorf("mismatch values: anchor=%d inventory=%d", m.AnchorRowCount, m.InventoryCount)
+					t.Errorf("anchor_count=%d inventory_count=%d, want 10,8", m.AnchorRowCount, m.InventoryCount)
 				}
 			}
 			found = true
@@ -404,13 +481,13 @@ func TestVerifyBundle_InventoryCount_Mismatch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-table tests
+// Multi-table test
 // ---------------------------------------------------------------------------
 
 func TestVerifyBundle_MultiTable(t *testing.T) {
 	anchors := []AnchorLine{
-		makeAnchor("a1", "audit_logs", 0, 5, 5),
-		makeAnchor("a2", "admin_event_logs", 0, 3, 3),
+		makeAnchor("a1", "audit_logs", 1, 5, 5),
+		makeAnchor("a2", "admin_event_logs", 1, 3, 3),
 	}
 	inv := append(
 		inventoryRange("audit_logs", 1, 5),
@@ -473,50 +550,44 @@ func TestOpenBundle_NonExistent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// countInRange unit tests
+// countInRange unit tests (inclusive [lo, hi])
 // ---------------------------------------------------------------------------
 
-func TestCountInRange(t *testing.T) {
+func TestCountInRange_Inclusive(t *testing.T) {
 	sorted := []int64{1, 2, 3, 4, 5, 10, 11, 12}
 	cases := []struct {
 		lo, hi int64
 		want   int
+		desc   string
 	}{
-		{0, 5, 5},   // (0,5] → 1,2,3,4,5
-		{0, 12, 8},  // all
-		{5, 10, 1},  // (5,10] → only 10
-		{5, 11, 2},  // (5,11] → 10,11
-		{0, 0, 0},   // empty
-		{12, 20, 0}, // nothing above 12
+		{1, 10, 6, "[1,10] → 1,2,3,4,5,10"},
+		{1, 5, 5, "[1,5] → 1,2,3,4,5"},
+		{1, 12, 8, "[1,12] → all 8"},
+		{10, 12, 3, "[10,12] → 10,11,12"},
+		{6, 9, 0, "[6,9] → none"},
+		{13, 20, 0, "[13,20] → none above 12"},
+		{1, 1, 1, "[1,1] → just 1"},
 	}
 	for _, tc := range cases {
 		got := countInRange(sorted, tc.lo, tc.hi)
 		if got != tc.want {
-			t.Errorf("countInRange(%v, lo=%d, hi=%d) = %d, want %d", sorted, tc.lo, tc.hi, got, tc.want)
+			t.Errorf("countInRange lo=%d hi=%d (%s) = %d, want %d", tc.lo, tc.hi, tc.desc, got, tc.want)
 		}
 	}
 }
 
-// itoa converts int64 to string (avoids importing strconv in test helpers).
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
+// TestCountInRange_ProductionAnchorRanges verifies the two-anchor scenario
+// that caused the High bug: [1,10] and [11,20] inclusive must each count 10.
+func TestCountInRange_ProductionAnchorRanges(t *testing.T) {
+	// inventory rows 1..20
+	inv := make([]int64, 20)
+	for i := range inv {
+		inv[i] = int64(i + 1)
 	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
+	if got := countInRange(inv, 1, 10); got != 10 {
+		t.Errorf("anchor [1,10]: countInRange = %d, want 10", got)
 	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
+	if got := countInRange(inv, 11, 20); got != 10 {
+		t.Errorf("anchor [11,20]: countInRange = %d, want 10", got)
 	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
