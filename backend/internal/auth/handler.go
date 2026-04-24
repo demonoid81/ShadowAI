@@ -11,6 +11,32 @@ import (
 	"github.com/shadowai/backend/internal/domain"
 )
 
+// optionalString distinguishes three JSON states for a string field:
+//   - field absent in JSON object → Set == false, no change to target
+//   - field present as null       → Set == true, Value == nil (clear)
+//   - field present as "string"   → Set == true, Value != nil (set)
+//
+// Standard *string cannot make this distinction: both absent and null
+// unmarshal to nil in Go's encoding/json.
+type optionalString struct {
+	Value *string
+	Set   bool
+}
+
+func (o *optionalString) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	if string(data) == "null" {
+		o.Value = nil
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	o.Value = &s
+	return nil
+}
+
 // Eraser — подмножество ErasureService, нужное для handler'а.
 // Интерфейс для mock'ов в тестах.
 type Eraser interface {
@@ -249,10 +275,10 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Email      string  `json:"email"`
-		Role       string  `json:"role"`
-		IsActive   *bool   `json:"is_active"`
-		Department *string `json:"department"` // PR-G3: null = clear department, omitted = no change
+		Email      string         `json:"email"`
+		Role       string         `json:"role"`
+		IsActive   *bool          `json:"is_active"`
+		Department optionalString `json:"department"` // PR-G3: absent=no-change, null=clear, "s"=set
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
@@ -289,15 +315,10 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	if req.IsActive != nil {
 		existing.IsActive = *req.IsActive
 	}
-	// Department: use JSON presence via pointer.
-	// null in JSON → clear department; a string → set; field absent → no change.
-	if req.Department != nil {
-		if *req.Department == "" {
-			existing.Department = nil // clear
-		} else {
-			dept := *req.Department
-			existing.Department = &dept
-		}
+	// Department: optionalString distinguishes absent/null/string.
+	// absent (Set==false) → no change; null (Value==nil) → clear; string → set.
+	if req.Department.Set {
+		existing.Department = req.Department.Value
 	}
 
 	if err := h.service.GetRepo().UpdateUser(r.Context(), existing); err != nil {
