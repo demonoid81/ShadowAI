@@ -257,6 +257,43 @@ func TestValidateStartupConfig_OIDC_HttpRedirect_Rejected(t *testing.T) {
 	}
 }
 
+// TestValidateStartupConfig_OIDC_AllowUnverifiedEmail_RequiresInProdOverride — dangerous
+// bypass without explicit prod override must be rejected.
+func TestValidateStartupConfig_OIDC_AllowUnverifiedEmail_RequiresInProdOverride(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = true
+	cfg.OIDCIssuerURL = "https://idp.example.com"
+	cfg.OIDCClientID = "client"
+	cfg.OIDCClientSecret = "secret"
+	cfg.OIDCRedirectURL = "https://example.com/callback"
+	cfg.OIDCAllowUnverifiedEmail = true
+	cfg.OIDCAllowUnverifiedEmailInProd = false // missing explicit override
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for OIDC_ALLOW_UNVERIFIED_EMAIL without IN_PROD override, got nil")
+	}
+	if !strings.Contains(err.Error(), "OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD") {
+		t.Errorf("error should mention OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_OIDC_AllowUnverifiedEmail_WithOverride_Passes.
+func TestValidateStartupConfig_OIDC_AllowUnverifiedEmail_WithOverride_Passes(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.OIDCEnabled = true
+	cfg.OIDCIssuerURL = "https://idp.example.com"
+	cfg.OIDCClientID = "client"
+	cfg.OIDCClientSecret = "secret"
+	cfg.OIDCRedirectURL = "https://example.com/callback"
+	cfg.OIDCAllowUnverifiedEmail = true
+	cfg.OIDCAllowUnverifiedEmailInProd = true // explicit double opt-in
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "OIDC_ALLOW_UNVERIFIED_EMAIL") {
+			t.Errorf("with IN_PROD override: unexpected error: %v", err)
+		}
+	}
+}
+
 // TestValidateStartupConfig_OIDC_Disabled_NoValidation — disabled OIDC passes.
 func TestValidateStartupConfig_OIDC_Disabled_NoValidation(t *testing.T) {
 	cfg := prodConfigBase()

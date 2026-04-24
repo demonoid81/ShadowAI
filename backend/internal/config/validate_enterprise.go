@@ -144,6 +144,12 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-E1: OIDC_ALLOW_UNVERIFIED_EMAIL=true в prod отключает account-takeover guard.
+	// Требует явного второго opt-in — по паттерну SIEM_ALLOW_INSECURE_IN_PROD.
+	if c.OIDCEnabled && c.OIDCAllowUnverifiedEmail && !c.OIDCAllowUnverifiedEmailInProd {
+		errs = append(errs, "OIDC_ALLOW_UNVERIFIED_EMAIL=true requires OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD=true in prod (disabling email_verified check removes account-takeover protection; see PR-E1)")
+	}
+
 	// PR-F8: semantic_v2 в prod требует явно настроенный embedding stack.
 	// Validation не ограничивается non-empty check'ом: FIREWALL_EMBEDDING_ENDPOINT
 	// имеет дефолт http://localhost:11434, который проходит non-empty, но является
