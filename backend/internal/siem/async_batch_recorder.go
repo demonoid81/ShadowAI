@@ -183,17 +183,22 @@ func (r *AsyncBatchRecorder) applyDropPolicy(incoming queueEntry) {
 // On cancellation the worker drains the queue and delivers any pending batch
 // before returning.
 //
+// Lifecycle ctx governs when to stop accepting new events. HTTP delivery
+// always uses context.Background() so that an in-flight batch is not
+// interrupted by shutdown — i.e. events dequeued before cancellation are
+// guaranteed to be delivered or retried to exhaustion.
+//
 // Call from a dedicated goroutine:
 //
 //	go siemRecorder.Run(ctx)
 func (r *AsyncBatchRecorder) Run(ctx context.Context) {
 	batch := make([]queueEntry, 0, r.opts.BatchSize)
 
-	flush := func(flushCtx context.Context) {
+	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
-		r.deliverWithRetry(flushCtx, batch)
+		r.deliverWithRetry(batch)
 		batch = batch[:0]
 	}
 
@@ -206,12 +211,12 @@ func (r *AsyncBatchRecorder) Run(ctx context.Context) {
 			SIEMQueueDepth.Set(float64(len(r.queue)))
 			batch = append(batch, entry)
 			if len(batch) >= r.opts.BatchSize {
-				flush(ctx)
+				flush()
 				resetTimer(timer, r.opts.FlushInterval)
 			}
 
 		case <-timer.C:
-			flush(ctx)
+			flush()
 			timer.Reset(r.opts.FlushInterval)
 
 		case <-ctx.Done():
@@ -222,13 +227,13 @@ func (r *AsyncBatchRecorder) Run(ctx context.Context) {
 				case entry := <-r.queue:
 					batch = append(batch, entry)
 					if len(batch) >= r.opts.BatchSize {
-						flush(context.Background())
+						flush()
 					}
 				default:
 					break drain
 				}
 			}
-			flush(context.Background())
+			flush()
 			return
 		}
 	}
@@ -245,8 +250,10 @@ func resetTimer(t *time.Timer, d time.Duration) {
 }
 
 // deliverWithRetry attempts to send batch to the SIEM endpoint with bounded
-// exponential backoff. Logs and records a metric on permanent failure.
-func (r *AsyncBatchRecorder) deliverWithRetry(ctx context.Context, batch []queueEntry) {
+// exponential backoff. Always uses context.Background() for HTTP so that
+// lifecycle ctx cancellation (shutdown) does not abort in-flight requests.
+// Logs and records a metric on permanent failure.
+func (r *AsyncBatchRecorder) deliverWithRetry(batch []queueEntry) {
 	if r.httpRec == nil || len(batch) == 0 {
 		return
 	}
@@ -260,9 +267,10 @@ func (r *AsyncBatchRecorder) deliverWithRetry(ctx context.Context, batch []queue
 
 	var lastErr error
 	for attempt := 0; attempt < r.opts.MaxRetries; attempt++ {
-		err := r.httpRec.SendBatch(ctx, events)
+		// context.Background(): lifecycle ctx must not interrupt HTTP delivery.
+		// The HTTP client's built-in Timeout covers per-request deadline.
+		err := r.httpRec.SendBatch(context.Background(), events)
 		if err == nil {
-			// Record delivery lag for the oldest event in the batch.
 			lag := time.Since(batch[0].queuedAt).Seconds()
 			SIEMDeliveryLagSeconds.Observe(lag)
 			SIEMRetryTotal.WithLabelValues("success").Inc()
@@ -270,12 +278,7 @@ func (r *AsyncBatchRecorder) deliverWithRetry(ctx context.Context, batch []queue
 		}
 		lastErr = err
 		if attempt < r.opts.MaxRetries-1 {
-			delay := r.opts.RetryBase * (1 << uint(attempt)) // 500ms, 1s, 2s, ...
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				break
-			}
+			time.Sleep(r.opts.RetryBase * (1 << uint(attempt))) // 500ms, 1s, 2s, ...
 		}
 	}
 

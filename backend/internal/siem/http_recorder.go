@@ -111,7 +111,8 @@ func (r *HTTPRecorder) Record(ctx context.Context, ev Event) {
 // [{"source":"shadowai","stream":"admin_event_logs","event":{...}}, ...]
 //
 // Returns nil on 2xx. Returns an error on non-2xx or network failure.
-// Does NOT update metrics — the caller (AsyncBatchRecorder) handles that.
+// Updates SIEMRequestsTotal, SIEMLatencySeconds, SIEMFailTotal, SIEMTimeoutTotal
+// with label "http_batch".
 func (r *HTTPRecorder) SendBatch(ctx context.Context, events []Event) error {
 	if r == nil || r.endpoint == "" || len(events) == 0 {
 		return nil

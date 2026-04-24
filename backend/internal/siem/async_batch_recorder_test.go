@@ -420,6 +420,79 @@ func TestAsyncBatchRecorder_DrainOnShutdown(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: in-flight batch not lost on ctx cancel
+// ---------------------------------------------------------------------------
+
+// TestAsyncBatchRecorder_SizeFlushNotLostOnCtxCancel is a regression for the
+// bug where flush(ctx) passed the lifecycle ctx to deliverWithRetry: when ctx
+// was cancelled while an HTTP request was in flight (triggered by size flush),
+// SendBatch would return context.Canceled and the batch would be lost.
+//
+// Fix: deliverWithRetry always uses context.Background() for HTTP so that
+// lifecycle ctx cancellation does not abort in-flight requests.
+func TestAsyncBatchRecorder_SizeFlushNotLostOnCtxCancel(t *testing.T) {
+	var delivered atomic.Int32
+	requestStarted := make(chan struct{}, 1)
+	allowResponse := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Signal that the HTTP request is now in flight.
+		select {
+		case requestStarted <- struct{}{}:
+		default:
+		}
+		// Hold response until test unblocks it.
+		<-allowResponse
+		body, _ := io.ReadAll(r.Body)
+		var envs []envelope
+		json.Unmarshal(body, &envs)
+		delivered.Add(int32(len(envs)))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	httpRec := NewHTTPRecorder(srv.URL, "", 5*time.Second, false)
+	rec := NewAsyncBatchRecorder(httpRec, AsyncBatchOptions{
+		QueueSize:     100,
+		BatchSize:     3,               // triggers size flush after 3 events
+		FlushInterval: 10 * time.Second,
+		MaxRetries:    1,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	// Enqueue exactly BatchSize events — triggers a size flush.
+	rec.Record(ctx, Event{Action: "ev1"})
+	rec.Record(ctx, Event{Action: "ev2"})
+	rec.Record(ctx, Event{Action: "ev3"})
+
+	// Wait until the HTTP request is in flight (batch already dequeued).
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP request did not start — size flush did not fire")
+	}
+
+	// Cancel lifecycle ctx while the HTTP request is still in flight.
+	cancel()
+
+	// Allow the HTTP response — delivery must complete despite ctx cancel.
+	close(allowResponse)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if delivered.Load() == 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := int(delivered.Load()); got != 3 {
+		t.Errorf("delivered %d events after ctx cancel during in-flight batch, want 3 (batch lost due to ctx cancellation — regression)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // DefaultAsyncBatchOptions validation
 // ---------------------------------------------------------------------------
 
