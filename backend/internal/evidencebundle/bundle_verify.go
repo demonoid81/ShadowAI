@@ -429,7 +429,7 @@ func checkInventoryCount(anchors []AnchorLine, inventory []ChainInventoryLine) [
 			Anchors: len(tableAnchors),
 		}
 		for _, a := range tableAnchors {
-			// Count inventory entries in range (SeqLo, SeqHi] (exclusive lo, inclusive hi).
+			// Count inventory entries in inclusive range [SeqLo, SeqHi].
 			count := countInRange(seqNos, a.SeqLo, a.SeqHi)
 			if count != a.RowCount {
 				r.OK = false
