@@ -31,20 +31,20 @@ fullnameOverride: ""
 # Create the secret before installing the chart.
 existingSecret: "shadowai-secrets"
 
-# Non-secret application config passed as env vars.
+# Non-secret application config passed as env vars via ConfigMap (envFrom).
+# Keys MUST be SCREAMING_SNAKE_CASE matching the actual env var names.
 # See internal/config/config.go for all available options.
 config:
-  appEnv: "development"
-  serverPort: "8080"
-  auditPayloadMode: "redacted"
-  auditRetentionDays: "30"
-  auditPurgeInterval: "24h"
-  auditPurgeChunkSize: "1000"
-  streamingMode: "buffered"
-  firewallEnabled: "true"
-  logLevel: "info"
-  # Add more env vars as needed.
-  # Example: OIDC_ENABLED: "true"
+  APP_ENV: "development"
+  SERVER_PORT: "8080"
+  AUDIT_PAYLOAD_MODE: "redacted"
+  AUDIT_RETENTION_DAYS: "30"
+  AUDIT_PURGE_INTERVAL: "24h"
+  AUDIT_PURGE_CHUNK_SIZE: "1000"
+  STREAMING_MODE: "buffered"
+  FIREWALL_ENABLED: "true"
+  # Add more env vars as needed, e.g.:
+  # OIDC_ENABLED: "true"
 
 service:
   type: ClusterIP
@@ -141,6 +141,15 @@ affinity:
             matchLabels:
               app.kubernetes.io/name: shadowai
           topologyKey: kubernetes.io/hostname
+
+# Scheduled audit-verify CronJob for tamper-evidence chain verification.
+# Set enabled=true to schedule periodic chain/anchor integrity checks.
+# Alert: kube_job_failed{job_name=~".*audit-verify.*"} > 0
+auditVerifyCron:
+  enabled: false
+  schedule: "0 3 * * *"  # daily at 03:00
+  verbose: false
+  chainSecret: false      # set true if AUDIT_CHAIN_SECRET is in the K8s Secret
 
 serviceAccount:
   create: true

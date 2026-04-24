@@ -510,6 +510,7 @@ func main() {
 	// Apply global middleware
 	handler := mw.CORS(cfg.CORSAllowedHosts)(r)
 	handler = mw.SecurityHeaders(handler)
+	handler = mw.PrometheusMetrics(handler) // PR-O1: HTTP request metrics
 	handler = mw.Logging(handler)
 	handler = mw.Recovery(handler)
 

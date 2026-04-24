@@ -47,15 +47,15 @@ spec:
             runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#readiness-failure"
 
     # -------------------------------------------------------------------------
-    # Error rates
+    # Error rates (uses shadowai_http_requests_total from PrometheusMetrics middleware)
     # -------------------------------------------------------------------------
     - name: shadowai.errors
       rules:
         - alert: ShadowAIHighErrorRate
           expr: |
-            rate(http_requests_total{job="shadowai", status=~"5.."}[5m])
+            rate(shadowai_http_requests_total{status_code=~"5.."}[5m])
             /
-            rate(http_requests_total{job="shadowai"}[5m]) > 0.05
+            rate(shadowai_http_requests_total[5m]) > 0.05
           for: 5m
           labels:
             severity: warning
@@ -144,15 +144,30 @@ spec:
     # -------------------------------------------------------------------------
     - name: shadowai.audit
       rules:
-        - alert: AuditChainBreakDetected
-          expr: shadowai_chain_breaks_total > 0
-          for: 0m   # immediate
+        # Fires when the scheduled audit-verify CronJob fails (exit 1 = chain/anchor anomaly).
+        # Requires .Values.auditVerifyCron.enabled=true in the Helm chart.
+        # The CronJob runs audit-verify --anchor-only; exit 1 means anchor/chain failure.
+        - alert: AuditVerifyJobFailed
+          expr: |
+            kube_job_status_failed{job_name=~".*audit-verify.*", namespace="shadowai"} > 0
+          for: 0m
           labels:
             severity: critical
           annotations:
-            summary: "Audit chain integrity break detected"
-            description: "A HMAC chain break has been detected in the audit log. Possible tampering. Run audit-verify immediately."
+            summary: "ShadowAI audit-verify job failed (possible tamper-evidence anomaly)"
+            description: "The scheduled audit-verify job failed. This may indicate anchor/chain integrity anomaly or WORM evidence gap. Investigate immediately."
             runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#chain-break"
+
+        # Fires when the CronJob has not completed successfully in 26 hours (daily schedule).
+        - alert: AuditVerifyJobMissing
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{cronjob=~".*audit-verify.*", namespace="shadowai"} > 93600
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Audit-verify CronJob has not succeeded in > 26 hours"
+            description: "The daily audit-verify job has not completed successfully. Integrity verification is not running."
 
         - alert: AuditQueueHigh
           expr: shadowai_audit_queue_depth > 1000
@@ -171,7 +186,7 @@ spec:
         - alert: ShadowAIHighP99Latency
           expr: |
             histogram_quantile(0.99,
-              rate(http_request_duration_seconds_bucket{job="shadowai"}[5m])
+              rate(shadowai_http_duration_seconds_bucket[5m])
             ) > 10
           for: 5m
           labels:

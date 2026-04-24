@@ -5,8 +5,10 @@ metadata:
   labels:
     {{- include "shadowai.labels" . | nindent 4 }}
 data:
-  # Non-secret application config. Secrets come from the Kubernetes Secret.
-  # This ConfigMap is mounted as envFrom in the deployment.
+  # Non-secret application config mounted as envFrom in the Deployment.
+  # Keys in .Values.config MUST be SCREAMING_SNAKE_CASE env var names
+  # (e.g. AUDIT_PURGE_CHUNK_SIZE: "1000", not auditPurgeChunkSize).
+  # The Helm template writes them verbatim — no camelCase conversion.
   {{- range $key, $value := .Values.config }}
-  {{ $key | upper | replace "-" "_" }}: {{ $value | quote }}
+  {{ $key }}: {{ $value | quote }}
   {{- end }}

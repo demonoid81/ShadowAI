@@ -1,0 +1,66 @@
+{{- if .Values.auditVerifyCron.enabled }}
+# PR-O1: Scheduled audit-verify job for tamper-evidence chain and anchor verification.
+# Runs audit-verify --anchor-only --table all and records the result.
+# Alert fires via kube_job_failed when this job fails (chain/anchor anomaly detected).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "shadowai.fullname" . }}-audit-verify
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.auditVerifyCron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0   # no retry — failure means an anomaly, not a transient error
+      template:
+        metadata:
+          labels:
+            {{- include "shadowai.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: audit-verify
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          containers:
+            - name: audit-verify
+              image: {{ include "shadowai.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - audit-verify
+                - --anchor-only
+                - --table
+                - all
+                {{- if .Values.auditVerifyCron.verbose }}
+                - --verbose
+                {{- end }}
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.existingSecret }}
+                      key: databaseUrl
+                {{- if .Values.auditVerifyCron.chainSecret }}
+                - name: AUDIT_CHAIN_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.existingSecret }}
+                      key: auditChainSecret
+                {{- end }}
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+{{- end }}

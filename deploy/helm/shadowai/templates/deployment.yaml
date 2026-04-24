@@ -74,7 +74,7 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
-            # Secrets injected from Kubernetes Secret.
+            # Secrets injected from Kubernetes Secret (not in ConfigMap).
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -90,41 +90,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.existingSecret }}
                   key: redisUrl
-            {{- if .Values.config.appEnv }}
-            - name: APP_ENV
-              value: {{ .Values.config.appEnv | quote }}
-            {{- end }}
-            {{- if .Values.config.serverPort }}
-            - name: SERVER_PORT
-              value: {{ .Values.config.serverPort | quote }}
-            {{- end }}
-            {{- if .Values.config.auditPayloadMode }}
-            - name: AUDIT_PAYLOAD_MODE
-              value: {{ .Values.config.auditPayloadMode | quote }}
-            {{- end }}
-            {{- if .Values.config.auditRetentionDays }}
-            - name: AUDIT_RETENTION_DAYS
-              value: {{ .Values.config.auditRetentionDays | quote }}
-            {{- end }}
-            {{- if .Values.config.auditPurgeInterval }}
-            - name: AUDIT_PURGE_INTERVAL
-              value: {{ .Values.config.auditPurgeInterval | quote }}
-            {{- end }}
-            {{- if .Values.config.streamingMode }}
-            - name: STREAMING_MODE
-              value: {{ .Values.config.streamingMode | quote }}
-            {{- end }}
-            {{- if .Values.config.firewallEnabled }}
-            - name: FIREWALL_ENABLED
-              value: {{ .Values.config.firewallEnabled | quote }}
-            {{- end }}
-            # Mount remaining config from ConfigMap.
-            - name: CONFIGMAP_LOADED
-              value: "true"
+          # All non-secret config from ConfigMap (keys are already SCREAMING_SNAKE_CASE).
           envFrom:
             - configMapRef:
                 name: {{ include "shadowai.fullname" . }}-config
-                optional: true
           volumeMounts:
             - name: tmp
               mountPath: /tmp

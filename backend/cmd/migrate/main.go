@@ -59,6 +59,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Acquire an exclusive advisory lock before running migrations.
+	// This serializes concurrent init containers (e.g. on first install or
+	// scale-up) so that only one process runs DDL at a time. Others block on
+	// the lock, then see all migrations already applied and exit cleanly.
+	// The lock is session-level and released automatically when the DB
+	// connection closes (process exit).
+	const migrationsLockID = 7262639 // hash("shadowai_migrations") % max_int32
+	log.Println("migrate: acquiring advisory lock...")
+	if _, err := db.Exec(`SELECT pg_advisory_lock($1)`, migrationsLockID); err != nil {
+		fmt.Fprintf(os.Stderr, "acquire advisory lock: %v\n", err)
+		os.Exit(1)
+	}
+	log.Println("migrate: advisory lock acquired")
+
 	dirs := []string{*coreDir}
 	if *entDir != "" {
 		dirs = append(dirs, *entDir)
