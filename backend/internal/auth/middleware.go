@@ -53,6 +53,7 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 			c.Role = user.Role
 			c.Email = user.Email
 			c.TokenVersion = user.TokenVersion
+			c.Department = ptrStr(user.Department) // refresh from DB — not from stale JWT
 			claims = c
 		}
 
@@ -70,6 +71,7 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 						UserID:       u.ID,
 						Email:        u.Email,
 						Role:         u.Role,
+						Department:   ptrStr(u.Department),
 						TokenVersion: u.TokenVersion,
 					}
 				}
@@ -84,6 +86,15 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), claimsKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// ptrStr dereferences a nullable string pointer for use in Claims.
+// nil (department not assigned) becomes empty string.
+func ptrStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func RequireRole(roles ...string) func(http.Handler) http.Handler {

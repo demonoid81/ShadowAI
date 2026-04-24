@@ -189,3 +189,20 @@ func TestRequireAdminOrSelf_NoClaims(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rr.Code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PR-G3: ptrStr helper
+// ---------------------------------------------------------------------------
+
+func TestPtrStr_Nil(t *testing.T) {
+	if got := ptrStr(nil); got != "" {
+		t.Errorf("ptrStr(nil) = %q, want empty string", got)
+	}
+}
+
+func TestPtrStr_Value(t *testing.T) {
+	s := "finance"
+	if got := ptrStr(&s); got != "finance" {
+		t.Errorf("ptrStr(&%q) = %q, want finance", s, got)
+	}
+}

@@ -262,7 +262,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	if h.governanceSvc != nil {
 		gctx := auth.ExtractGovernanceContext(r, claims)
 		if dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, gctx.Department, gctx.Sensitivity, providerName, model); dec.Kind == governance.DecisionDeny {
-			h.recordGovernanceDeny(r, claims, providerName, model, dec)
+			h.recordGovernanceDeny(r, claims, providerName, model, dec, gctx)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -1530,7 +1530,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		}
 		candidates = allowed
 		if len(candidates) == 0 {
-			h.recordGovernanceDeny(r, claims, firstDenyProvider, firstDenyModel, firstDeny)
+			h.recordGovernanceDeny(r, claims, firstDenyProvider, firstDenyModel, firstDeny, gctxFallback)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -2357,7 +2357,7 @@ func (h *Handler) FirewallStatus(w http.ResponseWriter, r *http.Request) {
 // (пользователь, чей запрос был отклонён), или nil если middleware
 // не прикрепил claims (edge case — отсутствие actor уже само по себе
 // forensic-сигнал).
-func (h *Handler) recordGovernanceDeny(r *http.Request, claims *auth.Claims, provider, model string, dec governance.Decision) {
+func (h *Handler) recordGovernanceDeny(r *http.Request, claims *auth.Claims, provider, model string, dec governance.Decision, gctx auth.GovernanceContext) {
 	if h.adminAudit == nil {
 		return
 	}
@@ -2382,6 +2382,8 @@ func (h *Handler) recordGovernanceDeny(r *http.Request, claims *auth.Claims, pro
 			"policy_id":          dec.PolicyID,
 			"reason":             dec.Reason,
 			"matched_rule_index": dec.MatchedRuleIndex,
+			"department":         gctx.Department,
+			"sensitivity":        gctx.Sensitivity,
 		},
 	})
 }

@@ -249,9 +249,10 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Email    string `json:"email"`
-		Role     string `json:"role"`
-		IsActive *bool  `json:"is_active"`
+		Email      string  `json:"email"`
+		Role       string  `json:"role"`
+		IsActive   *bool   `json:"is_active"`
+		Department *string `json:"department"` // PR-G3: null = clear department, omitted = no change
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
@@ -266,6 +267,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	oldRole := existing.Role
 	oldActive := existing.IsActive
 	oldEmailNonEmpty := existing.Email != ""
+	oldDept := existing.Department
 	emailChanged := false
 
 	if req.Email != "" && req.Email != existing.Email {
@@ -286,6 +288,16 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IsActive != nil {
 		existing.IsActive = *req.IsActive
+	}
+	// Department: use JSON presence via pointer.
+	// null in JSON → clear department; a string → set; field absent → no change.
+	if req.Department != nil {
+		if *req.Department == "" {
+			existing.Department = nil // clear
+		} else {
+			dept := *req.Department
+			existing.Department = &dept
+		}
 	}
 
 	if err := h.service.GetRepo().UpdateUser(r.Context(), existing); err != nil {
@@ -320,6 +332,16 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		changed = append(changed, "is_active")
 		meta["old_is_active"] = oldActive
 		meta["new_is_active"] = existing.IsActive
+	}
+	deptChanged := func(a, b *string) bool {
+		if a == nil && b == nil { return false }
+		if a == nil || b == nil { return true }
+		return *a != *b
+	}
+	if deptChanged(existing.Department, oldDept) {
+		changed = append(changed, "department")
+		// Department is not PII — safe to log for compliance audit.
+		meta["new_department"] = existing.Department
 	}
 	meta["changed_fields"] = changed
 	h.recordUserUpdate(r, id, http.StatusOK, true, meta)

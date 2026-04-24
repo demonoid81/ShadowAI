@@ -64,7 +64,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, erro
 }
 
 func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, email, role, api_key, is_active, token_version, created_at, updated_at FROM users ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, email, role, department, api_key, is_active, token_version, created_at, updated_at FROM users ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
 	var users []domain.User
 	for rows.Next() {
 		var u domain.User
-		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -82,8 +82,8 @@ func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
 
 func (r *Repository) UpdateUser(ctx context.Context, u *domain.User) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE users SET email=$1, role=$2, is_active=$3, updated_at=now() WHERE id=$4`,
-		u.Email, u.Role, u.IsActive, u.ID)
+		`UPDATE users SET email=$1, role=$2, is_active=$3, department=$4, updated_at=now() WHERE id=$5`,
+		u.Email, u.Role, u.IsActive, u.Department, u.ID)
 	return err
 }
 
