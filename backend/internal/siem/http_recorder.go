@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -103,6 +104,52 @@ func (r *HTTPRecorder) Record(ctx context.Context, ev Event) {
 		SIEMFailTotal.WithLabelValues("http").Inc()
 		log.Printf("siem: non-2xx endpoint=%s action=%s status=%d", sinkHost(r.endpoint), ev.Action, resp.StatusCode)
 	}
+}
+
+// SendBatch delivers a slice of events to the SIEM endpoint in a single
+// HTTP POST. The body is a JSON array of envelopes:
+// [{"source":"shadowai","stream":"admin_event_logs","event":{...}}, ...]
+//
+// Returns nil on 2xx. Returns an error on non-2xx or network failure.
+// Does NOT update metrics — the caller (AsyncBatchRecorder) handles that.
+func (r *HTTPRecorder) SendBatch(ctx context.Context, events []Event) error {
+	if r == nil || r.endpoint == "" || len(events) == 0 {
+		return nil
+	}
+	envelopes := make([]envelope, len(events))
+	for i, ev := range events {
+		envelopes[i] = envelope{Source: "shadowai", Stream: "admin_event_logs", Event: ev}
+	}
+	body, err := json.Marshal(envelopes)
+	if err != nil {
+		return fmt.Errorf("siem batch marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("siem batch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if r.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+r.bearerToken)
+	}
+	start := time.Now()
+	resp, err := r.client.Do(req)
+	SIEMLatencySeconds.WithLabelValues("http_batch").Observe(time.Since(start).Seconds())
+	SIEMRequestsTotal.WithLabelValues("http_batch").Inc()
+	if err != nil {
+		if isTimeout(err) {
+			SIEMTimeoutTotal.WithLabelValues("http_batch").Inc()
+		} else {
+			SIEMFailTotal.WithLabelValues("http_batch").Inc()
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		SIEMFailTotal.WithLabelValues("http_batch").Inc()
+		return fmt.Errorf("siem batch status %d from %s", resp.StatusCode, sinkHost(r.endpoint))
+	}
+	return nil
 }
 
 // sinkHost извлекает host из endpoint для безопасного logging

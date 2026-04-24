@@ -77,6 +77,18 @@ type Config struct {
 	// ValidateStartupConfig отвергает конфиг.
 	SIEMAllowInsecureInProd bool // SIEM_ALLOW_INSECURE_IN_PROD
 
+	// PR-S1.1 v1.1: async queue + batch delivery config.
+	// SIEM_QUEUE_SIZE — max events in the async buffer. Default 1000.
+	// SIEM_BATCH_SIZE — events per HTTP POST. Default 50.
+	// SIEM_FLUSH_INTERVAL — max time between flushes. Default 5s.
+	// SIEM_MAX_RETRIES — HTTP attempts per batch. Default 3.
+	// SIEM_DROP_POLICY — "drop_oldest" (default) | "drop_newest".
+	SIEMQueueSize     int           // SIEM_QUEUE_SIZE
+	SIEMBatchSize     int           // SIEM_BATCH_SIZE
+	SIEMFlushInterval time.Duration // SIEM_FLUSH_INTERVAL
+	SIEMMaxRetries    int           // SIEM_MAX_RETRIES
+	SIEMDropPolicy    string        // SIEM_DROP_POLICY
+
 	// PR-L1.2: secret для keyed HMAC token'а на case_ref (legal hold).
 	// Без этого secret'а attacker с SIEM-mirror dump'ом может
 	// brute-force guessable case IDs (SEC-2026-NNN) через plain SHA-256.
@@ -300,6 +312,13 @@ func Load() *Config {
 		SIEMBearerToken:         getEnv("SIEM_BEARER_TOKEN", ""),
 		SIEMInsecureSkipVerify:  getEnv("SIEM_INSECURE_SKIP_VERIFY", "false") == "true",
 		SIEMAllowInsecureInProd: getEnv("SIEM_ALLOW_INSECURE_IN_PROD", "false") == "true",
+		// PR-S1.1 v1.1: async batch config. Defaults chosen for low-volume enterprise:
+		//   1000-event buffer ≈ 500KB RAM; 50-event batches flush every 5s.
+		SIEMQueueSize:     getEnvInt("SIEM_QUEUE_SIZE", 1000),
+		SIEMBatchSize:     getEnvInt("SIEM_BATCH_SIZE", 50),
+		SIEMFlushInterval: getDuration("SIEM_FLUSH_INTERVAL", 5*time.Second),
+		SIEMMaxRetries:    getEnvInt("SIEM_MAX_RETRIES", 3),
+		SIEMDropPolicy:    getEnv("SIEM_DROP_POLICY", "drop_oldest"),
 
 		// PR-L1.2
 		LegalHoldTokenSecret: getEnv("LEGAL_HOLD_TOKEN_SECRET", ""),

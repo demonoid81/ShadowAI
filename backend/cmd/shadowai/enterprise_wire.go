@@ -34,22 +34,37 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	adminAuditSvc := adminaudit.NewService(adminAuditRepo)
 	adminAuditHandler := adminaudit.NewHandler(adminAuditRepo)
 
-	// PR-S1: SIEM mirror. Если SIEM_ENABLED=true и endpoint задан —
-	// оборачиваем adminAuditSvc fan-out recorder'ом. Primary flow:
-	// handlers писать через adminAuditRecorder, который делает
-	// DB+SIEM (fail-open по SIEM).
+	// PR-S1.1: SIEM mirror with async queue + batch delivery.
+	// Primary flow: handlers write through adminAuditRecorder → DB + SIEM fanout.
+	// SIEM side is fully async: Record() enqueues without blocking the request path.
+	// Worker goroutine is started later in StartSchedulers (ctx available there).
 	var adminAuditRecorder adminaudit.Recorder = adminAuditSvc
+	var siemAsync *siem.AsyncBatchRecorder
 	if deps.Cfg.SIEMEnabled && deps.Cfg.SIEMEndpoint != "" {
-		siemRec := siem.NewHTTPRecorder(
+		httpRec := siem.NewHTTPRecorder(
 			deps.Cfg.SIEMEndpoint,
 			deps.Cfg.SIEMBearerToken,
 			deps.Cfg.SIEMTimeout,
 			deps.Cfg.SIEMInsecureSkipVerify,
 		)
+		dropPolicy, err := siem.ParseDropPolicy(deps.Cfg.SIEMDropPolicy)
+		if err != nil {
+			log.Fatalf("siem: invalid SIEM_DROP_POLICY: %v", err)
+		}
+		siemAsync = siem.NewAsyncBatchRecorder(httpRec, siem.AsyncBatchOptions{
+			QueueSize:     deps.Cfg.SIEMQueueSize,
+			BatchSize:     deps.Cfg.SIEMBatchSize,
+			FlushInterval: deps.Cfg.SIEMFlushInterval,
+			MaxRetries:    deps.Cfg.SIEMMaxRetries,
+			DropPolicy:    dropPolicy,
+		})
 		adminAuditRecorder = &siem.FanoutAdminRecorder{
 			DB:   adminAuditSvc,
-			SIEM: siemRec,
+			SIEM: siemAsync,
 		}
+		log.Printf("siem: async batch recorder configured (queue=%d batch=%d flush=%s retries=%d policy=%s)",
+			deps.Cfg.SIEMQueueSize, deps.Cfg.SIEMBatchSize, deps.Cfg.SIEMFlushInterval,
+			deps.Cfg.SIEMMaxRetries, deps.Cfg.SIEMDropPolicy)
 	}
 
 	// PR-L1: Legal hold (migration 013). Wired до erasureSvc чтобы
@@ -103,6 +118,12 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		AnchorExtraTables: []string{"admin_event_logs", "legal_hold_events"},
 
 		StartSchedulers: func(ctx context.Context, cfg *config.Config) {
+			// PR-S1.1: start SIEM async batch worker.
+			// Worker runs until ctx is cancelled; drains queue on shutdown.
+			if siemAsync != nil {
+				go siemAsync.Run(ctx)
+			}
+
 			// PR-A: audit-purge scheduler для audit_logs.
 			// PR-S1: purge events тоже уходят в SIEM через fanout recorder.
 			// PR-L2: legalHoldSvc передаётся для retention-aware purge —
