@@ -615,3 +615,50 @@ func TestValidateStartupConfig_ProdRejectsLoopbackHosts(t *testing.T) {
 
 // Note: TestValidateStartupConfig_W4_AnchorKeyMismatch moved to
 // validate_enterprise_test.go (requires //go:build enterprise).
+
+// ---------------------------------------------------------------------------
+// PR-F8: Streaming mode wording regression tests
+// ---------------------------------------------------------------------------
+
+// TestValidateStartupConfig_IncrementalProdGate_MessageIsAccurate is a
+// regression for PR-F8: the prod-gate error message for incremental mode
+// must reflect the actual F7.2/F7.3 behavior (not the stale F7.1 text).
+func TestValidateStartupConfig_IncrementalProdGate_MessageIsAccurate(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.StreamingMode = "incremental"
+	cfg.StreamingAllowIncrementalInProd = false
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for incremental without override, got nil")
+	}
+	msg := err.Error()
+
+	// Must mention the actual current behavior.
+	if !strings.Contains(msg, "STREAMING_ALLOW_INCREMENTAL_IN_PROD") {
+		t.Errorf("message should mention STREAMING_ALLOW_INCREMENTAL_IN_PROD: %q", msg)
+	}
+	if !strings.Contains(msg, "budget") {
+		t.Errorf("message should mention budget soft-record tradeoff: %q", msg)
+	}
+	if !strings.Contains(msg, "judge") {
+		t.Errorf("message should mention CM+judge fallback behavior: %q", msg)
+	}
+
+	// Must NOT repeat the stale F7.1 claim that inspection is "disabled".
+	if strings.Contains(msg, "disables response-side") {
+		t.Errorf("stale wording: message must not say 'disables response-side' (heuristic inspection runs via sliding window): %q", msg)
+	}
+}
+
+// TestValidateStartupConfig_IncrementalProdGate_WithOverride_OK verifies that
+// the override flag allows incremental in prod.
+func TestValidateStartupConfig_IncrementalProdGate_WithOverride_OK(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.StreamingMode = "incremental"
+	cfg.StreamingAllowIncrementalInProd = true
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "STREAMING_ALLOW_INCREMENTAL") {
+			t.Errorf("with override: streaming gate should not fire: %v", err)
+		}
+	}
+}

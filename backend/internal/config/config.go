@@ -129,6 +129,11 @@ type Config struct {
 	FirewallSAV2Threshold      float64
 	FirewallSAV2BlockThreshold float64
 	FirewallSAV2CorpusPath     string
+	// FIREWALL_SA_V2_SHADOW_ONLY — если true, SA_v2 flag'ает, но не block'ает
+	// (block downgrade → flag). Рекомендуется для initial rollout: включить
+	// с SHADOW_ONLY=true, дать стабилизироваться метрике
+	// semantic_v2_inspect_total, затем снять SHADOW_ONLY для enforcement.
+	FirewallSAV2ShadowOnly bool
 	FirewallEmbeddingProvider  string
 	FirewallEmbeddingEndpoint  string
 	FirewallEmbeddingModel     string
@@ -203,15 +208,16 @@ type Config struct {
 	// (см. ValidateStartupConfig).
 	StreamingMode string
 
-	// PR-F7.1: explicit prod opt-in для STREAMING_MODE=incremental.
-	// F7.1 incremental mode имеет два известных compromise'а,
-	// которых нет в buffered:
-	//   1. response-side firewall / DLP / sanitize inspection
-	//      не выполняется (будет в F7.2);
-	//   2. post-call budget check становится soft-record-only:
-	//      audit помечает streaming_budget_exceeded_soft, но
-	//      клиент получает полный body (в buffered было бы 402
-	//      без body).
+	// PR-F7.1/F7.2/F7.3: explicit prod opt-in для STREAMING_MODE=incremental.
+	// Актуальные tradeoffs incremental (post-F7.2/F7.3):
+	//   1. CM+judge (content_moderation с judge.Enabled=true) несовместим
+	//      с mid-stream оценкой → автоматический buffered_fallback для
+	//      таких deployment'ов. Метрика: streaming_fallback_total{reason=judge_inspector}.
+	//      Heuristic response inspectors (PII, DLP, OV, CM-heuristic) работают
+	//      через sliding window — они НЕ отключены.
+	//   2. Post-call budget check становится soft-record-only: audit помечает
+	//      streaming_budget_exceeded_soft, но клиент получает полный body
+	//      (в buffered было бы 402 без body).
 	// Чтобы эти tradeoff'ы не включились молча в prod, требуется
 	// отдельный opt-in. По pattern с AUDIT_ALLOW_FULL_IN_PROD /
 	// AUDIT_ALLOW_NO_RETENTION_IN_PROD.
@@ -359,6 +365,7 @@ func Load() *Config {
 		FirewallSAV2Threshold:      getEnvFloat("FIREWALL_SA_V2_THRESHOLD", 0.75),
 		FirewallSAV2BlockThreshold: getEnvFloat("FIREWALL_SA_V2_BLOCK_THRESHOLD", 0.88),
 		FirewallSAV2CorpusPath:     getEnv("FIREWALL_SA_V2_CORPUS_PATH", "firewall_corpus/semantic_v2.json"),
+		FirewallSAV2ShadowOnly:     getEnv("FIREWALL_SA_V2_SHADOW_ONLY", "false") == "true",
 		FirewallEmbeddingProvider:  getEnv("FIREWALL_EMBEDDING_PROVIDER", "ollama"),
 		FirewallEmbeddingEndpoint:  getEnv("FIREWALL_EMBEDDING_ENDPOINT", "http://localhost:11434"),
 		FirewallEmbeddingModel:     getEnv("FIREWALL_EMBEDDING_MODEL", "nomic-embed-text"),
@@ -419,7 +426,10 @@ func (c *Config) ValidateStartupConfig() error {
 	// в soft-record (client получает full body даже при превышении).
 	// См. docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2.
 	if c.StreamingMode == "incremental" && !c.StreamingAllowIncrementalInProd {
-		errs = append(errs, "STREAMING_MODE=incremental requires STREAMING_ALLOW_INCREMENTAL_IN_PROD=true in prod (F7.1 incremental disables response-side firewall/DLP inspection and makes budget enforcement soft-record; see docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2)")
+		errs = append(errs, "STREAMING_MODE=incremental requires STREAMING_ALLOW_INCREMENTAL_IN_PROD=true in prod " +
+			"(incremental tradeoffs: CM+judge falls back to buffered automatically, " +
+			"heuristic response inspection runs on sliding window, " +
+			"post-call budget is soft-record-only; see docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2)")
 	}
 	if c.AuditRetentionDays == 0 && !c.AuditAllowNoRetentionInProd {
 		errs = append(errs, "AUDIT_RETENTION_DAYS=0 requires AUDIT_ALLOW_NO_RETENTION_IN_PROD=true in prod")

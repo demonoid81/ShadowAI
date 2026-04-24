@@ -197,3 +197,104 @@ func TestSemanticV2_Name(t *testing.T) {
 		t.Errorf("Name() = %q, want semantic_v2", insp.Name())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PR-F8: ShadowOnly mode tests
+// ---------------------------------------------------------------------------
+
+// TestSemanticV2_ShadowOnly_BlockDowngradesToFlag verifies that ShadowOnly=true
+// downgrades ActionBlock to ActionFlag, allowing safe rollout without blocking traffic.
+func TestSemanticV2_ShadowOnly_BlockDowngradesToFlag(t *testing.T) {
+	// Identical embedding → cosine similarity = 1.0, above BlockThreshold.
+	corpus := testCorpus(embedding.CorpusItem{
+		ID: "threat-1", Category: "jailbreak",
+		Embedding: []float64{1, 0},
+	})
+	client := &fakeEmbedder{
+		provider: "ollama", model: "nomic-embed-text", dim: 2,
+		vec: []float64{1, 0}, // identical → sim=1.0
+	}
+	insp, err := NewSemanticV2Inspector(SemanticV2Config{
+		Enabled:        true,
+		Threshold:      0.5,
+		BlockThreshold: 0.8,
+		ShadowOnly:     true, // shadow rollout mode
+	}, client, corpus)
+	if err != nil {
+		t.Fatalf("NewSemanticV2Inspector: %v", err)
+	}
+
+	d, err := insp.InspectRequest(context.Background(), &Payload{Text: "attack"})
+	if err != nil {
+		t.Fatalf("InspectRequest: %v", err)
+	}
+	if d.Action != ActionFlag {
+		t.Errorf("shadow_only: got Action=%q, want ActionFlag (block downgraded)", d.Action)
+	}
+	// Reason should mention shadow_only to distinguish from real flag.
+	if !containsStr(d.Reason, "shadow_only") {
+		t.Errorf("shadow_only reason should mention shadow_only: %q", d.Reason)
+	}
+}
+
+// TestSemanticV2_ShadowOnlyFalse_BlockEnforced verifies that with ShadowOnly=false
+// a high-similarity input is correctly blocked.
+func TestSemanticV2_ShadowOnlyFalse_BlockEnforced(t *testing.T) {
+	corpus := testCorpus(embedding.CorpusItem{
+		ID: "threat-1", Category: "jailbreak",
+		Embedding: []float64{1, 0},
+	})
+	client := &fakeEmbedder{
+		provider: "ollama", model: "nomic-embed-text", dim: 2,
+		vec: []float64{1, 0},
+	}
+	insp, _ := NewSemanticV2Inspector(SemanticV2Config{
+		Enabled: true, Threshold: 0.5, BlockThreshold: 0.8,
+		ShadowOnly: false,
+	}, client, corpus)
+
+	d, _ := insp.InspectRequest(context.Background(), &Payload{Text: "attack"})
+	if d.Action != ActionBlock {
+		t.Errorf("shadow_only=false: got Action=%q, want ActionBlock", d.Action)
+	}
+}
+
+// TestSemanticV2_ShadowOnly_FlagBelowBlockThreshold verifies that shadow_only
+// does NOT affect regular Flag decisions (similarity between thresholds).
+func TestSemanticV2_ShadowOnly_FlagBelowBlockThreshold(t *testing.T) {
+	corpus := testCorpus(embedding.CorpusItem{
+		ID: "threat-1", Category: "jailbreak",
+		Embedding: []float64{1, 0},
+	})
+	// Partial similarity: cos_sim(0.7, 0.7) / (1 * sqrt(0.98)) ≈ 0.7/0.99 ≈ 0.71
+	client := &fakeEmbedder{
+		provider: "ollama", model: "nomic-embed-text", dim: 2,
+		vec: []float64{0.9, 0.1}, // sim ≈ 0.9 (above flag=0.5, below block=0.95)
+	}
+	insp, _ := NewSemanticV2Inspector(SemanticV2Config{
+		Enabled: true, Threshold: 0.5, BlockThreshold: 0.95,
+		ShadowOnly: true,
+	}, client, corpus)
+
+	d, _ := insp.InspectRequest(context.Background(), &Payload{Text: "borderline"})
+	// Should still be Flag (not block since sim < 0.95), shadow_only doesn't change this.
+	if d.Action != ActionFlag {
+		t.Errorf("shadow_only: flag-range decision = %q, want ActionFlag", d.Action)
+	}
+	// Reason should NOT contain "shadow_only" for a natural flag (not downgraded block).
+	if containsStr(d.Reason, "shadow_only") {
+		t.Errorf("natural flag reason should not mention shadow_only: %q", d.Reason)
+	}
+}
+
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr ||
+		func() bool {
+			for i := 0; i <= len(s)-len(substr); i++ {
+				if s[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+			return false
+		}())
+}

@@ -124,6 +124,21 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-F8: semantic_v2 в prod требует полный набор embedding конфигурации.
+	// Без endpoint/provider/corpus SA_v2 молча деградирует в fail-open на
+	// каждом запросе — невидимо для оператора.
+	if c.FirewallSAV2Enabled {
+		if strings.TrimSpace(c.FirewallEmbeddingEndpoint) == "" {
+			errs = append(errs, "FIREWALL_EMBEDDING_ENDPOINT required when FIREWALL_SA_V2_ENABLED=true in prod (without endpoint every inspection fail-opens silently)")
+		}
+		if strings.TrimSpace(c.FirewallEmbeddingProvider) == "" {
+			errs = append(errs, "FIREWALL_EMBEDDING_PROVIDER required when FIREWALL_SA_V2_ENABLED=true in prod")
+		}
+		if strings.TrimSpace(c.FirewallSAV2CorpusPath) == "" {
+			errs = append(errs, "FIREWALL_SA_V2_CORPUS_PATH required when FIREWALL_SA_V2_ENABLED=true in prod")
+		}
+	}
+
 	// PR-W3: AUDIT_ANCHOR_INTERVAL не должен превышать 24h в prod.
 	// Слишком большой интервал = слишком большой window без external witness
 	// (rows могут быть удалены и появиться в следующем anchor только через сутки).

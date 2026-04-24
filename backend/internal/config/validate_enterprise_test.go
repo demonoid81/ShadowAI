@@ -124,6 +124,74 @@ func TestValidateStartupConfig_ImmuDBRestProfile_Valid(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// PR-F8: semantic_v2 prod validation tests
+// ---------------------------------------------------------------------------
+
+// TestValidateStartupConfig_SAV2_MissingEmbeddingEndpoint — SA_v2 enabled
+// without embedding endpoint must be rejected in prod (every inspect fail-opens).
+func TestValidateStartupConfig_SAV2_MissingEmbeddingEndpoint(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.FirewallSAV2Enabled = true
+	cfg.FirewallSAV2CorpusPath = "corpus.json"
+	cfg.FirewallEmbeddingProvider = "ollama"
+	cfg.FirewallEmbeddingEndpoint = "" // missing
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for SA_v2 without embedding endpoint, got nil")
+	}
+	if !strings.Contains(err.Error(), "FIREWALL_EMBEDDING_ENDPOINT") {
+		t.Errorf("error should mention FIREWALL_EMBEDDING_ENDPOINT: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SAV2_MissingProvider — SA_v2 enabled without
+// embedding provider must be rejected.
+func TestValidateStartupConfig_SAV2_MissingProvider(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.FirewallSAV2Enabled = true
+	cfg.FirewallSAV2CorpusPath = "corpus.json"
+	cfg.FirewallEmbeddingProvider = "" // missing
+	cfg.FirewallEmbeddingEndpoint = "http://ollama.internal:11434"
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for SA_v2 without provider, got nil")
+	}
+	if !strings.Contains(err.Error(), "FIREWALL_EMBEDDING_PROVIDER") {
+		t.Errorf("error should mention FIREWALL_EMBEDDING_PROVIDER: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SAV2_MissingCorpusPath — SA_v2 enabled without
+// corpus path must be rejected in prod.
+func TestValidateStartupConfig_SAV2_MissingCorpusPath(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.FirewallSAV2Enabled = true
+	cfg.FirewallSAV2CorpusPath = "" // missing
+	cfg.FirewallEmbeddingProvider = "ollama"
+	cfg.FirewallEmbeddingEndpoint = "http://ollama.internal:11434"
+	err := cfg.ValidateStartupConfig()
+	if err == nil {
+		t.Fatal("expected error for SA_v2 without corpus path, got nil")
+	}
+	if !strings.Contains(err.Error(), "FIREWALL_SA_V2_CORPUS_PATH") {
+		t.Errorf("error should mention FIREWALL_SA_V2_CORPUS_PATH: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SAV2_Disabled_NoValidation — SA_v2 disabled
+// does not trigger embedding config validation.
+func TestValidateStartupConfig_SAV2_Disabled_NoValidation(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.FirewallSAV2Enabled = false
+	cfg.FirewallEmbeddingEndpoint = "" // would fail if SA_v2 was enabled
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "FIREWALL_EMBEDDING") || strings.Contains(err.Error(), "SA_V2") {
+			t.Errorf("SA_v2 disabled: unexpected SA_v2 validation error: %v", err)
+		}
+	}
+}
+
 // TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected — PR-W4.3.1:
 // immudb_v2 + AUDIT_IMMUDB_API_PREFIX вместе — это конфликт (v2 игнорирует APIPrefix).
 func TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected(t *testing.T) {

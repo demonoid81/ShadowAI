@@ -181,13 +181,14 @@ func main() {
 						Enabled:        true,
 						Threshold:      cfg.FirewallSAV2Threshold,
 						BlockThreshold: cfg.FirewallSAV2BlockThreshold,
+						ShadowOnly:     cfg.FirewallSAV2ShadowOnly,
 					}, embClient, corpus)
 					if err != nil {
 						log.Printf("semantic_v2: init failed (skipping inspector): %v", err)
 					} else {
 						firewallPipeline.Register(sv2)
-						log.Printf("semantic_v2: registered (provider=%s model=%s dim=%d corpus_items=%d)",
-							embClient.Provider(), embClient.Model(), embClient.Dimension(), len(corpus.Items))
+						log.Printf("semantic_v2: registered (provider=%s model=%s dim=%d corpus_items=%d shadow_only=%v)",
+							embClient.Provider(), embClient.Model(), embClient.Dimension(), len(corpus.Items), cfg.FirewallSAV2ShadowOnly)
 					}
 				}
 			}

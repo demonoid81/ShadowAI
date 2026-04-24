@@ -255,6 +255,23 @@ var (
 		Help:    "Embedding API call latency (success only).",
 		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0},
 	}, []string{"provider", "model"})
+
+	// --- Semantic V2 decision observability (PR-F8) ---
+	//
+	// SemanticV2InspectTotal counts SA_v2 inspection outcomes.
+	// Labels:
+	//   result=allow      — similarity below threshold; request passed
+	//   result=flag       — threshold ≤ sim < block_threshold; or shadow_only block downgrade
+	//   result=block      — sim ≥ block_threshold AND shadow_only=false
+	//   result=fail_open  — embedding error; request passed without inspection
+	//
+	// Alert if rate(fail_open) / rate(allow+flag+block+fail_open) > 5%:
+	//   inspector is degraded (embedder unavailable), all requests pass through.
+	// Alert if rate(flag+block) rising: potential new threat pattern.
+	SemanticV2InspectTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_semantic_v2_inspect_total",
+		Help: "Semantic V2 inspection outcomes: allow|flag|block|fail_open.",
+	}, []string{"result"})
 )
 
 // RecordAuditQueue обновляет gauge очереди. Вызывать из периодического
@@ -336,6 +353,12 @@ func RecordStreamingFallback(provider, reason string) {
 // RecordJudgeRequest инкрементирует счётчик всех judge вызовов.
 func RecordJudgeRequest(provider, threatType string) {
 	JudgeRequestsTotal.WithLabelValues(provider, threatType).Inc()
+}
+
+// RecordSemanticV2Inspect records the outcome of one SA_v2 inspection.
+// result must be one of: "allow", "flag", "block", "fail_open".
+func RecordSemanticV2Inspect(result string) {
+	SemanticV2InspectTotal.WithLabelValues(result).Inc()
 }
 
 // RecordJudgeFail инкрементирует счётчик transport/HTTP/build ошибок.

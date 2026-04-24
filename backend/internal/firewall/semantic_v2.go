@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/shadowai/backend/internal/embedding"
+	"github.com/shadowai/backend/internal/metrics"
 )
 
 // SemanticV2Config — конфиг embedding-based inspector'а. Threshold +
@@ -15,6 +16,10 @@ type SemanticV2Config struct {
 	Enabled        bool
 	Threshold      float64 // flag threshold
 	BlockThreshold float64 // block threshold (>= Threshold)
+	// ShadowOnly — если true, все Block решения downgrade'ятся в Flag.
+	// Используется для безопасного rollout: inspector наблюдает и метрикует,
+	// но никогда не блокирует запросы. Снять после стабилизации метрик.
+	ShadowOnly bool
 }
 
 // SemanticV2Inspector — inspector, работающий на cosine similarity
@@ -101,6 +106,7 @@ func (s *SemanticV2Inspector) InspectRequest(ctx context.Context, p *Payload) (*
 		// metrics. Inspector-side log один раз, чтобы оператор видел
 		// деградацию даже без metrics-скрейпа.
 		log.Printf("semantic_v2: embed error (fail-open): %v", err)
+		metrics.RecordSemanticV2Inspect("fail_open")
 		return &Decision{Action: ActionAllow}, nil
 	}
 
@@ -108,10 +114,24 @@ func (s *SemanticV2Inspector) InspectRequest(ctx context.Context, p *Payload) (*
 	if match == nil {
 		// Corpus пуст или dimension mismatch (не должно случаться —
 		// проверено при init, но runtime-safety). Fail-open.
+		metrics.RecordSemanticV2Inspect("fail_open")
 		return &Decision{Action: ActionAllow}, nil
 	}
 
 	if sim >= s.config.BlockThreshold {
+		if s.config.ShadowOnly {
+			// Shadow rollout: downgrade block → flag. Оператор видит
+			// потенциальные блокировки через метрику result=flag без
+			// реального влияния на трафик.
+			metrics.RecordSemanticV2Inspect("flag")
+			return &Decision{
+				Action:   ActionFlag,
+				Reason:   fmt.Sprintf("semantic_v2: high similarity to known threat (%s) [shadow_only: would block]", match.Category),
+				Severity: SeverityCritical,
+				Findings: []Finding{semanticV2Finding(sim, match)},
+			}, nil
+		}
+		metrics.RecordSemanticV2Inspect("block")
 		return &Decision{
 			Action:   ActionBlock,
 			Reason:   fmt.Sprintf("semantic_v2: high similarity to known threat (%s)", match.Category),
@@ -120,6 +140,7 @@ func (s *SemanticV2Inspector) InspectRequest(ctx context.Context, p *Payload) (*
 		}, nil
 	}
 	if sim >= s.config.Threshold {
+		metrics.RecordSemanticV2Inspect("flag")
 		return &Decision{
 			Action:   ActionFlag,
 			Reason:   fmt.Sprintf("semantic_v2: suspicious similarity to known threat (%s)", match.Category),
@@ -128,6 +149,7 @@ func (s *SemanticV2Inspector) InspectRequest(ctx context.Context, p *Payload) (*
 		}, nil
 	}
 
+	metrics.RecordSemanticV2Inspect("allow")
 	return &Decision{Action: ActionAllow}, nil
 }
 
