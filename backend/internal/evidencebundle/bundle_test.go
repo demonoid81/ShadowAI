@@ -250,3 +250,92 @@ func TestAnchorLine_SignatureHex_OmitEmpty(t *testing.T) {
 		t.Errorf("unsigned anchor must not include signature_hex field: %s", data)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// RequireEmptyOrAbsentDir tests (Fix 1: output directory isolation)
+// ---------------------------------------------------------------------------
+
+// TestRequireEmptyOrAbsentDir_Absent — non-existent dir is allowed.
+func TestRequireEmptyOrAbsentDir_Absent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new_bundle")
+	if err := RequireEmptyOrAbsentDir(dir); err != nil {
+		t.Errorf("absent dir: expected nil, got %v", err)
+	}
+}
+
+// TestRequireEmptyOrAbsentDir_Empty — existing empty dir is allowed.
+func TestRequireEmptyOrAbsentDir_Empty(t *testing.T) {
+	dir := t.TempDir()
+	// TempDir creates a fresh empty directory.
+	if err := RequireEmptyOrAbsentDir(dir); err != nil {
+		t.Errorf("empty dir: expected nil, got %v", err)
+	}
+}
+
+// TestRequireEmptyOrAbsentDir_NonEmpty — dir with files is rejected.
+func TestRequireEmptyOrAbsentDir_NonEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "stale.jsonl"), []byte("old data"), 0o644); err != nil {
+		t.Fatalf("write stale file: %v", err)
+	}
+	err := RequireEmptyOrAbsentDir(dir)
+	if err == nil {
+		t.Error("non-empty dir: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not empty") {
+		t.Errorf("error should mention 'not empty': %v", err)
+	}
+}
+
+// TestRequireEmptyOrAbsentDir_IsFile — path points to a file, not a dir.
+func TestRequireEmptyOrAbsentDir_IsFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "bundle.zip")
+	if err := os.WriteFile(f, []byte("zip"), 0o644); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	err := RequireEmptyOrAbsentDir(f)
+	if err == nil {
+		t.Error("file path: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error should mention 'not a directory': %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// README content tests (Fix 2: no database-requiring commands)
+// ---------------------------------------------------------------------------
+
+// TestWriteReadme_NoDatabaseRequiringCommand verifies the README does NOT
+// contain an audit-verify --verify-signatures CLI command, which requires
+// DATABASE_URL and is not an offline check.
+func TestWriteReadme_NoDatabaseRequiringCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteReadme(dir, []string{"audit_logs"}, true); err != nil {
+		t.Fatalf("WriteReadme: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "README.txt"))
+	content := string(data)
+	// The command "audit-verify --verify-signatures" requires DATABASE_URL
+	// and must not appear as an offline verification instruction.
+	if strings.Contains(content, "audit-verify --verify-signatures") {
+		t.Error("README must not suggest 'audit-verify --verify-signatures' as an offline check — it requires DATABASE_URL")
+	}
+}
+
+// TestWriteReadme_MentionsDatabaseLimitation verifies the README clearly
+// states that the current audit-verify CLI reads from DATABASE_URL, not bundle.
+func TestWriteReadme_MentionsDatabaseLimitation(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteReadme(dir, []string{"audit_logs"}, false); err != nil {
+		t.Fatalf("WriteReadme: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "README.txt"))
+	content := string(data)
+	if !strings.Contains(content, "DATABASE_URL") {
+		t.Error("README must mention DATABASE_URL requirement for live audit-verify")
+	}
+	if !strings.Contains(content, "W5.2") {
+		t.Error("README should reference W5.2 for future --bundle support")
+	}
+}

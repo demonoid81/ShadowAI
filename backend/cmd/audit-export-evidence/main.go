@@ -117,6 +117,9 @@ func main() {
 	}
 
 	outDir := *outputFlag
+	if err := evidencebundle.RequireEmptyOrAbsentDir(outDir); err != nil {
+		exitCfg("--output %s: %v\n  Hint: use a new path or remove the directory first.", outDir, err)
+	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		exitErr("create output dir: %v", err)
 	}

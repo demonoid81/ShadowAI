@@ -35,6 +35,24 @@ func (a *AnchorRecord) MerkleRootHex() string {
 	return hex.EncodeToString(a.MerkleRoot)
 }
 
+// chainTables is the exhaustive allowlist of tables that participate in the
+// HMAC chain. Used to validate tableName before fmt.Sprintf into SQL to
+// prevent accidental injection if the method is called from non-CLI paths.
+var chainTables = map[string]bool{
+	"audit_logs":        true,
+	"admin_event_logs":  true,
+	"legal_hold_events": true,
+	"audit_purge_runs":  true,
+}
+
+// validateChainTable returns an error if tableName is not in the allowlist.
+func validateChainTable(tableName string) error {
+	if !chainTables[tableName] {
+		return fmt.Errorf("unknown chain table %q: must be audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs", tableName)
+	}
+	return nil
+}
+
 // AnchorRepository читает/пишет записи в audit_chain_anchors.
 type AnchorRepository struct {
 	db *sql.DB
@@ -134,7 +152,12 @@ type ChainInventoryRow struct {
 // This is a digest-only export: it does NOT include canonical row content or
 // AUDIT_CHAIN_SECRET and therefore cannot prove HMAC chain correctness offline.
 // It enables gap analysis and anchor Merkle cross-referencing only.
+//
+// Returns an error for any tableName not in the chain table allowlist.
 func (r *AnchorRepository) FetchChainInventory(ctx context.Context, tableName string) ([]ChainInventoryRow, error) {
+	if err := validateChainTable(tableName); err != nil {
+		return nil, err
+	}
 	rows, err := r.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT id::text, seq_no, row_hash FROM %s
 		             WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL

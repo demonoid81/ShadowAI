@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -208,5 +209,41 @@ func TestFetchChainInventory_RowIDHash_HidesRowID(t *testing.T) {
 	}
 	if len(result[0].RowIDHash) != 64 {
 		t.Errorf("RowIDHash must be 64-char SHA256 hex, got len=%d", len(result[0].RowIDHash))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// validateChainTable tests (Fix 3: allowlist protection)
+// ---------------------------------------------------------------------------
+
+// TestValidateChainTable_Valid verifies all four known tables pass.
+func TestValidateChainTable_Valid(t *testing.T) {
+	for _, table := range []string{"audit_logs", "admin_event_logs", "legal_hold_events", "audit_purge_runs"} {
+		if err := validateChainTable(table); err != nil {
+			t.Errorf("validateChainTable(%q): unexpected error: %v", table, err)
+		}
+	}
+}
+
+// TestValidateChainTable_Invalid verifies unknown table names are rejected.
+func TestValidateChainTable_Invalid(t *testing.T) {
+	for _, bad := range []string{"users", "secrets", "audit_logs; DROP TABLE users--", "", "AUDIT_LOGS"} {
+		if err := validateChainTable(bad); err == nil {
+			t.Errorf("validateChainTable(%q): expected error, got nil", bad)
+		}
+	}
+}
+
+// TestFetchChainInventory_InvalidTable_ReturnsError verifies the method
+// returns an error before any SQL when tableName is unknown.
+func TestFetchChainInventory_InvalidTable_ReturnsError(t *testing.T) {
+	db := openMockDB(t, nil)
+	repo := NewAnchorRepository(db)
+	_, err := repo.FetchChainInventory(context.Background(), "evil; DROP TABLE audit_logs--")
+	if err == nil {
+		t.Error("expected error for invalid table, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown chain table") {
+		t.Errorf("error should mention 'unknown chain table': %v", err)
 	}
 }

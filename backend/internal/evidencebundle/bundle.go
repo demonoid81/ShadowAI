@@ -163,6 +163,30 @@ func ComputeBundleHashes(dir string) (map[string]string, error) {
 	return result, err
 }
 
+// RequireEmptyOrAbsentDir returns an error if dir exists and is non-empty.
+// Callers should use this before writing a bundle to prevent contaminating a
+// new export with stale files from a previous run.
+func RequireEmptyOrAbsentDir(dir string) error {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path exists and is not a directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("directory is not empty (%d entries); exporting into an existing directory can contaminate the bundle with stale files", len(entries))
+	}
+	return nil
+}
+
 // WriteReadme writes README.txt explaining what the bundle contains,
 // what can be verified offline, and what requires live infrastructure.
 func WriteReadme(dir string, tables []string, hasPubKey bool) error {
@@ -205,9 +229,11 @@ chain_inventory.jsonl
   It does NOT prove that row_hash corresponds to specific row content.
 
 reports/
-  Operator-side verification results at export time (JSON).
-  anchor_verify_<table>.json  — W3 Merkle anchor verification result
-  signature_verify_<table>.json  — W4.1 Ed25519 signature verification result
+  Operator-side verification results run at export time (JSON).
+  anchor_verify_<table>.json       — W3 Merkle anchor verification result
+  signature_verify_<table>.json    — W4.1 Ed25519 signature verification result
+  These reports were produced by the operator; they are informational.
+  For independent re-verification see the manual steps below.
 
 public_key.b64 (if present)
   Base64-encoded Ed25519 public key used for anchor signature verification.
@@ -215,29 +241,53 @@ public_key.b64 (if present)
 README.txt
   This file.
 
-WHAT CAN BE VERIFIED OFFLINE
------------------------------
+WHAT CAN BE VERIFIED OFFLINE (no DATABASE_URL required)
+--------------------------------------------------------
 %s
   File integrity: recompute SHA256 hashes and compare to bundle_manifest.json
 
 WHAT REQUIRES LIVE INFRASTRUCTURE
 ----------------------------------
-W2 chain verification: requires AUDIT_CHAIN_SECRET (secret, not exported)
-  and canonical row content from the source database.
+W2 chain verification: requires AUDIT_CHAIN_SECRET (not exported) and
+  canonical row content from the source database. The chain_inventory.jsonl
+  file enables gap/continuity analysis only — it does not substitute for W2.
 W4 immudb sink re-fetch: requires connection to the immudb instance.
-  Use: audit-verify --verify-sink --immudb-addr <addr> ...
-  The sink_ref values in anchors.jsonl identify what to fetch.
+  The sink_ref values in anchors.jsonl identify which keys to fetch.
+  (W5.2 will add audit-verify --bundle support for this.)
 Merkle root recomputation from row content: requires source database access.
 
-VERIFYING ANCHOR SIGNATURES (if public_key.b64 is present)
------------------------------------------------------------
-Install audit-verify from the ShadowAI release, then run:
-  audit-verify --verify-signatures --pubkey-file public_key.b64 \
-               --table all --verbose
+NOTE: the current audit-verify binary reads anchor data from DATABASE_URL,
+not from this bundle. Using the --verify-signatures flag of audit-verify
+against the live database yields results equivalent to this bundle, but
+that is a live database check, NOT an offline check from the bundle.
+A future "audit-verify --bundle" mode (W5.2) will read directly from
+anchors.jsonl and not require DATABASE_URL.
 
-Or verify manually using the Ed25519 canonical form:
-  Canonical: v1|table|seq_lo|seq_hi|row_count|merkle_root_hex|created_at_epoch|sink_name|sink_ref|pubkey_id
-  Signature: signature_hex field in anchors.jsonl (hex-encoded, 64 bytes)
+MANUALLY VERIFYING ANCHOR SIGNATURES (if public_key.b64 is present)
+--------------------------------------------------------------------
+Each signed anchor in anchors.jsonl has a "signature_hex" field (64 bytes,
+hex-encoded). The Ed25519 signature covers the canonical string:
+
+  v1|<table>|<seq_lo>|<seq_hi>|<row_count>|<merkle_root_hex>|<created_at_epoch>|<sink_name>|<sink_ref>|<pubkey_id>
+
+where created_at_epoch is the Unix timestamp (seconds) of the created_at field.
+
+To verify using any Ed25519 library (Python example):
+  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+  import base64, binascii, json
+  pubkey = Ed25519PublicKey.from_public_bytes(base64.b64decode(open("public_key.b64").read()))
+  for line in open("anchors.jsonl"):
+      a = json.loads(line)
+      if not a.get("signature_hex"): continue
+      msg = "|".join([
+          "v1", a["table"], str(a["seq_lo"]), str(a["seq_hi"]), str(a["row_count"]),
+          a["merkle_root_hex"],
+          str(int(a["created_at"].rstrip("Z").split(".")[0].replace("T"," ").strip())),
+          a.get("sink_name",""), a.get("sink_ref",""), a.get("pubkey_id",""),
+      ]).encode()
+      sig = binascii.unhexlify(a["signature_hex"])
+      pubkey.verify(sig, msg)  # raises if invalid
+      print("OK", a["id"], a["table"], a["seq_lo"], "-", a["seq_hi"])
 `, tablesStr, offline)
 
 	_, err = f.WriteString(content)
