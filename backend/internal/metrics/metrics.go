@@ -272,7 +272,7 @@ var (
 	// Alert if rate(flag+block+would_block) rising: potential new threat pattern.
 	SemanticV2InspectTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "shadowai_semantic_v2_inspect_total",
-		Help: "Semantic V2 inspection outcomes: allow|flag|block|fail_open.",
+		Help: "Semantic V2 inspection outcomes: allow|flag|block|would_block|fail_open. would_block = blocked similarity in shadow_only mode (downgraded to flag).",
 	}, []string{"result"})
 )
 
@@ -358,7 +358,9 @@ func RecordJudgeRequest(provider, threatType string) {
 }
 
 // RecordSemanticV2Inspect records the outcome of one SA_v2 inspection.
-// result must be one of: "allow", "flag", "block", "fail_open".
+// result must be one of: "allow", "flag", "block", "would_block", "fail_open".
+// "would_block" is emitted when shadow_only=true downgrades a block-level
+// similarity to a flag; distinguishable from natural "flag" (between thresholds).
 func RecordSemanticV2Inspect(result string) {
 	SemanticV2InspectTotal.WithLabelValues(result).Inc()
 }
