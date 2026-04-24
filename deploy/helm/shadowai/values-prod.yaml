@@ -1,0 +1,74 @@
+# Production overrides for ShadowAI Helm chart.
+# Apply with: helm upgrade shadowai ./deploy/helm/shadowai -f values-prod.yaml
+
+replicaCount: 3
+
+image:
+  pullPolicy: Always
+  tag: "" # set at deploy time: --set image.tag=<git-sha>
+
+config:
+  appEnv: "production"
+  auditPayloadMode: "redacted"
+  auditRetentionDays: "90"
+  auditPurgeInterval: "24h"
+  streamingMode: "buffered"
+  # Prod streaming opt-in requires explicit override; do NOT add here.
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 65
+  targetMemoryUtilizationPercentage: 75
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2  # always keep 2 pods running during rolling updates
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  hosts:
+    - host: api.shadowai.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: shadowai-prod-tls
+      hosts:
+        - api.shadowai.example.com
+
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  failureThreshold: 4
+
+readinessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 2
+
+migrations:
+  enabled: true
+  enterpriseMigrationsDir: "/migrations-enterprise"
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: shadowai
+        topologyKey: kubernetes.io/hostname

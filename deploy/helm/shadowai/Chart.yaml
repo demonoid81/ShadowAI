@@ -1,0 +1,13 @@
+apiVersion: v2
+name: shadowai
+description: ShadowAI — enterprise LLM proxy with governance, audit, and WORM evidence.
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - llm
+  - proxy
+  - governance
+  - enterprise
+maintainers:
+  - name: ShadowAI Team

@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "shadowai.fullname" . }}
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "shadowai.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0   # zero-downtime: always bring up new pod first
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        # Force pod restart when the secret changes (checksum-based).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "shadowai.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "shadowai.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Run migrations before the main container starts.
+      {{- if .Values.migrations.enabled }}
+      initContainers:
+        - name: migrate
+          image: {{ include "shadowai.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - migrate
+            - --dir
+            - /migrations
+            {{- if .Values.migrations.enterpriseMigrationsDir }}
+            - --enterprise-dir
+            - {{ .Values.migrations.enterpriseMigrationsDir }}
+            {{- end }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: databaseUrl
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "shadowai.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            # Secrets injected from Kubernetes Secret.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: databaseUrl
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: jwtSecret
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: redisUrl
+            {{- if .Values.config.appEnv }}
+            - name: APP_ENV
+              value: {{ .Values.config.appEnv | quote }}
+            {{- end }}
+            {{- if .Values.config.serverPort }}
+            - name: SERVER_PORT
+              value: {{ .Values.config.serverPort | quote }}
+            {{- end }}
+            {{- if .Values.config.auditPayloadMode }}
+            - name: AUDIT_PAYLOAD_MODE
+              value: {{ .Values.config.auditPayloadMode | quote }}
+            {{- end }}
+            {{- if .Values.config.auditRetentionDays }}
+            - name: AUDIT_RETENTION_DAYS
+              value: {{ .Values.config.auditRetentionDays | quote }}
+            {{- end }}
+            {{- if .Values.config.auditPurgeInterval }}
+            - name: AUDIT_PURGE_INTERVAL
+              value: {{ .Values.config.auditPurgeInterval | quote }}
+            {{- end }}
+            {{- if .Values.config.streamingMode }}
+            - name: STREAMING_MODE
+              value: {{ .Values.config.streamingMode | quote }}
+            {{- end }}
+            {{- if .Values.config.firewallEnabled }}
+            - name: FIREWALL_ENABLED
+              value: {{ .Values.config.firewallEnabled | quote }}
+            {{- end }}
+            # Mount remaining config from ConfigMap.
+            - name: CONFIGMAP_LOADED
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: {{ include "shadowai.fullname" . }}-config
+                optional: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30

@@ -1,0 +1,148 @@
+# ShadowAI Helm chart — base values (dev/staging defaults).
+# Override with values-prod.yaml for production.
+#
+# SECRET VALUES (database passwords, JWT secrets, API keys) must NEVER be
+# placed here. Use:
+#   - Kubernetes Secrets (created out-of-band or via external-secrets-operator)
+#   - Pass --set secrets.jwtSecret=... at deploy time
+#   - Seal with Sealed Secrets / Vault
+#
+# Required secrets (create before install):
+#   kubectl create secret generic shadowai-secrets \
+#     --from-literal=databaseUrl='postgres://...' \
+#     --from-literal=jwtSecret='...' \
+#     --from-literal=redisUrl='redis://...'
+
+replicaCount: 1
+
+image:
+  repository: shadowai
+  pullPolicy: IfNotPresent
+  tag: "latest"
+  # Set to "enterprise" for enterprise build.
+  variant: ""
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Secret reference. All sensitive values come from a K8s Secret.
+# Create the secret before installing the chart.
+existingSecret: "shadowai-secrets"
+
+# Non-secret application config passed as env vars.
+# See internal/config/config.go for all available options.
+config:
+  appEnv: "development"
+  serverPort: "8080"
+  auditPayloadMode: "redacted"
+  auditRetentionDays: "30"
+  auditPurgeInterval: "24h"
+  auditPurgeChunkSize: "1000"
+  streamingMode: "buffered"
+  firewallEnabled: "true"
+  logLevel: "info"
+  # Add more env vars as needed.
+  # Example: OIDC_ENABLED: "true"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx.ingress.kubernetes.io/rate-limit: "100"
+  hosts:
+    - host: shadowai.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: shadowai-tls
+  #    hosts:
+  #      - shadowai.example.com
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Liveness: is the process alive?
+livenessProbe:
+  httpGet:
+    path: /api/health
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Readiness: can the process serve traffic? (checks DB + Redis)
+readinessProbe:
+  httpGet:
+    path: /api/ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Run database migrations as an init container before the app starts.
+migrations:
+  enabled: true
+  enterpriseMigrationsDir: ""  # set to /migrations-enterprise for enterprise builds
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/metrics"
+  prometheus.io/port: "8080"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shadowai
+          topologyKey: kubernetes.io/hostname
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

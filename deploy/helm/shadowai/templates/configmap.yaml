@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shadowai.fullname" . }}-config
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+data:
+  # Non-secret application config. Secrets come from the Kubernetes Secret.
+  # This ConfigMap is mounted as envFrom in the deployment.
+  {{- range $key, $value := .Values.config }}
+  {{ $key | upper | replace "-" "_" }}: {{ $value | quote }}
+  {{- end }}

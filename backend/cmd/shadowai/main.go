@@ -30,6 +30,7 @@ import (
 	rdb "github.com/shadowai/backend/internal/platform/redis"
 	"github.com/shadowai/backend/internal/policy"
 	"github.com/shadowai/backend/internal/proxy"
+	"github.com/shadowai/backend/internal/health"
 )
 
 func main() {
@@ -421,11 +422,12 @@ func main() {
 	entBundle.RegisterPublicRoutes(publicAuth)
 	publicAuth.Use(mw.RateLimitPublic(redisClient, 20, time.Minute))
 
-	// Health check
-	r.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
-	}).Methods("GET")
+	// PR-O1: Kubernetes liveness + readiness probes.
+	// Liveness  → always 200 (process is alive).
+	// Readiness → 200 if DB+Redis reachable, 503 otherwise.
+	readinessChecker := &health.ReadinessChecker{DB: db, Redis: redisClient}
+	r.HandleFunc("/api/health", health.LivenessHandler).Methods("GET")
+	r.HandleFunc("/api/ready", readinessChecker.Ready).Methods("GET")
 
 	// Prometheus /metrics endpoint. Без auth middleware (Prometheus scrapers
 	// не авторизуются JWT). Ограничивать на уровне infra (ingress/firewall).

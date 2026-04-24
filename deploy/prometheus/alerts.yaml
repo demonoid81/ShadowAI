@@ -1,0 +1,181 @@
+# PR-O1: ShadowAI Prometheus Alert Rules
+#
+# Apply via Prometheus Operator PrometheusRule CRD or include in prometheus.yml.
+# All alerts use 5m evaluation intervals and target the shadowai namespace.
+#
+# Severity levels:
+#   critical — immediate action required; PagerDuty/on-call
+#   warning  — investigate within the hour
+#   info     — awareness only; review during business hours
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shadowai-alerts
+  namespace: monitoring
+  labels:
+    app: prometheus
+    role: alert-rules
+spec:
+  groups:
+    # -------------------------------------------------------------------------
+    # Availability
+    # -------------------------------------------------------------------------
+    - name: shadowai.availability
+      rules:
+        - alert: ShadowAIDown
+          expr: up{job="shadowai"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ShadowAI instance down"
+            description: "ShadowAI instance {{ $labels.instance }} has been down for more than 2 minutes."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#instance-down"
+
+        - alert: ShadowAIReadinessFailure
+          expr: |
+            sum(kube_pod_status_ready{namespace="shadowai", condition="true"})
+            /
+            sum(kube_pod_info{namespace="shadowai"}) < 0.5
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Less than 50% of ShadowAI pods ready"
+            description: "Only {{ $value | humanizePercentage }} of ShadowAI pods are ready. Possible deployment failure or dependency outage."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#readiness-failure"
+
+    # -------------------------------------------------------------------------
+    # Error rates
+    # -------------------------------------------------------------------------
+    - name: shadowai.errors
+      rules:
+        - alert: ShadowAIHighErrorRate
+          expr: |
+            rate(http_requests_total{job="shadowai", status=~"5.."}[5m])
+            /
+            rate(http_requests_total{job="shadowai"}[5m]) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ShadowAI HTTP 5xx error rate > 5%"
+            description: "5xx error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+    # -------------------------------------------------------------------------
+    # SIEM delivery
+    # -------------------------------------------------------------------------
+    - name: shadowai.siem
+      rules:
+        - alert: SIEMQueueDeep
+          expr: shadowai_siem_queue_depth > 800
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SIEM async queue depth > 800"
+            description: "SIEM queue depth is {{ $value }}. Max capacity is {{ .Values.siem.queueSize | default 1000 }}. SIEM delivery is falling behind."
+
+        - alert: SIEMDroppedEvents
+          expr: rate(shadowai_siem_dropped_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SIEM events being dropped (backpressure)"
+            description: "SIEM is dropping {{ $value | humanize }} events/sec. SIEM endpoint may be unreachable or too slow."
+
+        - alert: SIEMBatchDeliveryFailing
+          expr: |
+            rate(shadowai_siem_retry_total{outcome="fail_all"}[10m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "SIEM batch delivery permanently failing"
+            description: "SIEM batches are failing all retries. Admin events may not be reaching the SIEM sink."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#siem-failure"
+
+    # -------------------------------------------------------------------------
+    # Firewall / Security
+    # -------------------------------------------------------------------------
+    - name: shadowai.firewall
+      rules:
+        - alert: SemanticV2FailOpenHigh
+          expr: |
+            rate(shadowai_semantic_v2_inspect_total{result="fail_open"}[10m])
+            /
+            rate(shadowai_semantic_v2_inspect_total[10m]) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Semantic V2 fail-open rate > 5%"
+            description: "{{ $value | humanizePercentage }} of SA_v2 inspections are failing open (embedding service degraded). Threat detection is reduced."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#semantic-v2-degraded"
+
+        - alert: FirewallBlockRateSpike
+          expr: |
+            rate(shadowai_firewall_decisions_total{action="block"}[10m])
+            > 5 * rate(shadowai_firewall_decisions_total{action="block"}[1h] offset 10m)
+          for: 5m
+          labels:
+            severity: info
+          annotations:
+            summary: "Firewall block rate spiked 5x vs 1h baseline"
+            description: "Current block rate {{ $value | humanize }}/s is 5x above the 1-hour baseline. May indicate an attack pattern or misconfiguration."
+
+        - alert: StreamingShadowMismatchHigh
+          expr: |
+            rate(shadowai_streaming_shadow_mismatch_total[10m])
+            /
+            rate(shadowai_streaming_shadow_compare_total[10m]) > 0.10
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Streaming shadow mismatch rate > 10%"
+            description: "{{ $value | humanizePercentage }} of shadow comparisons are mismatching. Review before promoting streaming=incremental to prod."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#streaming-shadow-mismatch"
+
+    # -------------------------------------------------------------------------
+    # Audit chain / WORM evidence
+    # -------------------------------------------------------------------------
+    - name: shadowai.audit
+      rules:
+        - alert: AuditChainBreakDetected
+          expr: shadowai_chain_breaks_total > 0
+          for: 0m   # immediate
+          labels:
+            severity: critical
+          annotations:
+            summary: "Audit chain integrity break detected"
+            description: "A HMAC chain break has been detected in the audit log. Possible tampering. Run audit-verify immediately."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#chain-break"
+
+        - alert: AuditQueueHigh
+          expr: shadowai_audit_queue_depth > 1000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Audit queue depth > 1000"
+            description: "Audit queue depth is {{ $value }}. DB writes may be falling behind."
+
+    # -------------------------------------------------------------------------
+    # Latency
+    # -------------------------------------------------------------------------
+    - name: shadowai.latency
+      rules:
+        - alert: ShadowAIHighP99Latency
+          expr: |
+            histogram_quantile(0.99,
+              rate(http_request_duration_seconds_bucket{job="shadowai"}[5m])
+            ) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ShadowAI P99 latency > 10s"
+            description: "P99 request latency is {{ $value | humanizeDuration }}. LLM provider may be slow or requests are queuing."
