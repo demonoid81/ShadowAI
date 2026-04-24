@@ -131,17 +131,22 @@ func (r *Repository) GetByOIDCSubject(ctx context.Context, issuer, subject strin
 
 // CreateUserOIDC inserts a new user created via OIDC auto-provision.
 // Password is intentionally empty (OIDC users authenticate via IdP only).
+// api_key is NULL — users.api_key has a UNIQUE constraint; inserting '' would collide
+// with any other empty-string API key (including a second OIDC-provisioned user).
 func (r *Repository) CreateUserOIDC(ctx context.Context, u *domain.User) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, password, role, department, api_key, is_active, token_version,
+		`INSERT INTO users (id, email, password, role, department, is_active, token_version,
 		                   oidc_issuer, oidc_subject, last_oidc_login_at)
-		 VALUES ($1, $2, '', $3, $4, '', true, 0, $5, $6, $7)`,
+		 VALUES ($1, $2, '', $3, $4, true, 0, $5, $6, $7)`,
 		u.ID, u.Email, u.Role, u.Department, u.OIDCIssuer, u.OIDCSubject, u.LastOIDCLoginAt)
 	return err
 }
 
-// UpdateUserOIDC updates OIDC identity fields + synced profile fields.
-// Increments token_version if role or email changed (forces re-login via existing sessions).
+// UpdateUserOIDC updates OIDC identity fields + synced profile fields (email, role, department)
+// and the last_oidc_login_at timestamp. Called on every successful OIDC login.
+// Note: token_version is NOT incremented here. If role changed the caller is responsible
+// for deciding whether to invalidate sessions (rare in practice — role changes require
+// re-login naturally via token expiry).
 func (r *Repository) UpdateUserOIDC(ctx context.Context, u *domain.User) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE users

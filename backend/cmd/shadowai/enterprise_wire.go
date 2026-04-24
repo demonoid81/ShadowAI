@@ -113,8 +113,10 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			}
 			syncer := oidcauth.NewUserSyncer(deps.AuthRepo, oidcCfg, deps.AuthSvc)
 			secure := !strings.HasPrefix(deps.Cfg.OIDCRedirectURL, "http://localhost")
+			discCtx, discCancel := context.WithTimeout(context.Background(), deps.Cfg.OIDCDiscoveryTimeout)
+			defer discCancel()
 			oidcHandler, err := oidcauth.NewHandler(
-				context.Background(),
+				discCtx,
 				oidcCfg,
 				syncer,
 				deps.AuthSvc,

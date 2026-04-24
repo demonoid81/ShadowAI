@@ -58,6 +58,17 @@ type syncRepo interface {
 	UpdateUserOIDC(ctx context.Context, u *domain.User) error
 }
 
+// requireVerifiedEmail mirrors UserSyncer.requireVerifiedEmail for test helpers.
+func (s *syncerForTest) requireVerifiedEmail(claims IDTokenClaims, op string) error {
+	if s.cfg.AllowUnverifiedEmail {
+		return nil
+	}
+	if !claims.EmailVerified {
+		return errAccessDenied(op + " requires email_verified=true")
+	}
+	return nil
+}
+
 // sync replicates UserSyncer.Sync logic for testing without a real *auth.Repository.
 func (s *syncerForTest) sync(ctx context.Context, issuer string, claims IDTokenClaims) (SyncResult, error) {
 	user, err := s.repo.GetByOIDCSubject(ctx, issuer, claims.Subject)
@@ -71,6 +82,9 @@ func (s *syncerForTest) sync(ctx context.Context, issuer string, claims IDTokenC
 		return syncExisting(ctx, s.repo, s.cfg, user, issuer, claims)
 	}
 	if claims.Email != "" && s.cfg.LinkByEmail {
+		if err := s.requireVerifiedEmail(claims, "link_by_email"); err != nil {
+			return SyncResult{}, err
+		}
 		byEmail, err := s.repo.GetByEmail(ctx, claims.Email)
 		if err != nil && err != sql.ErrNoRows {
 			return SyncResult{}, err
@@ -92,6 +106,9 @@ func (s *syncerForTest) sync(ctx context.Context, issuer string, claims IDTokenC
 		}
 	}
 	if s.cfg.AutoProvision {
+		if err := s.requireVerifiedEmail(claims, "auto_provision"); err != nil {
+			return SyncResult{}, err
+		}
 		return provision(ctx, s.repo, s.cfg, issuer, claims)
 	}
 	return SyncResult{}, errAccessDenied("no matching account")
@@ -105,35 +122,25 @@ func errAccessDenied(s string) error    { return accessDeniedErr("oidc: " + s) }
 func syncExisting(ctx context.Context, repo syncRepo, cfg *Config, user *domain.User, issuer string, claims IDTokenClaims) (SyncResult, error) {
 	res := SyncResult{User: user, Action: "login"}
 	now := time.Now().UTC()
-	changed := false
-	if user.OIDCIssuer == nil || *user.OIDCIssuer != issuer {
-		user.OIDCIssuer = &issuer
-		changed = true
-	}
-	if user.OIDCSubject == nil || *user.OIDCSubject != claims.Subject {
-		user.OIDCSubject = &claims.Subject
-		changed = true
-	}
+	// Always update identity fields and timestamp.
+	user.OIDCIssuer = &issuer
+	user.OIDCSubject = &claims.Subject
 	user.LastOIDCLoginAt = &now
-	if claims.Email != "" && claims.Email != user.Email {
+	if claims.Email != "" && claims.Email != user.Email && (cfg.AllowUnverifiedEmail || claims.EmailVerified) {
 		user.Email = claims.Email
-		changed = true
 	}
-	if role := cfg.MapRole(claims.Groups); role != "" {
-		if role != user.Role {
-			user.Role = role
-			res.RoleMapped = true
-			changed = true
-		}
+	if role := cfg.MapRole(claims.Groups); role != "" && role != user.Role {
+		user.Role = role
+		res.RoleMapped = true
 	}
 	if claims.Department != "" && (user.Department == nil || *user.Department != claims.Department) {
 		dept := claims.Department
 		user.Department = &dept
 		res.DeptSynced = true
-		changed = true
 	}
-	if changed {
-		repo.UpdateUserOIDC(ctx, user)
+	// Always persist (at minimum LastOIDCLoginAt changed).
+	repo.UpdateUserOIDC(ctx, user)
+	if res.RoleMapped || res.DeptSynced {
 		res.Action = "synced"
 	}
 	return res, nil
@@ -179,12 +186,34 @@ func TestSync_SubjectMatch_ReturnsLogin(t *testing.T) {
 		byEmail:   map[string]*domain.User{},
 	}
 	s := newTestSyncer(&Config{}, repo)
-	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{Subject: subj, Email: "user@example.com"})
+	// Subject match does NOT require email_verified — subject binding is stable.
+	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{Subject: subj, Email: "user@example.com", EmailVerified: false})
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if res.Action != "login" && res.Action != "synced" {
 		t.Errorf("action = %q, want login or synced", res.Action)
+	}
+}
+
+// TestSync_SubjectMatch_LastLoginAlwaysSaved — LastOIDCLoginAt is persisted on
+// every login, even when nothing else changed.
+func TestSync_SubjectMatch_LastLoginAlwaysSaved(t *testing.T) {
+	subj := "sub-ts"
+	user := &domain.User{ID: "u-ts", Email: "ts@example.com", Role: "user", IsActive: true,
+		OIDCIssuer: func() *string { s := testIssuer; return &s }(), OIDCSubject: &subj}
+	repo := &mockSyncRepo{
+		bySubject: map[string]*domain.User{testIssuer + ":" + subj: user},
+		byEmail:   map[string]*domain.User{},
+	}
+	s := newTestSyncer(&Config{}, repo)
+	_, err := s.sync(context.Background(), testIssuer, IDTokenClaims{Subject: subj})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	// UpdateUserOIDC must be called even when no profile fields changed.
+	if len(repo.updated) == 0 {
+		t.Error("UpdateUserOIDC must be called on every login to persist LastOIDCLoginAt")
 	}
 }
 
@@ -211,12 +240,30 @@ func TestSync_LinkByEmail_WhenEnabled(t *testing.T) {
 		byEmail:   map[string]*domain.User{"link@example.com": user},
 	}
 	s := newTestSyncer(&Config{LinkByEmail: true}, repo)
-	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{Subject: "new-sub", Email: "link@example.com"})
+	// Must have EmailVerified=true for link_by_email to work.
+	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{Subject: "new-sub", Email: "link@example.com", EmailVerified: true})
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
 	if res.Action != "linked" {
 		t.Errorf("action = %q, want linked", res.Action)
+	}
+}
+
+// TestSync_LinkByEmail_UnverifiedEmail_Rejected — unverified email + link_by_email
+// must be rejected to prevent account-takeover.
+func TestSync_LinkByEmail_UnverifiedEmail_Rejected(t *testing.T) {
+	user := &domain.User{ID: "u-ev", Email: "victim@example.com", IsActive: true}
+	repo := &mockSyncRepo{
+		bySubject: map[string]*domain.User{},
+		byEmail:   map[string]*domain.User{"victim@example.com": user},
+	}
+	s := newTestSyncer(&Config{LinkByEmail: true, AllowUnverifiedEmail: false}, repo)
+	_, err := s.sync(context.Background(), testIssuer, IDTokenClaims{
+		Subject: "attacker-sub", Email: "victim@example.com", EmailVerified: false,
+	})
+	if err == nil {
+		t.Error("unverified email link_by_email: expected error (account-takeover prevention), got nil")
 	}
 }
 
@@ -242,7 +289,7 @@ func TestSync_AutoProvision_CreatesUser(t *testing.T) {
 	repo := &mockSyncRepo{bySubject: map[string]*domain.User{}, byEmail: map[string]*domain.User{}}
 	s := newTestSyncer(&Config{AutoProvision: true}, repo)
 	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{
-		Subject: "new-sub", Email: "new@example.com",
+		Subject: "new-sub", Email: "new@example.com", EmailVerified: true,
 	})
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -275,7 +322,7 @@ func TestSync_RoleMapping_FromGroups(t *testing.T) {
 		RoleMap:       map[string]string{"admins": "admin"},
 	}, repo)
 	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{
-		Subject: "s", Email: "a@x.com", Groups: []string{"admins"},
+		Subject: "s", Email: "a@x.com", EmailVerified: true, Groups: []string{"admins"},
 	})
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -292,7 +339,7 @@ func TestSync_DepartmentClaim_Synced(t *testing.T) {
 	repo := &mockSyncRepo{bySubject: map[string]*domain.User{}, byEmail: map[string]*domain.User{}}
 	s := newTestSyncer(&Config{AutoProvision: true, DepartmentClaim: "department"}, repo)
 	res, err := s.sync(context.Background(), testIssuer, IDTokenClaims{
-		Subject: "s", Email: "d@x.com", Department: "finance",
+		Subject: "s", Email: "d@x.com", EmailVerified: true, Department: "finance",
 	})
 	if err != nil {
 		t.Fatalf("provision: %v", err)

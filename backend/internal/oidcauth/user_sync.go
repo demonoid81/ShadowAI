@@ -20,6 +20,12 @@ import (
 type IDTokenClaims struct {
 	Subject    string   // "sub" claim — IdP-assigned user identifier
 	Email      string   // "email" claim
+	// EmailVerified reflects the "email_verified" claim from the ID token.
+	// OIDC spec allows IdPs to issue tokens with unverified emails. Using an
+	// unverified email for account linking or provisioning creates an
+	// account-takeover path: an attacker registers the target email at an IdP
+	// that doesn't verify it, triggering a link/provision for the victim's account.
+	EmailVerified bool
 	Name       string   // "name" claim (optional)
 	Groups     []string // "groups" claim — for role mapping
 	Department string   // extracted via Config.DepartmentClaim
@@ -46,14 +52,30 @@ type SyncResult struct {
 	DeptSynced    bool   // true if department was updated from IdP claim
 }
 
+// requireVerifiedEmail returns an error if the email is unverified and
+// AllowUnverifiedEmail is false. Use this before any email-dependent operation.
+func (s *UserSyncer) requireVerifiedEmail(claims IDTokenClaims, op string) error {
+	if s.cfg.AllowUnverifiedEmail {
+		return nil
+	}
+	if !claims.EmailVerified {
+		return fmt.Errorf("oidc: %s requires email_verified=true (set OIDC_ALLOW_UNVERIFIED_EMAIL=true to override — dangerous)", op)
+	}
+	return nil
+}
+
 // Sync resolves the OIDC claims to a ShadowAI user according to config:
 //
 //  1. Subject match → sync email/role/department; issue JWT.
-//  2. No subject + existing email → link only if LinkByEmail=true.
-//  3. No user → create only if AutoProvision=true.
+//  2. No subject + existing email → link only if LinkByEmail=true AND email verified.
+//  3. No user → create only if AutoProvision=true AND email verified.
 //  4. Inactive user → reject.
+//
+// email_verified is required for operations that use the email claim (link, provision,
+// email sync). Subject-match login does NOT require email_verified because the subject
+// was already bound to the account at a prior verified login.
 func (s *UserSyncer) Sync(ctx context.Context, issuer string, claims IDTokenClaims) (SyncResult, error) {
-	// 1. Subject match.
+	// 1. Subject match — email_verified NOT required here (subject binding is stable).
 	user, err := s.repo.GetByOIDCSubject(ctx, issuer, claims.Subject)
 	if err != nil && err != sql.ErrNoRows {
 		return SyncResult{}, fmt.Errorf("oidc sync: subject lookup: %w", err)
@@ -65,8 +87,11 @@ func (s *UserSyncer) Sync(ctx context.Context, issuer string, claims IDTokenClai
 		return s.syncExisting(ctx, user, issuer, claims)
 	}
 
-	// 2. Email link (if configured).
+	// 2. Email link (if configured) — requires verified email.
 	if claims.Email != "" && s.cfg.LinkByEmail {
+		if err := s.requireVerifiedEmail(claims, "link_by_email"); err != nil {
+			return SyncResult{}, err
+		}
 		byEmail, err := s.repo.GetByEmail(ctx, claims.Email)
 		if err != nil && err != sql.ErrNoRows {
 			return SyncResult{}, fmt.Errorf("oidc sync: email lookup: %w", err)
@@ -75,7 +100,6 @@ func (s *UserSyncer) Sync(ctx context.Context, issuer string, claims IDTokenClai
 			if !byEmail.IsActive {
 				return SyncResult{}, fmt.Errorf("oidc: account disabled")
 			}
-			// Link OIDC identity to the existing account.
 			now := time.Now().UTC()
 			byEmail.OIDCIssuer = &issuer
 			byEmail.OIDCSubject = &claims.Subject
@@ -89,8 +113,11 @@ func (s *UserSyncer) Sync(ctx context.Context, issuer string, claims IDTokenClai
 		}
 	}
 
-	// 3. Auto-provision.
+	// 3. Auto-provision — requires verified email.
 	if s.cfg.AutoProvision {
+		if err := s.requireVerifiedEmail(claims, "auto_provision"); err != nil {
+			return SyncResult{}, err
+		}
 		return s.provision(ctx, issuer, claims)
 	}
 
@@ -98,26 +125,24 @@ func (s *UserSyncer) Sync(ctx context.Context, issuer string, claims IDTokenClai
 }
 
 // syncExisting updates an existing user's fields from OIDC claims.
+// LastOIDCLoginAt is always updated (even if nothing else changed) so the
+// timestamp reflects the actual last login rather than the last profile change.
 func (s *UserSyncer) syncExisting(ctx context.Context, user *domain.User, issuer string, claims IDTokenClaims) (SyncResult, error) {
 	res := SyncResult{User: user, Action: "login"}
-	changed := false
 
-	// Update OIDC identity if needed (e.g. first link or subject refresh).
 	now := time.Now().UTC()
-	if user.OIDCIssuer == nil || *user.OIDCIssuer != issuer {
-		user.OIDCIssuer = &issuer
-		changed = true
-	}
-	if user.OIDCSubject == nil || *user.OIDCSubject != claims.Subject {
-		user.OIDCSubject = &claims.Subject
-		changed = true
-	}
+	// Always update OIDC identity fields and login timestamp.
+	user.OIDCIssuer = &issuer
+	user.OIDCSubject = &claims.Subject
 	user.LastOIDCLoginAt = &now
 
-	// Sync email from IdP (authoritative source).
+	// Sync email only when verified — unverified email sync is an account-takeover vector.
 	if claims.Email != "" && claims.Email != user.Email {
-		user.Email = claims.Email
-		changed = true
+		if err := s.requireVerifiedEmail(claims, "email_sync"); err == nil {
+			user.Email = claims.Email
+		}
+		// If email unverified + AllowUnverifiedEmail=false: keep existing email, no error.
+		// The login still succeeds via subject match.
 	}
 
 	// Sync role from groups claim.
@@ -126,7 +151,6 @@ func (s *UserSyncer) syncExisting(ctx context.Context, user *domain.User, issuer
 		if normalized != "" && normalized != user.Role {
 			user.Role = normalized
 			res.RoleMapped = true
-			changed = true
 		}
 	}
 
@@ -136,14 +160,14 @@ func (s *UserSyncer) syncExisting(ctx context.Context, user *domain.User, issuer
 			dept := claims.Department
 			user.Department = &dept
 			res.DeptSynced = true
-			changed = true
 		}
 	}
 
-	if changed {
-		if err := s.repo.UpdateUserOIDC(ctx, user); err != nil {
-			return res, fmt.Errorf("oidc sync: update user: %w", err)
-		}
+	// Always persist — at minimum LastOIDCLoginAt changed.
+	if err := s.repo.UpdateUserOIDC(ctx, user); err != nil {
+		return res, fmt.Errorf("oidc sync: update user: %w", err)
+	}
+	if res.RoleMapped || res.DeptSynced {
 		res.Action = "synced"
 	}
 	return res, nil

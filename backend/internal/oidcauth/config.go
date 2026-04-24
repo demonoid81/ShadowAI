@@ -27,6 +27,12 @@ type Config struct {
 	DepartmentClaim  string
 	AutoProvision    bool
 	LinkByEmail      bool
+	// AllowUnverifiedEmail disables the email_verified check.
+	// DANGEROUS: only set true for IdPs that don't support email_verified
+	// (e.g. some enterprise SAML-bridged providers). When false (default),
+	// link_by_email, auto_provision, and email sync reject unverified emails
+	// to prevent account-takeover via unverified email registration.
+	AllowUnverifiedEmail bool
 }
 
 // FromAppConfig builds an OIDCConfig from application config.
@@ -66,15 +72,16 @@ func FromAppConfig(cfg *config.Config) (*Config, error) {
 	}
 
 	return &Config{
-		IssuerURL:       cfg.OIDCIssuerURL,
-		ClientID:        cfg.OIDCClientID,
-		ClientSecret:    cfg.OIDCClientSecret,
-		RedirectURL:     cfg.OIDCRedirectURL,
-		Scopes:          scopes,
-		RoleMap:         roleMap,
-		DepartmentClaim: deptClaim,
-		AutoProvision:   cfg.OIDCAutoProvision,
-		LinkByEmail:     cfg.OIDCLinkByEmail,
+		IssuerURL:            cfg.OIDCIssuerURL,
+		ClientID:             cfg.OIDCClientID,
+		ClientSecret:         cfg.OIDCClientSecret,
+		RedirectURL:          cfg.OIDCRedirectURL,
+		Scopes:               scopes,
+		RoleMap:              roleMap,
+		DepartmentClaim:      deptClaim,
+		AutoProvision:        cfg.OIDCAutoProvision,
+		LinkByEmail:          cfg.OIDCLinkByEmail,
+		AllowUnverifiedEmail: cfg.OIDCAllowUnverifiedEmail,
 	}, nil
 }
 

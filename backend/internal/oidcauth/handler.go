@@ -102,8 +102,19 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 1. CSRF: verify state.
+	// 1. CSRF: verify that the state query param matches the browser-bound cookie
+	// AND is present in the server-side store. Two checks:
+	//   (a) Cookie equality: ties the flow to the initiating browser session.
+	//       Without this, the server-side store prevents CSRF from random state values
+	//       but not from an attacker replaying a state from the victim's store.
+	//   (b) Consume from store: verifies the state was issued by this server + not reused.
 	stateParam := r.URL.Query().Get("state")
+	stateCookie, cookieErr := r.Cookie(stateCookieName)
+	if cookieErr != nil || stateCookie.Value != stateParam {
+		h.recordFail(r, "state_cookie_mismatch", "")
+		writeOIDCError(w, http.StatusBadRequest, "invalid_state")
+		return
+	}
 	expectedNonce, err := h.states.Consume(stateParam)
 	if err != nil {
 		h.recordFail(r, "state_mismatch", "")
@@ -192,9 +203,18 @@ func extractClaims(c map[string]any, deptClaim string) IDTokenClaims {
 		}
 		return ""
 	}
+	// email_verified may be bool or string "true"/"false" depending on IdP.
+	emailVerified := false
+	switch v := c["email_verified"].(type) {
+	case bool:
+		emailVerified = v
+	case string:
+		emailVerified = v == "true"
+	}
 	claims := IDTokenClaims{
-		Email: str("email"),
-		Name:  str("name"),
+		Email:         str("email"),
+		EmailVerified: emailVerified,
+		Name:          str("name"),
 	}
 	if deptClaim != "" {
 		claims.Department = str(deptClaim)

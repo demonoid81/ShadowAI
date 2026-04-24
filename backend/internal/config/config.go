@@ -229,6 +229,13 @@ type Config struct {
 	// OIDC_LINK_BY_EMAIL — if no OIDC subject match, link to an existing
 	// account with matching email. Default false (explicit opt-in required).
 	OIDCLinkByEmail      bool
+	// OIDC_ALLOW_UNVERIFIED_EMAIL — disable email_verified check.
+	// DANGEROUS: only for IdPs that don't support the email_verified claim.
+	// Default false: unverified emails are rejected for link/provision/sync.
+	OIDCAllowUnverifiedEmail bool
+	// OIDC_DISCOVERY_TIMEOUT — timeout for OIDC provider discovery (JWKS fetch).
+	// Default 10s. If the IdP is unreachable, startup fails fast instead of hanging.
+	OIDCDiscoveryTimeout time.Duration
 
 	// PR-F7.1/F7.2/F7.3: explicit prod opt-in для STREAMING_MODE=incremental.
 	// Актуальные tradeoffs incremental (post-F7.2/F7.3):
@@ -314,8 +321,10 @@ func Load() *Config {
 		OIDCScopes:          getEnv("OIDC_SCOPES", "openid email profile"),
 		OIDCRoleMapJSON:     getEnv("OIDC_ROLE_MAP_JSON", ""),
 		OIDCDepartmentClaim: getEnv("OIDC_DEPARTMENT_CLAIM", "department"),
-		OIDCAutoProvision:   getEnv("OIDC_AUTO_PROVISION", "false") == "true",
-		OIDCLinkByEmail:     getEnv("OIDC_LINK_BY_EMAIL", "false") == "true",
+		OIDCAutoProvision:        getEnv("OIDC_AUTO_PROVISION", "false") == "true",
+		OIDCLinkByEmail:          getEnv("OIDC_LINK_BY_EMAIL", "false") == "true",
+		OIDCAllowUnverifiedEmail: getEnv("OIDC_ALLOW_UNVERIFIED_EMAIL", "false") == "true",
+		OIDCDiscoveryTimeout:     getDuration("OIDC_DISCOVERY_TIMEOUT", 10*time.Second),
 
 		// PR-W4.2: immudb sink.
 		AuditImmuDBAddr:        getEnv("AUDIT_IMMUDB_ADDR", "127.0.0.1:3322"),
