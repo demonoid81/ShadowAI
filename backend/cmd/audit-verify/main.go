@@ -60,12 +60,13 @@ func main() {
 	//        [--immudb-user immudb --immudb-pass immudb]
 	// For each DB anchor with sink_name=immudb://, fetches manifest from immudb,
 	// cross-checks all fields, and verifies Ed25519 signature (if --pubkey provided).
-	verifySink     := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
+	verifySink      := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
 	immudbAddr      := flag.String("immudb-addr", "127.0.0.1:3322", "immudb REST address for --verify-sink")
 	immudbDB        := flag.String("immudb-db", "shadowai", "immudb database for --verify-sink")
 	immudbUser      := flag.String("immudb-user", "immudb", "immudb username for --verify-sink")
 	immudbPass      := flag.String("immudb-pass", "", "immudb password for --verify-sink")
 	immudbAPIPrefix := flag.String("immudb-api-prefix", "", "immudb REST API prefix (default /v1/immurestproxy for immugw; /api/v2 for immudb 2.x built-in REST)")
+	immudbProfile   := flag.String("immudb-rest-profile", "", "W4.3.1: immudb REST API profile: immugw_v1 (default) or immudb_v2 (immudb 1.9+ built-in REST)")
 	flag.Parse()
 
 	// Config errors exit with code 2 (not 1 which is verification failure).
@@ -209,6 +210,9 @@ func main() {
 		opts := chain.DefaultImmuDBOptions()
 		if *immudbAPIPrefix != "" {
 			opts.APIPrefix = *immudbAPIPrefix
+		}
+		if *immudbProfile != "" {
+			opts.Profile = chain.ImmuDBRESTProfile(*immudbProfile)
 		}
 		immuClient, err := chain.DialImmuDBWithOptions(ctx, *immudbAddr, *immudbUser, *immudbPass, *immudbDB, opts)
 		if err != nil {

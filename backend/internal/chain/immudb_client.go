@@ -8,40 +8,56 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// HTTPImmuDBClient — immudb REST client compatible with immugw REST proxy.
+// ImmuDBRESTProfile selects the REST API variant.
 //
-// API reference: https://docs.immudb.io/0.8.1/immugw/curl.html
+// immugw_v1 — immugw REST proxy (v0.8/v0.9). POST /v1/immurestproxy/* with
+// base64-encoded credentials and Bearer token authentication.
 //
-// Endpoint prefix: /v1/immurestproxy (immugw default).
-// Configurable via APIPrefix for deployments using a different base path.
+// immudb_v2 — immudb 1.9+ built-in REST at :8080/api/v2. Session-based auth
+// (POST /api/v2/authorization/session/open → sessionid header). No separate
+// "use database" step; database selected during session open.
+type ImmuDBRESTProfile string
+
+const (
+	// ProfileImmugwV1 is the immugw REST proxy profile (default).
+	ProfileImmugwV1 ImmuDBRESTProfile = "immugw_v1"
+	// ProfileImmudbV2 is the immudb 2.x built-in REST profile.
+	ProfileImmudbV2 ImmuDBRESTProfile = "immudb_v2"
+)
+
+// HTTPImmuDBClient — immudb REST client supporting immugw v1 and immudb v2 profiles.
 //
-// Authentication: POST /v1/immurestproxy/login with base64-encoded credentials
-// → Bearer token in subsequent requests.
-//
-// To deploy: run immugw alongside immudb, expose REST on its port (default 8080).
-// Or run immudb 2.x with built-in REST and set APIPrefix accordingly.
+// Select the profile via ImmuDBOptions.Profile when calling DialImmuDBWithOptions.
+// The zero value uses ProfileImmugwV1 (backwards-compatible default).
 type HTTPImmuDBClient struct {
 	baseURL   string
 	database  string
+	profile   ImmuDBRESTProfile
 	apiPrefix string
-	token     string
+	token     string    // ProfileImmugwV1: Bearer token
+	sessionID string    // ProfileImmudbV2: session ID
 	httpC     *http.Client
 }
 
 // ImmuDBOptions configures the immudb REST client.
 type ImmuDBOptions struct {
-	// APIPrefix is the REST API base path. Default: "/v1/immurestproxy".
-	// For immudb 2.x built-in REST use "/api/v2".
+	// Profile selects the REST API variant. Default: ProfileImmugwV1.
+	Profile ImmuDBRESTProfile
+	// APIPrefix overrides the default REST API base path.
+	// If empty, derived from Profile:
+	//   ProfileImmugwV1 → "/v1/immurestproxy"
+	//   ProfileImmudbV2 → "/api/v2"  (only used for v1 paths; v2 uses absolute paths)
 	APIPrefix string
 }
 
 // DefaultImmuDBOptions returns options for immugw (most common deployment).
 func DefaultImmuDBOptions() ImmuDBOptions {
-	return ImmuDBOptions{APIPrefix: "/v1/immurestproxy"}
+	return ImmuDBOptions{Profile: ProfileImmugwV1}
 }
 
 // DialImmuDB connects to immudb via REST proxy (immugw), authenticates, and
@@ -60,30 +76,74 @@ func DialImmuDBWithOptions(ctx context.Context, addr, username, password, databa
 	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
 		baseURL = "http://" + addr
 	}
+
+	profile := opts.Profile
+	if profile == "" {
+		profile = ProfileImmugwV1
+	}
+
 	apiPrefix := opts.APIPrefix
 	if apiPrefix == "" {
-		apiPrefix = "/v1/immurestproxy"
+		if profile == ProfileImmugwV1 {
+			apiPrefix = "/v1/immurestproxy"
+		}
+		// ProfileImmudbV2 uses absolute paths (/api/v2/*) regardless.
 	}
+
 	c := &HTTPImmuDBClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		database:  database,
+		profile:   profile,
 		apiPrefix: apiPrefix,
-		httpC: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		httpC:     &http.Client{Timeout: 10 * time.Second},
 	}
-	if err := c.login(ctx, username, password); err != nil {
-		return nil, fmt.Errorf("immudb dial: login: %w", err)
+
+	switch profile {
+	case ProfileImmudbV2:
+		if err := c.loginV2(ctx, username, password, database); err != nil {
+			return nil, fmt.Errorf("immudb dial: login: %w", err)
+		}
+	default: // ProfileImmugwV1
+		if err := c.loginV1(ctx, username, password); err != nil {
+			return nil, fmt.Errorf("immudb dial: login: %w", err)
+		}
+		if err := c.useDatabase(ctx, database); err != nil {
+			return nil, fmt.Errorf("immudb dial: use database %s: %w", database, err)
+		}
 	}
-	if err := c.useDatabase(ctx, database); err != nil {
-		return nil, fmt.Errorf("immudb dial: use database %s: %w", database, err)
-	}
+
 	return c, nil
 }
 
-// login: POST /v1/immurestproxy/login
+// loginV2: POST /api/v2/authorization/session/open
+// Plain JSON credentials (not base64). Database selected in auth request.
+// Response: {"sessionID":"..."}. Subsequent requests use "sessionid: <id>" header.
+func (c *HTTPImmuDBClient) loginV2(ctx context.Context, user, pass, database string) error {
+	body, _ := json.Marshal(map[string]string{
+		"username": user,
+		"password": pass,
+		"database": database,
+	})
+	resp, err := c.doJSON(ctx, "POST", "/api/v2/authorization/session/open", body)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		SessionID string `json:"sessionID"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return fmt.Errorf("login v2 response parse: %w", err)
+	}
+	if result.SessionID == "" {
+		return fmt.Errorf("login v2: empty sessionID in response")
+	}
+	c.sessionID = result.SessionID
+	return nil
+}
+
+// loginV1: POST /v1/immurestproxy/login
 // Fields user and password are base64-encoded per immugw spec.
-func (c *HTTPImmuDBClient) login(ctx context.Context, user, pass string) error {
+func (c *HTTPImmuDBClient) loginV1(ctx context.Context, user, pass string) error {
 	body, _ := json.Marshal(map[string]string{
 		"user":     base64.StdEncoding.EncodeToString([]byte(user)),
 		"password": base64.StdEncoding.EncodeToString([]byte(pass)),
@@ -105,17 +165,50 @@ func (c *HTTPImmuDBClient) login(ctx context.Context, user, pass string) error {
 	return nil
 }
 
-// useDatabase: GET /v1/immurestproxy/user/use/{database}
-// Switches the active database context.
+// useDatabase: GET /v1/immurestproxy/user/use/{database} (immugw_v1 only).
 func (c *HTTPImmuDBClient) useDatabase(ctx context.Context, db string) error {
 	_, err := c.doJSON(ctx, "GET", c.apiPrefix+"/user/use/"+db, nil)
 	return err
 }
 
-// Set: POST /v1/immurestproxy/item
-// key and value are base64-encoded per immugw spec.
-// Returns transaction ID from response "index" field.
+// Set stores key→value in immudb. Returns the transaction ID.
 func (c *HTTPImmuDBClient) Set(ctx context.Context, key string, value []byte) (uint64, error) {
+	if c.profile == ProfileImmudbV2 {
+		return c.setV2(ctx, key, value)
+	}
+	return c.setV1(ctx, key, value)
+}
+
+// setV2: POST /api/v2/db/set
+// Body: {"KVs":[{"key":"b64key","value":"b64value"}]}
+// Response: {"id":"txID",...}
+func (c *HTTPImmuDBClient) setV2(ctx context.Context, key string, value []byte) (uint64, error) {
+	body, _ := json.Marshal(map[string]any{
+		"KVs": []map[string]string{
+			{
+				"key":   base64.StdEncoding.EncodeToString([]byte(key)),
+				"value": base64.StdEncoding.EncodeToString(value),
+			},
+		},
+	})
+	resp, err := c.doJSON(ctx, "POST", "/api/v2/db/set", body)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(resp, &result)
+	if result.ID == "" {
+		return 0, nil
+	}
+	txID, _ := strconv.ParseUint(result.ID, 10, 64)
+	return txID, nil
+}
+
+// setV1: POST /v1/immurestproxy/item (immugw_v1).
+// key and value are base64-encoded per immugw spec.
+func (c *HTTPImmuDBClient) setV1(ctx context.Context, key string, value []byte) (uint64, error) {
 	body, _ := json.Marshal(map[string]string{
 		"key":   base64.StdEncoding.EncodeToString([]byte(key)),
 		"value": base64.StdEncoding.EncodeToString(value),
@@ -125,8 +218,8 @@ func (c *HTTPImmuDBClient) Set(ctx context.Context, key string, value []byte) (u
 		return 0, err
 	}
 	var result struct {
-		Index uint64 `json:"index"` // immugw v0.8 returns "index"
-		ID    uint64 `json:"id"`    // some versions use "id"
+		Index uint64 `json:"index"`
+		ID    uint64 `json:"id"`
 	}
 	_ = json.Unmarshal(resp, &result)
 	if result.ID > 0 {
@@ -135,10 +228,49 @@ func (c *HTTPImmuDBClient) Set(ctx context.Context, key string, value []byte) (u
 	return result.Index, nil
 }
 
-// Get: POST /v1/immurestproxy/item/get
-// key is base64-encoded per immugw spec.
-// Returns decoded value bytes.
+// Get retrieves the latest value for key from immudb.
 func (c *HTTPImmuDBClient) Get(ctx context.Context, key string) ([]byte, error) {
+	if c.profile == ProfileImmudbV2 {
+		return c.getV2(ctx, key)
+	}
+	return c.getV1(ctx, key)
+}
+
+// getV2: POST /api/v2/db/history with limit:1 desc:true.
+// Returns the most recent version of the value for the given key.
+// immudb v2 REST has no direct "get by key" endpoint; history with desc:true
+// returns the latest revision as the first entry.
+func (c *HTTPImmuDBClient) getV2(ctx context.Context, key string) ([]byte, error) {
+	body, _ := json.Marshal(map[string]any{
+		"key":   base64.StdEncoding.EncodeToString([]byte(key)),
+		"limit": 1,
+		"desc":  true,
+	})
+	resp, err := c.doJSON(ctx, "POST", "/api/v2/db/history", body)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Entries []struct {
+			Value string `json:"value"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("get v2 response parse: %w", err)
+	}
+	if len(result.Entries) == 0 {
+		return nil, fmt.Errorf("key not found: %s", key)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(result.Entries[0].Value)
+	if err != nil {
+		return nil, fmt.Errorf("decode value: %w", err)
+	}
+	return decoded, nil
+}
+
+// getV1: POST /v1/immurestproxy/item/get (immugw_v1).
+// key is base64-encoded per immugw spec.
+func (c *HTTPImmuDBClient) getV1(ctx context.Context, key string) ([]byte, error) {
 	body, _ := json.Marshal(map[string]string{
 		"key": base64.StdEncoding.EncodeToString([]byte(key)),
 	})
@@ -147,7 +279,7 @@ func (c *HTTPImmuDBClient) Get(ctx context.Context, key string) ([]byte, error) 
 		return nil, err
 	}
 	var result struct {
-		Value string `json:"value"` // base64
+		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, fmt.Errorf("get response parse: %w", err)
@@ -175,7 +307,9 @@ func (c *HTTPImmuDBClient) doJSON(ctx context.Context, method, path string, body
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
+	if c.sessionID != "" {
+		req.Header.Set("sessionid", c.sessionID)
+	} else if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.httpC.Do(req)

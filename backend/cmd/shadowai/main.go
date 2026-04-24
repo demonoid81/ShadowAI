@@ -352,6 +352,9 @@ func main() {
 			if cfg.AuditImmuDBAPIPrefix != "" {
 				opts.APIPrefix = cfg.AuditImmuDBAPIPrefix
 			}
+			if cfg.AuditImmuDBRestProfile != "" {
+				opts.Profile = chain.ImmuDBRESTProfile(cfg.AuditImmuDBRestProfile)
+			}
 			immuClient, err := chain.DialImmuDBWithOptions(
 				context.Background(),
 				cfg.AuditImmuDBAddr,

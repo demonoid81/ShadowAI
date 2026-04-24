@@ -158,6 +158,10 @@ type Config struct {
 	// AUDIT_IMMUDB_API_PREFIX — REST API base path for immudb/immugw.
 	// Default: "/v1/immurestproxy" (immugw). For immudb 2.x built-in REST: "/api/v2".
 	AuditImmuDBAPIPrefix string
+	// AUDIT_IMMUDB_REST_PROFILE — selects the REST API variant.
+	// "immugw_v1" (default) — immugw REST proxy, base64 creds, Bearer token.
+	// "immudb_v2" — immudb 1.9+ built-in REST, plain creds, session-based auth.
+	AuditImmuDBRestProfile string
 
 	// AuditAnchorSinkPath — путь к файлу для file:// sink.
 	// Append-only NDJSON. Создаётся если не существует.
@@ -261,11 +265,12 @@ func Load() *Config {
 		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
 
 		// PR-W4.2: immudb sink.
-		AuditImmuDBAddr:     getEnv("AUDIT_IMMUDB_ADDR", "127.0.0.1:3322"),
-		AuditImmuDBUsername: getEnv("AUDIT_IMMUDB_USERNAME", ""),
-		AuditImmuDBPassword: getEnv("AUDIT_IMMUDB_PASSWORD", ""),
-		AuditImmuDBDatabase:  getEnv("AUDIT_IMMUDB_DATABASE", ""),
-		AuditImmuDBAPIPrefix: getEnv("AUDIT_IMMUDB_API_PREFIX", ""),
+		AuditImmuDBAddr:        getEnv("AUDIT_IMMUDB_ADDR", "127.0.0.1:3322"),
+		AuditImmuDBUsername:    getEnv("AUDIT_IMMUDB_USERNAME", ""),
+		AuditImmuDBPassword:    getEnv("AUDIT_IMMUDB_PASSWORD", ""),
+		AuditImmuDBDatabase:    getEnv("AUDIT_IMMUDB_DATABASE", ""),
+		AuditImmuDBAPIPrefix:   getEnv("AUDIT_IMMUDB_API_PREFIX", ""),
+		AuditImmuDBRestProfile: getEnv("AUDIT_IMMUDB_REST_PROFILE", ""),
 
 		// PR-W4.1: anchor signing.
 		AuditAnchorSigningKey: getEnv("AUDIT_ANCHOR_SIGNING_KEY", ""),
