@@ -33,18 +33,16 @@ import (
 // enforcement. Enterprise-реализация (*Service) satisfies его.
 // В Core-build передаётся nil — proxy обходит enforcement.
 //
-// role — auth.Claims.Role caller'а. Используется только при
-// Mode=role_based (PR-G2); в других modes ignored. Proxy всегда
-// передаёт, чтобы signature не менялся при switch mode оператором.
+// role — auth.Claims.Role; используется при Mode=role_based и context_scoped.
+// department — auth.Claims.Department (trusted JWT); используется при context_scoped.
+// sensitivity — из X-Data-Sensitivity header, нормализован ExtractGovernanceContext.
+//   Отсутствие/неизвестное → "unknown" (fail-restrictive).
+// Proxy всегда передаёт все поля, чтобы signature не менялся при смене mode.
 type Evaluator interface {
-	Evaluate(ctx context.Context, role, provider, model string) (Decision, error)
+	Evaluate(ctx context.Context, role, department, sensitivity, provider, model string) (Decision, error)
 }
 
-// Mode — режим политики. Phase 1 поддерживает два значения.
-//
-// В будущем (G2) появятся:
-//   - role_based — allowlist per role;
-//   - department_scoped — matrix (user/department × provider/model).
+// Mode — режим политики.
 type Mode string
 
 const (
@@ -64,14 +62,63 @@ const (
 	// пар из Policy.RoleRules. Если role caller'а отсутствует в
 	// RoleRules — deny с code=unknown_role (deny-by-default).
 	ModeAllowlistRoleBased Mode = "role_based"
+
+	// ModeContextScoped — PR-G3. Allowlist применяется по контексту:
+	// (department, sensitivity, role) → []ProviderRule.
+	// Требует claims.Department (из JWT). Если контекст не покрыт
+	// ни одним ContextRule — deny-by-default.
+	ModeContextScoped Mode = "context_scoped"
 )
+
+// SensitivityLevel — уровень чувствительности данных для context_scoped routing.
+// Устанавливается caller'ом через заголовок X-Data-Sensitivity.
+// Отсутствующее или неизвестное значение → SensitivityUnknown (fail-restrictive).
+type SensitivityLevel string
+
+const (
+	SensitivityStandard     SensitivityLevel = "standard"
+	SensitivityConfidential SensitivityLevel = "confidential"
+	SensitivityRestricted   SensitivityLevel = "restricted"
+	// SensitivityUnknown — header не передан или значение не из enum.
+	// context_scoped запрещает доступ при unknown если ни одно правило
+	// явно не допускает его.
+	SensitivityUnknown SensitivityLevel = "unknown"
+)
+
+// IsValidSensitivity reports whether s is a known sensitivity level.
+func IsValidSensitivity(s string) bool {
+	switch SensitivityLevel(s) {
+	case SensitivityStandard, SensitivityConfidential, SensitivityRestricted, SensitivityUnknown:
+		return true
+	}
+	return false
+}
+
+// ContextRule — одно правило в context_scoped политике.
+// Совпадение — all-of: (department AND role AND sensitivity) → ProviderRule.
+// Wildcard "*" или пустая строка в Department/Role = match any.
+// Пустой slice в Sensitivity = match any sensitivity.
+// Пустой Rules с совпавшим контекстом = deny unknown_provider.
+type ContextRule struct {
+	// Department задаёт фильтр по department из JWT.
+	// "*" или "" = любой department (catch-all).
+	Department string `json:"department"`
+	// Role задаёт фильтр по role из JWT.
+	// "*" или "" = любая роль.
+	Role string `json:"role,omitempty"`
+	// Sensitivity задаёт список допустимых уровней чувствительности.
+	// Пустой = любая sensitivity.
+	Sensitivity []SensitivityLevel `json:"sensitivity,omitempty"`
+	// Rules — разрешённые (provider, model) пары при совпадении контекста.
+	Rules []ProviderRule `json:"rules"`
+}
 
 // IsValid — проверка входного значения mode перед сохранением в БД.
 // Любой unknown mode отвергается (защита от typo / future-tag из UI,
 // который этот backend не умеет обрабатывать).
 func (m Mode) IsValid() bool {
 	switch m {
-	case ModeDisabled, ModeAllowlistStrict, ModeAllowlistRoleBased:
+	case ModeDisabled, ModeAllowlistStrict, ModeAllowlistRoleBased, ModeContextScoped:
 		return true
 	}
 	return false
@@ -101,18 +148,19 @@ type RoleRule struct {
 // ровно одна IsActive=true строка в provider_governance_policies.
 //
 // Rules используется при Mode=allowlist_strict (PR-G1).
-// RoleRules используется при Mode=role_based (PR-G2). Поля могут
-// сосуществовать в одной row — применяется только то, что
-// соответствует активному Mode.
+// RoleRules используется при Mode=role_based (PR-G2).
+// ContextRules используется при Mode=context_scoped (PR-G3).
+// Поля могут сосуществовать — применяется только то, что соответствует Mode.
 type Policy struct {
-	ID        string
-	Name      string
-	Mode      Mode
-	Rules     []ProviderRule
-	RoleRules []RoleRule
-	UpdatedAt time.Time
-	UpdatedBy *string
-	IsActive  bool
+	ID           string
+	Name         string
+	Mode         Mode
+	Rules        []ProviderRule
+	RoleRules    []RoleRule
+	ContextRules []ContextRule // PR-G3
+	UpdatedAt    time.Time
+	UpdatedBy    *string
+	IsActive     bool
 }
 
 // DecisionKind — результат Evaluate: разрешено или запрещено.
@@ -122,18 +170,6 @@ const (
 	DecisionAllow DecisionKind = "allow"
 	DecisionDeny  DecisionKind = "deny"
 )
-
-// Decision — итог проверки (provider, model) против active policy.
-// Code — machine-readable, используется admin_event_logs.metadata.
-// Reason — human-readable (подходит для 403-response body и логов).
-// PolicyID — идентификатор применённой политики (пустой для
-// DecisionAllow при ModeDisabled и для policy_read_failure).
-type Decision struct {
-	Kind     DecisionKind
-	Code     string
-	Reason   string
-	PolicyID string
-}
 
 // Коды Decision.Code — стабильны, используются в admin_event_logs и
 // в unit-тестах. Менять с осторожностью.
@@ -146,4 +182,29 @@ const (
 	// CodeUnknownRole — PR-G2: caller.Role отсутствует в Policy.RoleRules
 	// при Mode=role_based. Deny-by-default для unspecified roles.
 	CodeUnknownRole = "unknown_role"
+	// PR-G3 context_scoped codes.
+	// CodeUnknownDepartment — department caller'а не покрыт ни одним ContextRule.
+	// Включает случай, когда department = "" (не назначен в JWT).
+	CodeUnknownDepartment = "unknown_department"
+	// CodeSensitivityDenied — department+role совпали с правилом, но sensitivity
+	// не разрешена этим правилом. Fail-restrictive: unknown/missing sensitivity → deny.
+	CodeSensitivityDenied = "sensitivity_denied"
+	// CodeUnknownContext — ни одно правило не покрывает данную комбинацию
+	// (dept+role+sensitivity), хотя department был найден.
+	CodeUnknownContext = "unknown_context"
 )
+
+// Decision — итог проверки (provider, model) против active policy.
+// Code — machine-readable, используется admin_event_logs.metadata.
+// Reason — human-readable (подходит для 403-response body и логов).
+// PolicyID — идентификатор применённой политики (пустой для
+// DecisionAllow при ModeDisabled и для policy_read_failure).
+// MatchedRuleIndex — PR-G3: индекс совпавшего ContextRule в
+// Policy.ContextRules, или -1 если правило не было найдено.
+type Decision struct {
+	Kind             DecisionKind
+	Code             string
+	Reason           string
+	PolicyID         string
+	MatchedRuleIndex int // -1 if not applicable (non-context_scoped) or no match
+}

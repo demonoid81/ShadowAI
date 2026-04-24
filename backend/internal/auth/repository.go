@@ -25,8 +25,8 @@ func (r *Repository) CreateUser(ctx context.Context, u *domain.User) error {
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, api_key, is_active, token_version, created_at, updated_at FROM users WHERE email = $1`, email).
-		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password, role, department, api_key, is_active, token_version, created_at, updated_at FROM users WHERE email = $1`, email).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +44,8 @@ func (r *Repository) GetByAPIKeyHash(ctx context.Context, apiKeyHash string) (*d
 func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, api_key, is_active, token_version, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
-		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password, role, department, api_key, is_active, token_version, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -55,8 +55,8 @@ func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.Us
 func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, api_key, is_active, token_version, created_at, updated_at FROM users WHERE id = $1`, id).
-		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password, role, department, api_key, is_active, token_version, created_at, updated_at FROM users WHERE id = $1`, id).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

@@ -254,13 +254,14 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3.6. PR-G1: Provider/Model Governance enforcement.
+	// 3.6. PR-G1/G3: Provider/Model Governance enforcement.
 	// Evaluate стоит после isModelSupported (чтобы провайдер вообще
 	// понимал модель) и ДО firewall/budget/DLP — governance-deny
 	// короткозамыкает запрос, не тратя токены на firewall-scan.
 	// nil governanceSvc (Core build / dev) обходит enforcement.
 	if h.governanceSvc != nil {
-		if dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, providerName, model); dec.Kind == governance.DecisionDeny {
+		gctx := auth.ExtractGovernanceContext(r, claims)
+		if dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, gctx.Department, gctx.Sensitivity, providerName, model); dec.Kind == governance.DecisionDeny {
 			h.recordGovernanceDeny(r, claims, providerName, model, dec)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -1510,12 +1511,13 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		allowed := candidates[:0]
 		var firstDeny governance.Decision
 		var firstDenyProvider, firstDenyModel string
+		gctxFallback := auth.ExtractGovernanceContext(r, claims)
 		for _, cand := range candidates {
 			cm := model
 			if cm == "" {
 				cm = cand.Provider.DefaultModel()
 			}
-			dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, cand.Name, cm)
+			dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, gctxFallback.Department, gctxFallback.Sensitivity, cand.Name, cm)
 			if dec.Kind == governance.DecisionAllow {
 				allowed = append(allowed, cand)
 				continue
@@ -2374,11 +2376,12 @@ func (h *Handler) recordGovernanceDeny(r *http.Request, claims *auth.Claims, pro
 		StatusCode:  http.StatusForbidden,
 		Success:     false,
 		Metadata: map[string]any{
-			"provider":  provider,
-			"model":     model,
-			"code":      dec.Code,
-			"policy_id": dec.PolicyID,
-			"reason":    dec.Reason,
+			"provider":           provider,
+			"model":              model,
+			"code":               dec.Code,
+			"policy_id":          dec.PolicyID,
+			"reason":             dec.Reason,
+			"matched_rule_index": dec.MatchedRuleIndex,
 		},
 	})
 }

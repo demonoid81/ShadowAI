@@ -34,20 +34,21 @@ func (r *PGRepository) GetActive(ctx context.Context) (*Policy, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
-	const q = `SELECT id, name, mode, rules_json, role_rules_json,
+	const q = `SELECT id, name, mode, rules_json, role_rules_json, context_rules_json,
 	           updated_at, updated_by, is_active
 	           FROM provider_governance_policies
 	           WHERE is_active = true
 	           ORDER BY updated_at DESC
 	           LIMIT 1`
 	var (
-		p             Policy
-		rulesJSON     []byte
-		roleRulesJSON []byte
-		updatedBy     sql.NullString
+		p                Policy
+		rulesJSON        []byte
+		roleRulesJSON    []byte
+		contextRulesJSON []byte
+		updatedBy        sql.NullString
 	)
 	err := r.db.QueryRowContext(ctx, q).Scan(
-		&p.ID, &p.Name, &p.Mode, &rulesJSON, &roleRulesJSON,
+		&p.ID, &p.Name, &p.Mode, &rulesJSON, &roleRulesJSON, &contextRulesJSON,
 		&p.UpdatedAt, &updatedBy, &p.IsActive,
 	)
 	if err != nil {
@@ -71,6 +72,11 @@ func (r *PGRepository) GetActive(ctx context.Context) (*Policy, error) {
 	if len(roleRulesJSON) > 0 {
 		if err := json.Unmarshal(roleRulesJSON, &p.RoleRules); err != nil {
 			return nil, fmt.Errorf("governance: role_rules_json corrupt: %w", err)
+		}
+	}
+	if len(contextRulesJSON) > 0 {
+		if err := json.Unmarshal(contextRulesJSON, &p.ContextRules); err != nil {
+			return nil, fmt.Errorf("governance: context_rules_json corrupt: %w", err)
 		}
 	}
 	return &p, nil
@@ -110,6 +116,14 @@ func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Po
 	if err != nil {
 		return nil, fmt.Errorf("governance: marshal role_rules: %w", err)
 	}
+	contextRules := p.ContextRules
+	if contextRules == nil {
+		contextRules = []ContextRule{}
+	}
+	contextRulesJSON, err := json.Marshal(contextRules)
+	if err != nil {
+		return nil, fmt.Errorf("governance: marshal context_rules: %w", err)
+	}
 	name := p.Name
 	if name == "" {
 		name = "default"
@@ -129,13 +143,13 @@ func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Po
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		const ins = `INSERT INTO provider_governance_policies
-		    (name, mode, rules_json, role_rules_json, updated_at, updated_by, is_active)
-		    VALUES ($1, $2, $3, $4, now(), $5, true)
+		    (name, mode, rules_json, role_rules_json, context_rules_json, updated_at, updated_by, is_active)
+		    VALUES ($1, $2, $3, $4, $5, now(), $6, true)
 		    RETURNING id, updated_at`
 		var newID string
 		var updAt time.Time
 		if err := r.db.QueryRowContext(ctx, ins,
-			name, string(p.Mode), rulesJSON, roleRulesJSON, actorArg,
+			name, string(p.Mode), rulesJSON, roleRulesJSON, contextRulesJSON, actorArg,
 		).Scan(&newID, &updAt); err != nil {
 			return nil, fmt.Errorf("governance: insert: %w", err)
 		}
@@ -143,6 +157,7 @@ func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Po
 		p.Name = name
 		p.Rules = rules
 		p.RoleRules = roleRules
+		p.ContextRules = contextRules
 		p.UpdatedAt = updAt
 		p.IsActive = true
 		if actor != "" {
@@ -153,12 +168,12 @@ func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Po
 	case err == nil:
 		const upd = `UPDATE provider_governance_policies
 		    SET name = $1, mode = $2, rules_json = $3, role_rules_json = $4,
-		        updated_at = now(), updated_by = $5
-		    WHERE id = $6
+		        context_rules_json = $5, updated_at = now(), updated_by = $6
+		    WHERE id = $7
 		    RETURNING updated_at`
 		var updAt time.Time
 		if err := r.db.QueryRowContext(ctx, upd,
-			name, string(p.Mode), rulesJSON, roleRulesJSON, actorArg, existingID,
+			name, string(p.Mode), rulesJSON, roleRulesJSON, contextRulesJSON, actorArg, existingID,
 		).Scan(&updAt); err != nil {
 			return nil, fmt.Errorf("governance: update: %w", err)
 		}
@@ -166,6 +181,7 @@ func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Po
 		p.Name = name
 		p.Rules = rules
 		p.RoleRules = roleRules
+		p.ContextRules = contextRules
 		p.UpdatedAt = updAt
 		p.IsActive = true
 		if actor != "" {

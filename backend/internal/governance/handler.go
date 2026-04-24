@@ -7,6 +7,7 @@ package governance
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/shadowai/backend/internal/adminaudit"
@@ -35,14 +36,15 @@ func NewHandler(svc *Service, adminAudit adminaudit.Recorder) *Handler {
 }
 
 type policyResponse struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	Mode      Mode           `json:"mode"`
-	Rules     []ProviderRule `json:"rules"`
-	RoleRules []RoleRule     `json:"role_rules"`
-	UpdatedAt string         `json:"updated_at"`
-	UpdatedBy *string        `json:"updated_by,omitempty"`
-	IsActive  bool           `json:"is_active"`
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Mode         Mode           `json:"mode"`
+	Rules        []ProviderRule `json:"rules"`
+	RoleRules    []RoleRule     `json:"role_rules"`
+	ContextRules []ContextRule  `json:"context_rules"`
+	UpdatedAt    string         `json:"updated_at"`
+	UpdatedBy    *string        `json:"updated_by,omitempty"`
+	IsActive     bool           `json:"is_active"`
 }
 
 type emptyPolicyResponse struct {
@@ -54,10 +56,11 @@ type errorResponse struct {
 }
 
 type upsertRequest struct {
-	Name      string         `json:"name"`
-	Mode      Mode           `json:"mode"`
-	Rules     []ProviderRule `json:"rules"`
-	RoleRules []RoleRule     `json:"role_rules"`
+	Name         string         `json:"name"`
+	Mode         Mode           `json:"mode"`
+	Rules        []ProviderRule `json:"rules"`
+	RoleRules    []RoleRule     `json:"role_rules"`
+	ContextRules []ContextRule  `json:"context_rules"`
 }
 
 // GetPolicy — current active. Если ни одной политики нет (сырой
@@ -115,13 +118,23 @@ func (h *Handler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := &Policy{
-		Name:      req.Name,
-		Mode:      req.Mode,
-		Rules:     req.Rules,
-		RoleRules: req.RoleRules,
+		Name:         req.Name,
+		Mode:         req.Mode,
+		Rules:        req.Rules,
+		RoleRules:    req.RoleRules,
+		ContextRules: req.ContextRules,
 	}
 	saved, err := h.svc.Upsert(r.Context(), p, claims.UserID)
 	if err != nil {
+		var valErr *ValidationError
+		if errors.As(err, &valErr) {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: valErr.Msg})
+			h.recordAdmin(r, "update", "", http.StatusBadRequest, false, map[string]any{
+				"error": "invalid_policy",
+				"detail": valErr.Msg,
+			})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
 		h.recordAdmin(r, "update", "", http.StatusInternalServerError, false, map[string]any{
 			"error": "upsert_failed",
@@ -130,9 +143,10 @@ func (h *Handler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, policyToResp(saved))
 	h.recordAdmin(r, "update", saved.ID, http.StatusOK, true, map[string]any{
-		"mode":            saved.Mode,
-		"rule_count":      len(saved.Rules),
-		"role_rule_count": len(saved.RoleRules),
+		"mode":               saved.Mode,
+		"rule_count":         len(saved.Rules),
+		"role_rule_count":    len(saved.RoleRules),
+		"context_rule_count": len(saved.ContextRules),
 	})
 }
 
@@ -171,15 +185,20 @@ func policyToResp(p *Policy) policyResponse {
 	if roleRules == nil {
 		roleRules = []RoleRule{}
 	}
+	contextRules := p.ContextRules
+	if contextRules == nil {
+		contextRules = []ContextRule{}
+	}
 	return policyResponse{
-		ID:        p.ID,
-		Name:      p.Name,
-		Mode:      p.Mode,
-		Rules:     rules,
-		RoleRules: roleRules,
-		UpdatedAt: updatedAt,
-		UpdatedBy: p.UpdatedBy,
-		IsActive:  p.IsActive,
+		ID:           p.ID,
+		Name:         p.Name,
+		Mode:         p.Mode,
+		Rules:        rules,
+		RoleRules:    roleRules,
+		ContextRules: contextRules,
+		UpdatedAt:    updatedAt,
+		UpdatedBy:    p.UpdatedBy,
+		IsActive:     p.IsActive,
 	}
 }
 

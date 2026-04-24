@@ -128,20 +128,39 @@ func (s *Service) GetActive(ctx context.Context) (*Policy, error) {
 // providers, dedupe моделей, стабильный порядок. Это гарантирует
 // canonical form в БД и защищает Evaluate от order-зависимости
 // duplicate-rules (review finding PR-G1).
+//
+// PR-G3: для ModeContextScoped — валидирует ContextRules:
+//   - non-empty slice required (пустой = deny-all = misconfiguration);
+//   - каждое правило должно иметь non-empty Rules;
+//   - Sensitivity values должны быть из enum (или empty = any).
+//
+// Validation errors возвращаются как *ValidationError — handler map'ит в 400.
 func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy, error) {
 	if s == nil || s.repo == nil {
 		return nil, fmt.Errorf("governance: service not configured")
 	}
 	if !p.Mode.IsValid() {
-		return nil, fmt.Errorf("governance: invalid mode %q", p.Mode)
+		return nil, &ValidationError{Msg: fmt.Sprintf("invalid mode %q", p.Mode)}
+	}
+	if p.Mode == ModeContextScoped {
+		if err := validateContextRules(p.ContextRules); err != nil {
+			return nil, err
+		}
 	}
 	p.Rules = normalizeRules(p.Rules)
 	p.RoleRules = normalizeRoleRules(p.RoleRules)
+	p.ContextRules = normalizeContextRules(p.ContextRules)
 	return s.repo.Upsert(ctx, p, actor)
 }
 
+// ValidationError — user-facing validation error from Service.Upsert.
+// Handler maps this to 400 Bad Request (not 500 Internal Server Error).
+type ValidationError struct{ Msg string }
+
+func (e *ValidationError) Error() string { return "governance: " + e.Msg }
+
 // Evaluate — основной entrypoint для proxy. Проверяет, разрешена ли
-// (role, provider, model)-тройка текущей active policy.
+// комбинация (role, department, sensitivity, provider, model) текущей active policy.
 //
 // Decision matrix:
 //
@@ -149,29 +168,26 @@ func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy,
 //	repo err                         → Deny  (policy_read_failure) + err
 //	policy == nil                    → Allow (governance_disabled)
 //	Mode == disabled                 → Allow (governance_disabled)
-//	Mode == allowlist_strict         → role ignored; strict-evaluate Rules
-//	Mode == role_based (PR-G2)       → find RoleRule by role:
-//	   role не в RoleRules            → Deny (unknown_role)
-//	   провайдер не в role's rules   → Deny (unknown_provider)
-//	   провайдер в, model не         → Deny (unknown_model)
-//	   оба match                     → Allow (allowed)
+//	Mode == allowlist_strict         → role/dept/sensitivity ignored; strict-evaluate Rules
+//	Mode == role_based (PR-G2)       → find RoleRule by role
+//	Mode == context_scoped (PR-G3)   → find ContextRule by (dept+role+sensitivity)
 //
-// Сравнение case-insensitive (OpenAI vs openai, GPT-4 vs gpt-4,
-// admin vs Admin).
-func (s *Service) Evaluate(ctx context.Context, role, provider, model string) (Decision, error) {
+// Сравнение case-insensitive.
+func (s *Service) Evaluate(ctx context.Context, role, department, sensitivity, provider, model string) (Decision, error) {
 	if s == nil || s.repo == nil {
-		return Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled}, nil
+		return Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled, MatchedRuleIndex: -1}, nil
 	}
 	p, err := s.repo.GetActive(ctx)
 	if err != nil {
 		return Decision{
-			Kind:   DecisionDeny,
-			Code:   CodePolicyReadFailure,
-			Reason: "не удалось прочитать governance-политику — fail-closed",
+			Kind:             DecisionDeny,
+			Code:             CodePolicyReadFailure,
+			Reason:           "не удалось прочитать governance-политику — fail-closed",
+			MatchedRuleIndex: -1,
 		}, err
 	}
 	if p == nil || p.Mode == ModeDisabled {
-		dec := Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled}
+		dec := Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled, MatchedRuleIndex: -1}
 		if p != nil {
 			dec.PolicyID = p.ID
 		}
@@ -179,17 +195,24 @@ func (s *Service) Evaluate(ctx context.Context, role, provider, model string) (D
 	}
 	switch p.Mode {
 	case ModeAllowlistStrict:
-		return evaluateRules(p.Rules, provider, model, p.ID), nil
+		dec := evaluateRules(p.Rules, provider, model, p.ID)
+		dec.MatchedRuleIndex = -1
+		return dec, nil
 	case ModeAllowlistRoleBased:
-		return evaluateRoleRules(p.RoleRules, role, provider, model, p.ID), nil
+		dec := evaluateRoleRules(p.RoleRules, role, provider, model, p.ID)
+		dec.MatchedRuleIndex = -1
+		return dec, nil
+	case ModeContextScoped:
+		return evaluateContextRules(p.ContextRules, role, department, sensitivity, provider, model, p.ID), nil
 	}
 	// Неизвестный mode — fail-closed (IsValid отсеял бы на Upsert,
 	// но direct-SQL мог внести невалидный value).
 	return Decision{
-		Kind:     DecisionDeny,
-		Code:     CodePolicyReadFailure,
-		Reason:   fmt.Sprintf("unknown policy mode %q", p.Mode),
-		PolicyID: p.ID,
+		Kind:             DecisionDeny,
+		Code:             CodePolicyReadFailure,
+		Reason:           fmt.Sprintf("unknown policy mode %q", p.Mode),
+		PolicyID:         p.ID,
+		MatchedRuleIndex: -1,
 	}, nil
 }
 
@@ -226,6 +249,131 @@ func evaluateRules(rules []ProviderRule, provider, model, policyID string) Decis
 		Code:     CodeUnknownProvider,
 		Reason:   fmt.Sprintf("провайдер %q не в governance-allowlist", provider),
 		PolicyID: policyID,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PR-G3: context_scoped implementation
+// ---------------------------------------------------------------------------
+
+// validateContextRules checks that ContextRules are structurally valid for prod.
+func validateContextRules(rules []ContextRule) error {
+	if len(rules) == 0 {
+		return &ValidationError{Msg: "context_scoped mode requires non-empty context_rules (empty = deny-all; configure rules or switch to disabled mode)"}
+	}
+	for i, cr := range rules {
+		if len(cr.Rules) == 0 {
+			return &ValidationError{Msg: fmt.Sprintf("context_rules[%d]: rules must be non-empty (empty rules = deny all providers for this context)", i)}
+		}
+		for _, s := range cr.Sensitivity {
+			if !IsValidSensitivity(string(s)) {
+				return &ValidationError{Msg: fmt.Sprintf("context_rules[%d]: unknown sensitivity %q (valid: standard|confidential|restricted|unknown)", i, s)}
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeContextRules normalises ContextRules for canonical storage.
+func normalizeContextRules(in []ContextRule) []ContextRule {
+	out := make([]ContextRule, 0, len(in))
+	for _, cr := range in {
+		cr.Department = strings.TrimSpace(cr.Department)
+		cr.Role = strings.ToLower(strings.TrimSpace(cr.Role))
+		cr.Rules = normalizeRules(cr.Rules)
+		// Normalise sensitivity to lowercase.
+		for i, s := range cr.Sensitivity {
+			cr.Sensitivity[i] = SensitivityLevel(strings.ToLower(string(s)))
+		}
+		out = append(out, cr)
+	}
+	return out
+}
+
+// evaluateContextRules implements PR-G3 context_scoped evaluation.
+// Iterates ContextRules in order (first full match wins).
+// Tracks best partial match for informative deny codes:
+//   - no dept match → CodeUnknownDepartment
+//   - dept+role matched but sensitivity failed → CodeSensitivityDenied
+//   - dept matched but role didn't → CodeUnknownContext
+//   - full context match → evaluateRules (may return CodeUnknownProvider/Model)
+func evaluateContextRules(rules []ContextRule, role, dept, sensitivity, provider, model, policyID string) Decision {
+	const (
+		bpNone            = 0
+		bpDeptMatched     = 1
+		bpDeptRoleMatched = 2 // dept+role matched but sensitivity failed
+	)
+	best := bpNone
+
+	for i, rule := range rules {
+		// Department match: "*" or "" = any.
+		if rule.Department != "" && rule.Department != "*" &&
+			!strings.EqualFold(rule.Department, dept) {
+			continue
+		}
+		if best < bpDeptMatched {
+			best = bpDeptMatched
+		}
+
+		// Role match: "*" or "" = any.
+		if rule.Role != "" && rule.Role != "*" &&
+			!strings.EqualFold(rule.Role, role) {
+			continue
+		}
+
+		// Sensitivity match: empty slice = any.
+		if len(rule.Sensitivity) > 0 {
+			sensitivityOK := false
+			for _, s := range rule.Sensitivity {
+				if strings.EqualFold(string(s), sensitivity) {
+					sensitivityOK = true
+					break
+				}
+			}
+			if !sensitivityOK {
+				if best < bpDeptRoleMatched {
+					best = bpDeptRoleMatched
+				}
+				continue
+			}
+		}
+
+		// Full context match — evaluate provider/model.
+		dec := evaluateRules(rule.Rules, provider, model, policyID)
+		dec.MatchedRuleIndex = i
+		return dec
+	}
+
+	// No full match; use best partial for informative error.
+	deptDisplay := dept
+	if dept == "" {
+		deptDisplay = "<empty>"
+	}
+	switch best {
+	case bpNone:
+		return Decision{
+			Kind:             DecisionDeny,
+			Code:             CodeUnknownDepartment,
+			Reason:           fmt.Sprintf("department %q not covered by any context rule (context_scoped requires explicit department assignment)", deptDisplay),
+			PolicyID:         policyID,
+			MatchedRuleIndex: -1,
+		}
+	case bpDeptMatched:
+		return Decision{
+			Kind:             DecisionDeny,
+			Code:             CodeUnknownContext,
+			Reason:           fmt.Sprintf("no context rule covers role=%q department=%q (role not matched by any rule for this department)", role, deptDisplay),
+			PolicyID:         policyID,
+			MatchedRuleIndex: -1,
+		}
+	default: // bpDeptRoleMatched — sensitivity failed
+		return Decision{
+			Kind:             DecisionDeny,
+			Code:             CodeSensitivityDenied,
+			Reason:           fmt.Sprintf("sensitivity=%q not permitted for department=%q role=%q by any context rule (check FIREWALL_SA_V2_SHADOW_ONLY or X-Data-Sensitivity header)", sensitivity, deptDisplay, role),
+			PolicyID:         policyID,
+			MatchedRuleIndex: -1,
+		}
 	}
 }
 

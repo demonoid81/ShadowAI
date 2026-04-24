@@ -40,10 +40,14 @@ var allowedRoles = map[string]struct{}{
 }
 
 type Claims struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
-	Role   string `json:"role"`
-	TokenVersion int `json:"tv"`
+	UserID       string `json:"user_id"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	// Department is the user's organizational department, populated from users.department.
+	// Used by PR-G3 context_scoped governance routing. Empty string = no department assigned.
+	// This field is server-issued (trusted). Request headers must NOT override it.
+	Department   string `json:"department,omitempty"`
+	TokenVersion int    `json:"tv"`
 	jwt.RegisteredClaims
 }
 
@@ -175,10 +179,15 @@ func (s *Service) GetRepo() *Repository {
 }
 
 func (s *Service) generateToken(u *domain.User) (string, error) {
+	dept := ""
+	if u.Department != nil {
+		dept = *u.Department
+	}
 	claims := &Claims{
 		UserID:       u.ID,
 		Email:        u.Email,
 		Role:         u.Role,
+		Department:   dept,
 		TokenVersion: u.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),

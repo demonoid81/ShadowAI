@@ -33,7 +33,7 @@ func (m *memRepo) Upsert(ctx context.Context, p *Policy, actor string) (*Policy,
 // Важно: nil-safe call через метод-receiver-pattern.
 func TestEvaluate_NilService_AllowsAll(t *testing.T) {
 	var s *Service // nil
-	dec, err := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, err := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -52,7 +52,7 @@ func TestEvaluate_NilService_AllowsAll(t *testing.T) {
 // политики с Mode=allowlist_strict.
 func TestEvaluate_NoPolicyInRepo_AllowsAll(t *testing.T) {
 	s := NewService(&memRepo{policy: nil})
-	dec, err := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, err := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -72,7 +72,7 @@ func TestEvaluate_ModeDisabled_AllowsAll(t *testing.T) {
 	s := NewService(&memRepo{policy: &Policy{
 		ID: "p-1", Mode: ModeDisabled, IsActive: true,
 	}})
-	dec, err := s.Evaluate(context.Background(), "", "anthropic", "claude-3-opus")
+	dec, err := s.Evaluate(context.Background(), "", "", "", "anthropic", "claude-3-opus")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -91,7 +91,7 @@ func TestEvaluate_Strict_AllowsKnownPair(t *testing.T) {
 			{Provider: "anthropic", Models: []string{"claude-3-opus"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow, decision=%+v", dec.Kind, dec)
 	}
@@ -113,7 +113,7 @@ func TestEvaluate_Strict_DeniesUnknownProvider(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "gemini", "gemini-pro")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "gemini", "gemini-pro")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny, decision=%+v", dec.Kind, dec)
 	}
@@ -136,7 +136,7 @@ func TestEvaluate_Strict_DeniesUnknownModelForKnownProvider(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o-mini"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny", dec.Kind)
 	}
@@ -155,7 +155,7 @@ func TestEvaluate_Strict_EmptyRules_DeniesAll(t *testing.T) {
 		ID: "p-1", Mode: ModeAllowlistStrict, IsActive: true,
 		Rules: nil,
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny", dec.Kind)
 	}
@@ -175,7 +175,7 @@ func TestEvaluate_Strict_EmptyModelsInRule_DeniesAllModels(t *testing.T) {
 			{Provider: "openai", Models: []string{}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionDeny {
 		t.Errorf("kind = %v, want Deny", dec.Kind)
 	}
@@ -195,7 +195,7 @@ func TestEvaluate_Strict_CaseInsensitiveMatch(t *testing.T) {
 			{Provider: "OpenAI", Models: []string{"GPT-4"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow (case-insensitive)", dec.Kind)
 	}
@@ -212,7 +212,7 @@ func TestEvaluate_Strict_CaseInsensitiveMatch(t *testing.T) {
 // Fail-open для availability недопустим.
 func TestEvaluate_RepoError_FailClosed(t *testing.T) {
 	s := NewService(&memRepo{err: errors.New("connection lost")})
-	dec, err := s.Evaluate(context.Background(), "", "openai", "gpt-4")
+	dec, err := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4")
 	if err == nil {
 		t.Error("err = nil, want non-nil (caller должен видеть root cause)")
 	}
@@ -242,7 +242,7 @@ func TestEvaluate_DuplicateProviderCaseVariants_MergesMatches(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o-mini"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4o-mini")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4o-mini")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow (модель присутствует во втором matching rule), decision=%+v", dec.Kind, dec)
 	}
@@ -259,7 +259,7 @@ func TestEvaluate_DuplicateProviderExact_MergesMatches(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-4o")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("kind = %v, want Allow для модели из второго rule", dec.Kind)
 	}
@@ -276,7 +276,7 @@ func TestEvaluate_DuplicateProvider_ModelInNeitherRule(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "", "openai", "gpt-5-beta")
+	dec, _ := s.Evaluate(context.Background(), "", "", "", "openai", "gpt-5-beta")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
 		t.Errorf("got %+v, want Deny/unknown_model", dec)
 	}
@@ -436,11 +436,11 @@ func TestEvaluate_RoleBased_AllowsKnownTriple(t *testing.T) {
 			}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "admin", "", "", "openai", "gpt-4o")
 	if dec.Kind != DecisionAllow || dec.Code != CodeAllowed {
 		t.Errorf("admin/openai/gpt-4o: %+v, want Allow/allowed", dec)
 	}
-	dec, _ = s.Evaluate(context.Background(), "analyst", "openai", "gpt-4o-mini")
+	dec, _ = s.Evaluate(context.Background(), "analyst", "", "", "openai", "gpt-4o-mini")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("analyst/openai/gpt-4o-mini: %+v, want Allow", dec)
 	}
@@ -460,7 +460,7 @@ func TestEvaluate_RoleBased_DeniesPrivilegedModelForLesserRole(t *testing.T) {
 			}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "analyst", "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "analyst", "", "", "openai", "gpt-4o")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
 		t.Errorf("analyst privileged model: %+v, want Deny/unknown_model", dec)
 	}
@@ -477,7 +477,7 @@ func TestEvaluate_RoleBased_UnknownRole_Denied(t *testing.T) {
 			}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "intern", "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "intern", "", "", "openai", "gpt-4o")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownRole {
 		t.Errorf("unknown role: %+v, want Deny/unknown_role", dec)
 	}
@@ -489,7 +489,7 @@ func TestEvaluate_RoleBased_EmptyRoleRules_DeniesAll(t *testing.T) {
 	s := NewService(&memRepo{policy: &Policy{
 		ID: "p-1", Mode: ModeAllowlistRoleBased, IsActive: true,
 	}})
-	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "admin", "", "", "openai", "gpt-4o")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownRole {
 		t.Errorf("empty role_rules: %+v, want Deny/unknown_role", dec)
 	}
@@ -506,7 +506,7 @@ func TestEvaluate_RoleBased_UnknownProvider(t *testing.T) {
 			}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "admin", "anthropic", "claude-3")
+	dec, _ := s.Evaluate(context.Background(), "admin", "", "", "anthropic", "claude-3")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownProvider {
 		t.Errorf("unknown provider in role scope: %+v", dec)
 	}
@@ -523,7 +523,7 @@ func TestEvaluate_RoleBased_CaseInsensitive(t *testing.T) {
 			}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4")
+	dec, _ := s.Evaluate(context.Background(), "admin", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("case-insensitive triple: %+v, want Allow", dec)
 	}
@@ -538,7 +538,7 @@ func TestEvaluate_StrictMode_IgnoresRole(t *testing.T) {
 			{Provider: "openai", Models: []string{"gpt-4o"}},
 		},
 	}})
-	dec, _ := s.Evaluate(context.Background(), "intern", "openai", "gpt-4o")
+	dec, _ := s.Evaluate(context.Background(), "intern", "", "", "openai", "gpt-4o")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("strict mode should ignore role: %+v", dec)
 	}
@@ -600,18 +600,18 @@ func TestEvaluate_RoleBased_DuplicateRoleEntries_MergesMatches(t *testing.T) {
 	// gpt-4o-mini присутствует только во ВТОРОЙ role entry.
 	// Pre-fix: early-return на первом "Admin" match → Deny/unknown_model.
 	// Post-fix: все matching merge'ятся → Allow.
-	dec, _ := s.Evaluate(context.Background(), "admin", "openai", "gpt-4o-mini")
+	dec, _ := s.Evaluate(context.Background(), "admin", "", "", "openai", "gpt-4o-mini")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("gpt-4o-mini in second duplicate role entry: %+v, want Allow", dec)
 	}
 	// Симметрично: gpt-4 из первой role entry тоже allowed.
-	dec, _ = s.Evaluate(context.Background(), "admin", "openai", "gpt-4")
+	dec, _ = s.Evaluate(context.Background(), "admin", "", "", "openai", "gpt-4")
 	if dec.Kind != DecisionAllow {
 		t.Errorf("gpt-4 in first duplicate role entry: %+v, want Allow", dec)
 	}
 	// Модель, которой нет ни в одной → unknown_model (не unknown_role:
 	// роль-то мы нашли).
-	dec, _ = s.Evaluate(context.Background(), "admin", "openai", "gpt-5-beta")
+	dec, _ = s.Evaluate(context.Background(), "admin", "", "", "openai", "gpt-5-beta")
 	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownModel {
 		t.Errorf("model in neither entry: %+v, want Deny/unknown_model", dec)
 	}
@@ -631,5 +631,192 @@ func TestUpsert_RoleBased_SkipsEmptyRoleName(t *testing.T) {
 	saved, _ := s.Upsert(context.Background(), p, "u-admin")
 	if len(saved.RoleRules) != 1 || saved.RoleRules[0].Role != "admin" {
 		t.Errorf("empty role не отсечён: %+v", saved.RoleRules)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PR-G3: context_scoped mode tests
+// ---------------------------------------------------------------------------
+
+func financeContextPolicy() *Policy {
+	return &Policy{
+		ID:   "ctx-policy-1",
+		Mode: ModeContextScoped,
+		ContextRules: []ContextRule{
+			{
+				Department:  "finance",
+				Role:        "analyst",
+				Sensitivity: []SensitivityLevel{SensitivityConfidential, SensitivityStandard},
+				Rules:       []ProviderRule{{Provider: "openai", Models: []string{"gpt-4"}}},
+			},
+			{
+				Department:  "finance",
+				Role:        "*", // any role
+				Sensitivity: []SensitivityLevel{SensitivityStandard},
+				Rules:       []ProviderRule{{Provider: "ollama", Models: []string{"llama3"}}},
+			},
+			{
+				Department:  "hr",
+				Sensitivity: []SensitivityLevel{SensitivityStandard, SensitivityConfidential},
+				Rules:       []ProviderRule{{Provider: "anthropic", Models: []string{"claude-3-haiku"}}},
+			},
+		},
+		IsActive: true,
+	}
+}
+
+// TestEvaluate_ContextScoped_AllowsMatchingContext — full match.
+func TestEvaluate_ContextScoped_AllowsMatchingContext(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	dec, _ := s.Evaluate(context.Background(), "analyst", "finance", "confidential", "openai", "gpt-4")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("full context match: got %+v, want Allow", dec)
+	}
+	if dec.MatchedRuleIndex != 0 {
+		t.Errorf("MatchedRuleIndex = %d, want 0", dec.MatchedRuleIndex)
+	}
+}
+
+// TestEvaluate_ContextScoped_UnknownDepartment_Denies — department not in any rule.
+func TestEvaluate_ContextScoped_UnknownDepartment_Denies(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	dec, _ := s.Evaluate(context.Background(), "admin", "legal", "standard", "openai", "gpt-4")
+	if dec.Kind != DecisionDeny {
+		t.Errorf("unknown department: got %+v, want Deny", dec)
+	}
+	if dec.Code != CodeUnknownDepartment {
+		t.Errorf("code = %q, want %q", dec.Code, CodeUnknownDepartment)
+	}
+}
+
+// TestEvaluate_ContextScoped_EmptyDepartment_Denies — missing JWT department.
+func TestEvaluate_ContextScoped_EmptyDepartment_Denies(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	dec, _ := s.Evaluate(context.Background(), "analyst", "", "standard", "openai", "gpt-4")
+	if dec.Kind != DecisionDeny || dec.Code != CodeUnknownDepartment {
+		t.Errorf("empty department: got %+v, want Deny/unknown_department", dec)
+	}
+}
+
+// TestEvaluate_ContextScoped_WrongSensitivity_SensitivityDenied — dept+role matched,
+// but sensitivity not permitted. Must return sensitivity_denied (not unknown_department).
+func TestEvaluate_ContextScoped_WrongSensitivity_SensitivityDenied(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	// finance/analyst allows confidential+standard for gpt-4, but restricted is not in the list.
+	dec, _ := s.Evaluate(context.Background(), "analyst", "finance", "restricted", "openai", "gpt-4")
+	if dec.Kind != DecisionDeny {
+		t.Errorf("wrong sensitivity: got %+v, want Deny", dec)
+	}
+	if dec.Code != CodeSensitivityDenied {
+		t.Errorf("code = %q, want %q", dec.Code, CodeSensitivityDenied)
+	}
+}
+
+// TestEvaluate_ContextScoped_UnknownSensitivity_Denies — "unknown" sensitivity
+// (missing header, fail-restrictive default) is denied unless explicitly allowed.
+func TestEvaluate_ContextScoped_UnknownSensitivity_Denies(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	dec, _ := s.Evaluate(context.Background(), "analyst", "finance", "unknown", "openai", "gpt-4")
+	if dec.Kind != DecisionDeny {
+		t.Errorf("unknown sensitivity: got %+v, want Deny", dec)
+	}
+	if dec.Code != CodeSensitivityDenied {
+		t.Errorf("code = %q, want %q", dec.Code, CodeSensitivityDenied)
+	}
+}
+
+// TestEvaluate_ContextScoped_WildcardRole_AllowsAnyRole — rule with Role="*"
+// matches any role if dept+sensitivity match.
+func TestEvaluate_ContextScoped_WildcardRole_AllowsAnyRole(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	// finance / any role / standard → ollama/llama3
+	dec, _ := s.Evaluate(context.Background(), "manager", "finance", "standard", "ollama", "llama3")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("wildcard role: got %+v, want Allow", dec)
+	}
+}
+
+// TestEvaluate_ContextScoped_ProviderNotInMatchedRule_Denies — context matches
+// but requested provider not in the rule's allowlist.
+func TestEvaluate_ContextScoped_ProviderNotInMatchedRule_Denies(t *testing.T) {
+	s := NewService(&memRepo{policy: financeContextPolicy()})
+	// finance/analyst/confidential matches rule[0] but rule[0] only allows openai.
+	dec, _ := s.Evaluate(context.Background(), "analyst", "finance", "confidential", "gemini", "gemini-pro")
+	if dec.Kind != DecisionDeny {
+		t.Errorf("wrong provider: got %+v, want Deny", dec)
+	}
+	if dec.Code != CodeUnknownProvider {
+		t.Errorf("code = %q, want %q", dec.Code, CodeUnknownProvider)
+	}
+}
+
+// TestEvaluate_ContextScoped_StrictModesUnchanged — allowlist_strict ignores
+// department and sensitivity (backward compat for G1/G2).
+func TestEvaluate_ContextScoped_StrictModesUnchanged(t *testing.T) {
+	s := NewService(&memRepo{policy: &Policy{
+		ID: "p-strict", Mode: ModeAllowlistStrict, IsActive: true,
+		Rules: []ProviderRule{{Provider: "openai", Models: []string{"gpt-4"}}},
+	}})
+	// dept and sensitivity are ignored in strict mode.
+	dec, _ := s.Evaluate(context.Background(), "admin", "finance", "restricted", "openai", "gpt-4")
+	if dec.Kind != DecisionAllow {
+		t.Errorf("strict mode: dept/sensitivity must be ignored, got %+v", dec)
+	}
+}
+
+// TestUpsert_ContextScoped_EmptyRules_Rejected — empty context_rules → ValidationError.
+func TestUpsert_ContextScoped_EmptyRules_Rejected(t *testing.T) {
+	s := NewService(&memRepo{})
+	_, err := s.Upsert(context.Background(), &Policy{
+		Mode:         ModeContextScoped,
+		ContextRules: nil,
+	}, "admin")
+	if err == nil {
+		t.Fatal("expected ValidationError for empty context_rules, got nil")
+	}
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestUpsert_ContextScoped_EmptyRulesPerContext_Rejected — a context rule with
+// no provider rules should be rejected (it silently denies all providers).
+func TestUpsert_ContextScoped_EmptyRulesPerContext_Rejected(t *testing.T) {
+	s := NewService(&memRepo{})
+	_, err := s.Upsert(context.Background(), &Policy{
+		Mode: ModeContextScoped,
+		ContextRules: []ContextRule{
+			{Department: "finance", Rules: nil}, // missing Rules
+		},
+	}, "admin")
+	if err == nil {
+		t.Fatal("expected ValidationError for empty context rule Rules, got nil")
+	}
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestUpsert_ContextScoped_InvalidSensitivity_Rejected — unknown sensitivity enum.
+func TestUpsert_ContextScoped_InvalidSensitivity_Rejected(t *testing.T) {
+	s := NewService(&memRepo{})
+	_, err := s.Upsert(context.Background(), &Policy{
+		Mode: ModeContextScoped,
+		ContextRules: []ContextRule{
+			{
+				Department:  "finance",
+				Sensitivity: []SensitivityLevel{"top-secret"}, // invalid
+				Rules:       []ProviderRule{{Provider: "openai", Models: []string{"gpt-4"}}},
+			},
+		},
+	}, "admin")
+	if err == nil {
+		t.Fatal("expected ValidationError for invalid sensitivity, got nil")
+	}
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Errorf("expected *ValidationError, got %T: %v", err, err)
 	}
 }
