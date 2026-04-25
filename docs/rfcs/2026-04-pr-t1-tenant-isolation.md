@@ -134,11 +134,30 @@ The per-tenant bundle contains:
   chain, not the content of other organizations."
 
 The bundle verifier (`VerifyBundle`) is extended to accept an optional `org_id` filter:
+- **Mandatory Merkle root recomputation (new requirement):** For **every** anchor,
+  the verifier MUST:
+  1. Collect all `row_hash` values from `chain_inventory.jsonl` where
+     `seq_no ∈ [anchor.seq_lo, anchor.seq_hi]` — the **full** set, not filtered by
+     org_id. (Option A ensures the full inventory is present.)
+  2. Sort entries by `seq_no` (ascending).
+  3. Decode each `row_hash_hex` → `[]byte`; call `chain.ComputeMerkleRoot(rowHashes)`.
+  4. Hex-encode the result; compare with `anchor.merkle_root_hex`.
+  5. **Fail** if mismatch — this detects row-hash substitution even when the anchor
+     signature verifies, because the Ed25519 signature covers the anchor struct
+     (root + metadata), not individual row hashes.
+  Without this step, an attacker with bundle write access can replace row hashes
+  in `chain_inventory.jsonl` while preserving `anchor.row_count` and a valid
+  signature — the current verifier would pass silently.
 - `InventoryCount` check: when `org_id` filter is set, compare org row count against
   `anchor.row_count` is skipped (mismatch is expected); instead, verify that org rows
-  are present and their row_hashes match the global inventory.
+  are present and their row_hash values are found in the recomputed inventory above.
 - Signature verification remains unchanged (anchors are global).
-- File integrity check unchanged.
+- File integrity (SHA-256 manifest) check unchanged.
+
+**Why Merkle recomputation is safe for per-tenant bundles:** Because Option A exports
+the full inventory for intersecting anchor ranges (including other-org rows), the
+`ComputeMerkleRoot` call always has the complete leaf set. The org_id filter applies
+only to the `InventoryCount` skip — it does not affect Merkle root computation.
 
 **Compliance note:** Option A means cross-tenant row hashes are visible in the bundle.
 This is acceptable because row_hash is a cryptographic commitment (HMAC output), not
@@ -157,8 +176,12 @@ plaintext data. The org cannot reconstruct other orgs' row content from the hash
 7. No application code changes are required for the deploy to remain functional.
 8. Subsequent PRs add `org_id` filter to repositories incrementally.
 
-**Zero-downtime guarantee:** DEFAULT values mean no backfill query is needed.
-Existing rows get the default at migration time via `ALTER TABLE ... SET DEFAULT`.
+**Zero-downtime guarantee:** `ADD COLUMN col UUID NOT NULL DEFAULT '...'` fills
+existing rows inline during the `ALTER TABLE` — PostgreSQL evaluates the DEFAULT
+for every pre-existing row as part of the DDL. No separate
+`UPDATE ... WHERE col IS NULL` backfill pass is needed. `SET DEFAULT` alone (without
+`ADD COLUMN`) does **not** backfill existing rows; that would require an explicit
+`UPDATE` before the `SET NOT NULL` constraint.
 
 ---
 
@@ -171,7 +194,7 @@ Existing rows get the default at migration time via `ALTER TABLE ... SET DEFAULT
 | `users` | `id` UUID | Yes — email, role, dept, OIDC identity | Add `org_id`, FK to `organizations` | FK constraint + index |
 | `audit_logs` | `id` UUID | Yes — user requests, PII detection, model usage | Add `org_id` (global chain preserved) | DEFAULT + index `(org_id, created_at)` |
 | `budgets` | `user_id` FK→users | Yes — monthly limits, usage | Inherit from users.org_id via JOIN; no direct column needed initially | Phase 2: add org_id for org-level budget aggregation |
-| `policies` | `id` | Yes — firewall rules per model/endpoint | Add `org_id` | One policy set per org |
+| `policy_rules` | `id` | Yes — firewall rules per model/endpoint | Add `org_id` | Per-org firewall rules; legacy single-policy path goes away |
 | `audit_purge_runs` | `id` | Yes — purge evidence | Add `org_id` + `scope VARCHAR(16) DEFAULT 'org'` | `scope='global'` for cross-org admin purge (see D3) |
 | `audit_chain_anchors` | `id` UUID | Audit evidence | **Global — no tenant filter** | See D3 |
 | `internal_db_sources` | `id` UUID | Potentially sensitive DB creds | Add `org_id` | Admin-managed per org |
@@ -212,95 +235,120 @@ Every user-visible API path must be classified before PR-T2 implementation begin
 Legend: **T** = tenant-scoped (filter by `claims.org_id`), **G** = global (no org filter),
 **GA** = global_admin only, **PUB** = unauthenticated.
 
+This inventory is generated from actual route registrations in
+`cmd/shadowai/main.go` and `cmd/shadowai/enterprise_wire.go`. Routes not listed here
+do not exist; add them to this table before implementing them.
+
 ### Health / readiness (global, unauthenticated)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `GET /api/health` | PUB | No change; reports DB/Redis connectivity only |
-| `GET /api/ready` | PUB | No change; Kubernetes readiness probe |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/health` | GET | PUB | No change; liveness probe |
+| `/api/ready` | GET | PUB | No change; readiness probe (checks DB+Redis) |
+| `/metrics` | GET | PUB | Prometheus scrape endpoint; no org concept |
 
-### Auth paths
+### Auth paths (prefix: `/api/auth`)
 
-| Path | Class | Tenant source | Post-T2 behavior |
-|------|-------|---------------|-----------------|
-| `POST /api/auth/login` | T | `users.org_id` | JWT includes `org_id` claim |
-| `POST /api/auth/register` | T | Request param or default org | `org_id` required in SaaS mode |
-| `GET /api/auth/oidc/login` | T | N/A (redirect start) | Pass `org_id` hint via state cookie |
-| `GET /api/auth/oidc/callback` | T | OIDC `org` claim or default | Map OIDC claim to org; create user in org |
-| `POST /api/auth/break-glass` | GA | **Global** | JWT: `org_id=""`, `break_glass=true`, `scope=global` |
-| `POST /api/auth/mfa/setup` | T | `claims.org_id` | No change; MFA is per-user not per-org |
-| `POST /api/auth/mfa/verify` | T | `claims.org_id` | No change |
-| `GET /api/auth/mfa/status` | T | `claims.org_id` | No change |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/auth/login` | POST | PUB | JWT includes `org_id` claim |
+| `/api/auth/register` | POST | PUB | `org_id` required in SaaS mode |
+| `/api/auth/break-glass` | POST | PUB/GA | JWT: `org_id=""`, `break_glass=true`, `scope=global` |
+| `/api/auth/mfa/verify` | POST | PUB | 2nd-step login; no org change needed |
+| `/api/auth/oidc/login` | GET | PUB | Pass `org_id` hint via state cookie |
+| `/api/auth/oidc/callback` | GET | PUB | Map OIDC `org` claim → org; create user in org |
+| `/api/auth/mfa/setup` | POST | T/admin | Enterprise; per-user, not per-org |
+| `/api/auth/mfa/confirm` | POST | T/admin | Enterprise; confirms TOTP token |
+| `/api/auth/mfa` | DELETE | T/admin | Enterprise; disables MFA for user |
+| `/api/auth/revoke` | POST | T | Revoke all tokens for authenticated user |
+| `/api/auth/rotate-api-key` | POST | T | Rotate API key for authenticated user |
 
-### SCIM provisioning
+### SCIM provisioning (prefix: `/scim/v2`, enterprise, bearer token auth)
 
-| Path | Class | Tenant source | Post-T2 behavior |
-|------|-------|---------------|-----------------|
-| `GET /scim/v2/Users` | T | SCIM Bearer token → org | One Bearer token scoped to one org |
-| `POST /scim/v2/Users` | T | SCIM Bearer token → org | Provision into token's org |
-| `GET /scim/v2/Users/{id}` | T | SCIM Bearer token → org | Returns user only if same org |
-| `PUT /scim/v2/Users/{id}` | T | SCIM Bearer token → org | Update only in token's org |
-| `PATCH /scim/v2/Users/{id}` | T | SCIM Bearer token → org | Patch only in token's org |
-| `DELETE /scim/v2/Users/{id}` | T | SCIM Bearer token → org | Deprovision only in token's org |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/scim/v2/ServiceProviderConfig` | GET | T | Bearer token scoped to one org |
+| `/scim/v2/Users` | GET | T | List users in token's org only |
+| `/scim/v2/Users` | POST | T | Provision into token's org |
+| `/scim/v2/Users/{id}` | GET | T | Must be token's org |
+| `/scim/v2/Users/{id}` | PUT | T | Must be token's org |
+| `/scim/v2/Users/{id}` | PATCH | T | Must be token's org |
+| `/scim/v2/Users/{id}` | DELETE | T | Deprovision from token's org only |
 
-### Proxy / LLM paths
+### Proxy / LLM paths (prefix: `/proxy`)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `POST /proxy/{provider}/...` | T | Audit write, budget check — filter by `claims.org_id` |
-| `GET /proxy/providers` | T | List org-specific active providers |
-| `GET /proxy/providers/test` | T | Test org's provider config (admin only within org) |
-| `GET /proxy/firewall/status` | T | Per-org pipeline status (global_admin sees all) |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/proxy/providers` | GET | T | List providers (org's active set) |
+| `/proxy/providers/connectivity` | GET | T/admin | Connectivity status per provider |
+| `/proxy/providers/connectivity/alerts` | GET | T/admin | Connectivity alert history |
+| `/proxy/providers/test` | POST | T/admin | Test all providers for org |
+| `/proxy/providers/{provider}/test` | POST | T/admin | Test single provider for org |
+| `/proxy/firewall/status` | GET | T/admin | Per-org firewall pipeline status |
+| `/proxy/chat` | POST | T | Unified chat; audit write + budget check by org |
+| `/proxy/{provider}/...` | POST | T | Provider-specific proxy; filter by `claims.org_id` |
 
-### Audit / evidence paths
+### Audit paths (prefix: `/api`, admin)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `GET /api/audit/logs` | T | Filter by `claims.org_id`; global_admin: `?org_id=all` or `?org_id=<uuid>` |
-| `GET /api/audit/status` | T | WORM chain health for org's rows; global_admin: all tables |
-| `GET /api/audit/export` | T/GA | `--org-id` required for non-global-admin; GA can omit for full export |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/audit/logs` | GET | T | Filter by `claims.org_id`; global_admin: `?org_id=all` |
+| `/api/audit/status` | GET | T | WORM chain health; global_admin: all tables |
 
-### Admin / governance paths
+### Admin / governance paths (prefix: `/api`, admin)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `GET /api/users` | T | List users in `claims.org_id` only |
-| `GET /api/users/{id}` | T | Must be same org; global_admin can cross-org |
-| `PUT /api/users/{id}` | T | Must be same org; global_admin can cross-org |
-| `DELETE /api/users/{id}` | T | Must be same org; global_admin can cross-org |
-| `GET /api/admin-events` | T | Filter by org; cross-org visible to global_admin only |
-| `GET/PUT /api/governance/policy` | T | Per-org policy; global_admin can view/set any |
-| `GET /api/governance/providers` | T | Org's allowed provider list |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/users` | GET | T | List users in `claims.org_id` only |
+| `/api/users/{id}` | GET | T | Must be same org; global_admin: cross-org |
+| `/api/users/{id}` | PUT | T | Must be same org; global_admin: cross-org |
+| `/api/users/{id}/erase` | POST | T/enterprise | DSAR erasure within org |
+| `/api/admin-events` | GET | T/enterprise | Filter by org; global_admin: cross-org |
+| `/api/governance/policy` | GET | T/enterprise | Per-org governance policy |
+| `/api/governance/policy` | PUT | T/enterprise | Per-org governance policy update |
+| `/api/budgets/{user_id}` | GET | T | Admin or self; user must be in same org |
+| `/api/budgets/{user_id}` | PUT | T/admin | Update budget within org |
 
-### Internal DB sources
+### Firewall rules (prefix: `/api`, admin)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `GET /api/internal-dbs` | T | List org's DB sources (admin only) |
-| `POST /api/internal-dbs` | T | Create DB source for org |
-| `GET /api/internal-dbs/{id}` | T | Must be same org |
-| `PUT /api/internal-dbs/{id}` | T | Must be same org |
-| `DELETE /api/internal-dbs/{id}` | T | Must be same org |
-| `POST /api/internal-dbs/{id}/test` | T | Test connectivity within org (admin only) |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/policies` | GET | T | List org's `policy_rules` |
+| `/api/policies` | POST | T | Create rule in org |
+| `/api/policies/{id}` | PUT | T | Update rule; must be same org |
+| `/api/policies/{id}` | DELETE | T | Delete rule; must be same org |
 
-### Legal hold paths
+### Internal DB sources (prefix: `/api/internal-dbs`)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `POST /api/legal-holds` | T | Creates hold tagged with `claims.org_id` |
-| `GET /api/legal-holds` | T | List holds for `claims.org_id` |
-| `GET /api/legal-holds/{id}` | T | Must be same org |
-| `POST /api/legal-holds/{id}/approve` | T | 4-eyes: approver must be same org |
-| `POST /api/legal-holds/{id}/release` | T | Must be same org |
-| `POST /api/legal-holds/{id}/evidence` | T | Evidence export scoped to org |
-| `GET /api/legal-holds/{id}/events` | T | Lifecycle events for this hold (same org) |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/internal-dbs` | GET | T/admin+analyst+auditor | List org's DB sources |
+| `/api/internal-dbs/query` | POST | T/admin+analyst | Execute query via org's source |
+| `/api/internal-dbs/sources` | GET | T/admin | List managed sources for org |
+| `/api/internal-dbs/sources` | POST | T/admin | Create source within org |
+| `/api/internal-dbs/sources/refresh` | POST | T/admin | Refresh schema cache for org |
+| `/api/internal-dbs/sources/{id}/test` | POST | T/admin | Test connectivity (must be same org) |
+| `/api/internal-dbs/sources/{id}` | GET | T/admin | Must be same org |
+| `/api/internal-dbs/sources/{id}` | PUT | T/admin | Must be same org |
+| `/api/internal-dbs/sources/{id}` | DELETE | T/admin | Must be same org |
 
-### Dashboard / frontend API
+### Legal hold paths (prefix: `/api`, enterprise, admin)
 
-| Path | Class | Post-T2 behavior |
-|------|-------|-----------------|
-| `GET /api/dashboard/stats` | T | Org-scoped counts (users, audit logs, budget usage) |
-| `GET /api/dashboard/usage` | T | Org-scoped model usage aggregation |
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/legal-holds` | POST | T | Creates hold tagged with `claims.org_id` |
+| `/api/legal-holds` | GET | T | List holds for `claims.org_id` |
+| `/api/legal-holds/{id}/approve` | POST | T | 4-eyes: approver must be same org |
+| `/api/legal-holds/{id}/reject` | POST | T | Rejector must be same org |
+| `/api/legal-holds/{id}/release` | POST | T | Must be same org |
+
+### Dashboard paths (prefix: `/api`, admin)
+
+| Path | Method | Class | Post-T2 behavior |
+|------|--------|-------|-----------------|
+| `/api/dashboard/stats` | GET | T | Org-scoped counts (users, audit logs, budget) |
+| `/api/dashboard/usage` | GET | T | Org-scoped model usage aggregation |
+| `/api/dashboard/top-users` | GET | T | Top users by token spend within org |
 
 ### CLI / ops tools
 
