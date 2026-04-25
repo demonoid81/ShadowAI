@@ -67,7 +67,10 @@ seeded in migration).
   `global_admin` for normal user creation; it can only be set via admin API or direct DB
   by a global_admin.
 - Cross-tenant actions by global_admin must be logged in `admin_event_logs` with
-  `source_org_id` and `target_org_id` metadata fields.
+  **first-class columns** `source_org_id UUID` and `target_org_id UUID` — not in
+  `metadata_json`. Storing them in JSONB leaves them outside the HMAC chain; a DBA
+  can change `metadata->>'target_org_id'` without breaking the chain. First-class
+  columns are included in canonical v2 (see D3) and are tamper-evident.
 - `support_admin` deferred to PR-T3.
 
 Global admin must be explicitly granted; it cannot be auto-provisioned via OIDC
@@ -95,8 +98,17 @@ v2|<existing_v1_fields>|<org_id>
 - v1 rows (pre-T2) remain valid; verifier supports both v1 and v2 via prefix detection.
 - Post-T2 `INSERT` always writes v2 canonical; verifier uses `row_hash` algorithm
   matching the stored `canonical_version` column (new column: `VARCHAR(4) DEFAULT 'v1'`).
-- `CanonicalAuditLog`, `CanonicalAdminEventLog`, `CanonicalLegalHoldEvent`,
-  `CanonicalAuditPurgeRun` all gain v2 variants that append `org_id`.
+- `CanonicalAuditLog`, `CanonicalLegalHoldEvent`, `CanonicalAuditPurgeRun` gain v2
+  variants that append `org_id`.
+- `CanonicalAdminEventLog` v2 appends **three** fields: `org_id`, `source_org_id`,
+  `target_org_id` (NULL → empty string):
+  ```
+  v2|<v1_fields>|<org_id>|<source_org_id>|<target_org_id>
+  ```
+  This is required because cross-tenant admin events carry `target_org_id` as
+  compliance evidence — it must be inside the HMAC chain, not in `metadata_json`.
+  `source_org_id` is the actor's org; `target_org_id` is the org being acted upon
+  (empty string for same-org actions).
 - PR-T2 Phase 3 (repository filters) must also update canonical writes.
 
 **audit_purge_runs scope:** A global purge (across all orgs) must NOT be attributed to
@@ -205,7 +217,7 @@ for every pre-existing row as part of the DDL. No separate
 | Table | PK | Contains customer data? | Tenant strategy |
 |-------|----|------------------------|-----------------|
 | `user_erasure_runs` | `id` UUID | Yes — DSAR PII evidence | Add `org_id` |
-| `admin_event_logs` | `id` UUID | Yes — admin actions | Add `org_id`; global_admin events get `target_org_id` |
+| `admin_event_logs` | `id` UUID | Yes — admin actions | Add `org_id`; add `source_org_id UUID` + `target_org_id UUID` as first-class columns (see D2, D3); canonical v2 covers all three |
 | `provider_governance_policies` | `id` UUID | Yes — provider allowlists | Add `org_id`; one active policy per org |
 | `legal_holds` | `id` UUID | Yes — legal hold case data | Add `org_id`; strict isolation |
 | `legal_hold_events` | `id` UUID | Yes — hold lifecycle events | Add `org_id` |
@@ -410,9 +422,9 @@ in a request-handling path. Exceptions allowed only in:
 | OQ-3 | Budget model: per-user within org, or per-org aggregate cap, or both? | Product | Before PR-T2 | Open |
 | OQ-4 | Global admin UI/CLI: should `audit-verify` auto-detect global_admin from JWT or require explicit `--global` flag? | Security | Before PR-T2 | Open |
 | OQ-5 | `internal_db_sources`: are these org-scoped or global? (Internal DB sources may be shared across orgs in some deployments) | Architecture | Before PR-T2 | Open |
-| OQ-6 | Per-tenant bundle Merkle validation: Option A exports all row hashes in anchor ranges (including other-org rows). Should PR-T2 Phase 5 implement the full Merkle subset proof path in `VerifyBundle`, or is the current "skip `InventoryCount` check for filtered bundles" approach acceptable for the initial release? The subset-proof path would require storing Merkle tree sibling nodes per anchor, which is a non-trivial schema change. | Architecture | Before PR-T2 Phase 5 | Open |
+| ~~OQ-6~~ | ~~Per-tenant bundle Merkle validation: subset proof vs skip InventoryCount?~~ | Architecture | — | **Closed** — resolved by D4: Option A with mandatory Merkle root recomputation from full inventory covers PR-T2 Phase 5. Merkle inclusion proofs (subset proof per-org row without full inventory) deferred to PR-T3 / W6 as a separate RFC when per-org bundle privacy becomes a hard requirement. |
 
-**Implementation must not begin until OQ-2 through OQ-6 are resolved.**
+**Implementation must not begin until OQ-2 through OQ-5 are resolved.**
 
 ---
 
@@ -424,6 +436,7 @@ Implementation is phased to ensure zero-downtime and incremental testability.
 - Create `organizations` table with default row
 - Add `org_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'` to all tenant-scoped tables (see §3)
 - Add `canonical_version VARCHAR(4) NOT NULL DEFAULT 'v1'` to all chained tables (`audit_logs`, `admin_event_logs`, `legal_hold_events`, `audit_purge_runs`)
+- Add `source_org_id UUID` and `target_org_id UUID` (nullable, no FK — actor org may differ from default org) to `admin_event_logs` (see D2/D3)
 - Add `scope VARCHAR(16) NOT NULL DEFAULT 'org'` to `audit_purge_runs` (see D3)
 - No application changes required; existing queries continue to work
 - Smoke test: `go test -tags 'enterprise smoke' ./smoke/...` must pass
