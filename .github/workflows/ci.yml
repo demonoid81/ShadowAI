@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:  # allow release.yml to call this as a reusable workflow
   push:
     branches: [master, main]
   pull_request:
@@ -76,10 +77,11 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       # Testcontainers needs Docker — available on ubuntu-latest.
+      # No pipe: exit code must come from go test, not from any downstream command.
       - name: go test -tags 'enterprise integration' ./integration/...
         run: |
           go test -tags 'enterprise integration' ./integration/... \
-            -count=1 -timeout 10m -v 2>&1 | tail -50
+            -count=1 -timeout 10m -v
         env:
           TESTCONTAINERS_RYUK_DISABLED: "false"
 
@@ -112,13 +114,24 @@ jobs:
           [ "${{ matrix.variant }}" = "enterprise" ] && TAGS="-tags enterprise"
           CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/shadowai
 
-      - name: Build all CLIs (${{ matrix.variant }})
+      - name: Build core CLIs (${{ matrix.variant }})
+        # These CLIs must build cleanly in both core and enterprise variants.
+        # No || true: any build failure here is a real regression.
         run: |
           TAGS=""
           [ "${{ matrix.variant }}" = "enterprise" ] && TAGS="-tags enterprise"
-          for cmd in audit-verify audit-export-evidence migrate audit-purge; do
+          for cmd in audit-verify audit-export-evidence migrate; do
             echo "Building $cmd..."
-            CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/$cmd 2>/dev/null || true
+            CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/$cmd
+          done
+
+      - name: Build enterprise-only CLIs (enterprise variant only)
+        # audit-purge has //go:build enterprise; skip in core build.
+        if: matrix.variant == 'enterprise'
+        run: |
+          for cmd in audit-purge; do
+            echo "Building $cmd (enterprise)..."
+            CGO_ENABLED=0 go build -tags enterprise -ldflags="-w -s" -o /dev/null ./cmd/$cmd
           done
 
   # ─────────────────────────────────────────────────────────────────────────

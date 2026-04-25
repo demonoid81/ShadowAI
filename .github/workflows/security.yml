@@ -24,8 +24,11 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - name: Scan for vulnerabilities
+      - name: Scan core for vulnerabilities
         run: govulncheck ./...
+      - name: Scan enterprise for vulnerabilities
+        # Enterprise build pulls in go-oidc, pquerna/otp — scan them too.
+        run: govulncheck -tags enterprise ./...
 
   # Static analysis with golangci-lint.
   lint:
@@ -46,27 +49,35 @@ jobs:
           working-directory: backend
           args: --timeout 5m
 
-  # Container image security scan (Trivy).
+  # Container image security scan (Trivy) — core and enterprise images.
   trivy:
-    name: Trivy image scan
+    name: Trivy image scan (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # scan both even if one fails
+      matrix:
+        variant:
+          - core
+          - enterprise
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build core image for scanning
+      - name: Build ${{ matrix.variant }} image for scanning
         uses: docker/build-push-action@v6
         with:
           context: ./backend
           push: false
           load: true
-          tags: shadowai:trivy-scan
-          cache-from: type=gha,scope=docker-core
+          tags: shadowai:trivy-scan-${{ matrix.variant }}
+          build-args: |
+            BUILD_TAGS=${{ matrix.variant == 'enterprise' && 'enterprise' || '' }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}
 
-      - name: Trivy scan
+      - name: Trivy scan (${{ matrix.variant }})
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: shadowai:trivy-scan
+          image-ref: shadowai:trivy-scan-${{ matrix.variant }}
           format: table
           exit-code: '1'
           ignore-unfixed: true
