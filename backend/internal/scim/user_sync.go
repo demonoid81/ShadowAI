@@ -77,6 +77,8 @@ func (c *SyncConfig) roleMap(key string) (string, bool) {
 type SCIMRepo interface {
 	GetBySCIMExternalID(ctx context.Context, externalID string) (*domain.User, error)
 	GetByEmail(ctx context.Context, email string) (*domain.User, error)
+	GetByEmailInOrg(ctx context.Context, email, orgID string) (*domain.User, error)
+	GetByIDScoped(ctx context.Context, id, orgID string) (*domain.User, error)
 	GetByID(ctx context.Context, id string) (*domain.User, error)
 	CreateUserSCIM(ctx context.Context, u *domain.User) error
 	UpdateUserSCIM(ctx context.Context, u *domain.User) error
@@ -90,14 +92,24 @@ type SyncResult struct {
 }
 
 // UserSyncer translates SCIM operations into domain.User changes.
+// orgID is the org this syncer is authorized to manage (from SCIM Bearer token config).
+// Empty orgID means default org (single-tenant / legacy path).
 type UserSyncer struct {
 	repo   SCIMRepo
 	cfg    *SyncConfig
+	orgID  string
 }
 
 // NewUserSyncer creates a UserSyncer.
 func NewUserSyncer(repo SCIMRepo, cfg *SyncConfig) *UserSyncer {
 	return &UserSyncer{repo: repo, cfg: cfg}
+}
+
+// WithOrgID returns a UserSyncer copy scoped to the given org.
+func (s *UserSyncer) WithOrgID(orgID string) *UserSyncer {
+	c := *s
+	c.orgID = orgID
+	return &c
 }
 
 // Provision creates or updates a user from a SCIM POST/PUT request.
@@ -121,9 +133,15 @@ func (s *UserSyncer) Provision(ctx context.Context, scimUser User) (SyncResult, 
 		}
 	}
 
-	// 2. Email link.
+	// 2. Email link — org-scoped to prevent cross-tenant account merge (RFC D6.1).
 	if s.cfg.LinkByEmail && email != "" {
-		byEmail, err := s.repo.GetByEmail(ctx, email)
+		var byEmail *domain.User
+		var err error
+		if s.orgID != "" {
+			byEmail, err = s.repo.GetByEmailInOrg(ctx, email, s.orgID)
+		} else {
+			byEmail, err = s.repo.GetByEmail(ctx, email)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			return SyncResult{}, err
 		}
@@ -162,6 +180,7 @@ func (s *UserSyncer) Provision(ctx context.Context, scimUser User) (SyncResult, 
 		ID:       uuid.NewString(),
 		Email:    email,
 		Role:     role,
+		OrgID:    s.orgID,
 		IsActive: boolVal(scimUser.Active, true), // default true for new users
 	}
 	if dept != "" {
@@ -182,7 +201,7 @@ func (s *UserSyncer) Provision(ctx context.Context, scimUser User) (SyncResult, 
 // Deprovision sets IsActive=false for the user. Per SCIM spec, DELETE does not
 // permanently remove the user — it deactivates them.
 func (s *UserSyncer) Deprovision(ctx context.Context, userID string) (SyncResult, error) {
-	u, err := s.repo.GetByID(ctx, userID)
+	u, err := s.scopedGetByID(ctx, userID)
 	if err == sql.ErrNoRows {
 		return SyncResult{}, &SCIMError{Status: 404, Detail: "user not found"}
 	}
@@ -199,9 +218,17 @@ func (s *UserSyncer) Deprovision(ctx context.Context, userID string) (SyncResult
 	return SyncResult{User: u, Action: "deprovisioned"}, nil
 }
 
+// scopedGetByID uses GetByIDScoped when orgID is set, otherwise GetByID.
+func (s *UserSyncer) scopedGetByID(ctx context.Context, id string) (*domain.User, error) {
+	if s.orgID != "" {
+		return s.repo.GetByIDScoped(ctx, id, s.orgID)
+	}
+	return s.repo.GetByID(ctx, id)
+}
+
 // ApplyPatch applies a SCIM PATCH request to the user.
 func (s *UserSyncer) ApplyPatch(ctx context.Context, userID string, req PatchRequest) (SyncResult, error) {
-	u, err := s.repo.GetByID(ctx, userID)
+	u, err := s.scopedGetByID(ctx, userID)
 	if err == sql.ErrNoRows {
 		return SyncResult{}, &SCIMError{Status: 404, Detail: "user not found"}
 	}

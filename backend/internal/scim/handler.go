@@ -27,10 +27,14 @@ import (
 	"github.com/shadowai/backend/internal/domain"
 )
 
+// scimOrgKey is the context key for the org resolved from the SCIM bearer token.
+type scimOrgKey struct{}
+
 // Handler serves SCIM 2.0 endpoints.
 type Handler struct {
 	syncer      *UserSyncer
 	bearer      string // plaintext SCIM token
+	orgID       string // org this handler is authorized to manage (from config / scim_tokens)
 	adminAudit  adminaudit.Recorder
 	baseURL     string // e.g. https://api.example.com/scim/v2
 }
@@ -38,6 +42,14 @@ type Handler struct {
 // NewHandler creates a SCIM handler.
 func NewHandler(syncer *UserSyncer, bearerToken, baseURL string, adminAudit adminaudit.Recorder) *Handler {
 	return &Handler{syncer: syncer, bearer: bearerToken, adminAudit: adminAudit, baseURL: baseURL}
+}
+
+// WithOrgID returns a Handler copy scoped to the given org (from scim_tokens lookup or static config).
+func (h *Handler) WithOrgID(orgID string) *Handler {
+	c := *h
+	c.orgID = orgID
+	c.syncer = h.syncer.WithOrgID(orgID)
+	return &c
 }
 
 // ---------------------------------------------------------------------------

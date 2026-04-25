@@ -28,6 +28,23 @@ func (r *Repository) CreateUser(ctx context.Context, u *domain.User) error {
 	return err
 }
 
+// GetByEmailInOrg looks up a user by email within a specific org.
+// Used by SCIM email-link to prevent cross-tenant account merge.
+func (r *Repository) GetByEmailInOrg(ctx context.Context, email, orgID string) (*domain.User, error) {
+	u := &domain.User{}
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE email = $1 AND org_id = $2`, email, orgID).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,

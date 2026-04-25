@@ -30,7 +30,15 @@ func (m *mockSCIMRepo) GetByEmail(_ context.Context, email string) (*domain.User
 	if u, ok := m.byEmail[email]; ok { return u, nil }
 	return nil, sql.ErrNoRows
 }
+func (m *mockSCIMRepo) GetByEmailInOrg(_ context.Context, email, _ string) (*domain.User, error) {
+	if u, ok := m.byEmail[email]; ok { return u, nil }
+	return nil, sql.ErrNoRows
+}
 func (m *mockSCIMRepo) GetByID(_ context.Context, id string) (*domain.User, error) {
+	if u, ok := m.byID[id]; ok { return u, nil }
+	return nil, sql.ErrNoRows
+}
+func (m *mockSCIMRepo) GetByIDScoped(_ context.Context, id, _ string) (*domain.User, error) {
 	if u, ok := m.byID[id]; ok { return u, nil }
 	return nil, sql.ErrNoRows
 }
