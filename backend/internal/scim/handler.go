@@ -145,7 +145,7 @@ func (h *Handler) ServiceProviderConfig(w http.ResponseWriter, _ *http.Request) 
 // ---------------------------------------------------------------------------
 
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.syncerFor(r).repo.ListUsersSCIM(r.Context())
+	users, err := h.syncerFor(r).ListUsers(r.Context())
 	if err != nil {
 		h.scimError(w, http.StatusInternalServerError, "failed to list users", "")
 		return
@@ -205,7 +205,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	u, err := h.syncerFor(r).repo.GetByID(r.Context(), id)
+	u, err := h.syncerFor(r).GetUser(r.Context(), id)
 	if err != nil {
 		h.scimError(w, http.StatusNotFound, "user not found", "")
 		return
@@ -233,7 +233,7 @@ func (h *Handler) ReplaceUser(w http.ResponseWriter, r *http.Request) {
 	scimUser.ID = id
 
 	// Fetch existing user first; PUT is full replace of an existing resource.
-	existing, err := h.syncerFor(r).repo.GetByID(r.Context(), id)
+	existing, err := h.syncerFor(r).GetUser(r.Context(), id)
 	if err != nil {
 		h.scimError(w, http.StatusNotFound, "user not found", "")
 		return

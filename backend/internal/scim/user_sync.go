@@ -84,6 +84,7 @@ type SCIMRepo interface {
 	CreateUserSCIM(ctx context.Context, u *domain.User) error
 	UpdateUserSCIM(ctx context.Context, u *domain.User) error
 	ListUsersSCIM(ctx context.Context) ([]domain.User, error)
+	ListUsersSCIMByOrg(ctx context.Context, orgID string) ([]domain.User, error)
 }
 
 // SyncResult describes what happened during a SCIM sync operation.
@@ -231,6 +232,21 @@ func (s *UserSyncer) scopedGetByID(ctx context.Context, id string) (*domain.User
 		return s.repo.GetByIDScoped(ctx, id, s.orgID)
 	}
 	return s.repo.GetByID(ctx, id)
+}
+
+// GetUser returns a user by ID scoped to the syncer's org.
+// Used by SCIM GET /Users/{id} and PUT /Users/{id}.
+func (s *UserSyncer) GetUser(ctx context.Context, id string) (*domain.User, error) {
+	return s.scopedGetByID(ctx, id)
+}
+
+// ListUsers returns users visible to the syncer's org.
+// When orgID is set, only users in that org are returned.
+func (s *UserSyncer) ListUsers(ctx context.Context) ([]domain.User, error) {
+	if s.orgID != "" {
+		return s.repo.ListUsersSCIMByOrg(ctx, s.orgID)
+	}
+	return s.repo.ListUsersSCIM(ctx)
 }
 
 // ApplyPatch applies a SCIM PATCH request to the user.

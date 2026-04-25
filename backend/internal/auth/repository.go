@@ -254,6 +254,28 @@ func (r *Repository) UpdateUserSCIM(ctx context.Context, u *domain.User) error {
 }
 
 // ListUsersSCIM returns all users for SCIM list operations.
+// ListUsersSCIMByOrg returns users for SCIM list operations scoped to an org.
+func (r *Repository) ListUsersSCIMByOrg(ctx context.Context, orgID string) ([]domain.User, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, email, role, department, is_active, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE org_id = $1 ORDER BY created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []domain.User
+	for rows.Next() {
+		var u domain.User
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Department, &u.IsActive,
+			&u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 func (r *Repository) ListUsersSCIM(ctx context.Context) ([]domain.User, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, email, role, department, is_active, scim_external_id, created_at, updated_at,

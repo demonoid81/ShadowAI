@@ -63,6 +63,11 @@ func (m *mockSCIMRepo) ListUsersSCIM(_ context.Context) ([]domain.User, error) {
 	for _, u := range m.byID { users = append(users, *u) }
 	return users, nil
 }
+func (m *mockSCIMRepo) ListUsersSCIMByOrg(_ context.Context, _ string) ([]domain.User, error) {
+	var users []domain.User
+	for _, u := range m.byID { users = append(users, *u) }
+	return users, nil
+}
 
 func newSyncer(repo *mockSCIMRepo) *UserSyncer {
 	cfg, _ := ParseSyncConfig("user", `{"admins":"admin"}`, "", false)
