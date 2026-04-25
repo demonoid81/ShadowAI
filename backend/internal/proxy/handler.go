@@ -31,6 +31,25 @@ import (
 	"github.com/shadowai/backend/internal/policy"
 )
 
+// OrgBudgetChecker is the interface for org-level aggregate budget enforcement (PR-G4).
+// Implemented by orgbudget.Service; nil = feature off (core build / dev).
+type OrgBudgetChecker interface {
+	// CheckBefore runs before a provider call. Returns allowed=true unless
+	// mode=enforce and projected spend crosses the cap.
+	CheckBefore(ctx context.Context, orgID string, estimatedCents int64) (domain.OrgBudgetDecision, error)
+	// RecordActual adds actual post-call spend to org_budget_usage.
+	RecordActual(ctx context.Context, orgID string, actualCents int64) error
+}
+
+// costUSDToCents converts a float64 USD cost to integer cents.
+// 1 USD = 100 cents. Rounds to nearest cent.
+func costUSDToCents(usd float64) int64 {
+	if usd <= 0 {
+		return 0
+	}
+	return int64(usd*100 + 0.5)
+}
+
 // maxBodySize is the maximum allowed request body size (10 MB).
 const maxBodySize = 10 << 20
 const (
@@ -108,6 +127,8 @@ type Handler struct {
 	// PR-G1: admin-event writer для governance_deny / governance
 	// CRUD. nil → админ-события не пишутся (Core build / dev).
 	adminAudit adminaudit.Recorder
+	// PR-G4: org-level aggregate budget checker. nil = feature off.
+	orgBudget  OrgBudgetChecker
 	// PR-F7.1: streaming transport mode (см. docs/rfcs/2026-04-pr-f7-*).
 	// Допустимые значения: "" (== "buffered") | "incremental" | "shadow".
 	// Default пустой = buffered (исторический path unchanged).
@@ -139,6 +160,12 @@ type Handler struct {
 func (h *Handler) SetStreamingMode(mode string) {
 	h.streamingMode = mode
 	h.streamingCapability = DecideStreamingCapability(h.firewallPipeline)
+}
+
+// SetOrgBudget wires the enterprise org-budget checker (PR-G4).
+// Called from enterprise_wire.go after handler construction.
+func (h *Handler) SetOrgBudget(c OrgBudgetChecker) {
+	h.orgBudget = c
 }
 
 // NewHandler creates a new multi-provider proxy handler.
@@ -412,7 +439,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Budget Check
+	// 6. Per-user budget check.
 	allowed, err := h.budgetSvc.CheckBudget(r.Context(), claims.UserID, estimatedTotalTokens)
 	if err == nil && !allowed {
 		h.auditLog(r.Context(), &domain.AuditLog{
@@ -426,6 +453,23 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		metrics.RecordBudgetBlock(false)
 		http.Error(w, `{"error":"budget exceeded"}`, http.StatusPaymentRequired)
 		return
+	}
+
+	// 6b. PR-G4: Org-level aggregate budget check (enforce mode blocks).
+	if h.orgBudget != nil {
+		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002) // rough estimate
+		if dec, _ := h.orgBudget.CheckBefore(r.Context(), claims.OrgID, estimatedCents); !dec.Allowed {
+			h.auditLog(r.Context(), &domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				Model: model, Provider: providerName,
+				Endpoint: endpoint, StatusCode: 402,
+				PIIDetected: piiDetected, PIITypes: requestPIITypes,
+				PolicyAction: "blocked", DurationMs: int(time.Since(start).Milliseconds()),
+			})
+			metrics.RecordBudgetBlock(false)
+			http.Error(w, `{"error":"org budget exceeded"}`, http.StatusPaymentRequired)
+			return
+		}
 	}
 
 	// 7. Build provider-specific request with retry
@@ -493,6 +537,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			cost := streamUsage.CostUSD
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
 			}
 			// PR-F7.3: structured audit fields (RFC §11).
 			//   policy_action — policy/security verdict (block over
@@ -658,6 +703,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
 			}
 		}
 
@@ -771,6 +817,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	recordUsage := func() {
 		if cost > 0 {
 			_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
 		}
 	}
 
@@ -1480,7 +1527,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Budget Check (estimated: prompt + planned completion)
+	// 6. Per-user budget check (estimated: prompt + planned completion).
 	allowed, err := h.budgetSvc.CheckBudget(r.Context(), claims.UserID, estimatedTotalTokens)
 	if err == nil && !allowed {
 		h.auditLog(r.Context(), &domain.AuditLog{
@@ -1493,6 +1540,22 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		metrics.RecordBudgetBlock(false)
 		http.Error(w, `{"error":"budget exceeded"}`, http.StatusPaymentRequired)
 		return
+	}
+
+	// 6b. PR-G4: Org-level aggregate budget check.
+	if h.orgBudget != nil {
+		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002)
+		if dec, _ := h.orgBudget.CheckBefore(r.Context(), claims.OrgID, estimatedCents); !dec.Allowed {
+			h.auditLog(r.Context(), &domain.AuditLog{
+				ID: uuid.New().String(), UserID: claims.UserID,
+				Model: model, Provider: "unified", Endpoint: "/proxy/chat",
+				StatusCode: 402, PIIDetected: piiDetected, PIITypes: requestPIITypes,
+				PolicyAction: "blocked", DurationMs: int(time.Since(start).Milliseconds()),
+			})
+			metrics.RecordBudgetBlock(false)
+			http.Error(w, `{"error":"org budget exceeded"}`, http.StatusPaymentRequired)
+			return
+		}
 	}
 
 	// 7. Route — get ordered candidates
@@ -1639,6 +1702,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				cost := streamUsage.CostUSD
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
 				}
 				// PR-F7.3: structured audit fields — симметрично
 				// ProxyChat incremental ветке.
@@ -1776,6 +1840,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			recordStreamUsage := func() {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
 				}
 			}
 			allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
@@ -1848,6 +1913,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
+				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
 			}
 		}
 

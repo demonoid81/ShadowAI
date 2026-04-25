@@ -27,6 +27,7 @@ import (
 	"github.com/shadowai/backend/internal/budget"
 	"github.com/shadowai/backend/internal/config"
 	"github.com/shadowai/backend/internal/governance"
+	"github.com/shadowai/backend/internal/proxy"
 )
 
 // enterpriseBundle — всё, что Enterprise-сборка предоставляет поверх
@@ -67,6 +68,11 @@ type enterpriseBundle struct {
 	// RegisterSCIMRoutes добавляет SCIM 2.0 provisioning routes.
 	// В Core-билде — no-op.
 	RegisterSCIMRoutes func(r *mux.Router)
+
+	// OrgBudget — PR-G4: org-level aggregate budget checker.
+	// Uses proxy.OrgBudgetChecker interface (defined in core proxy package).
+	// nil в Core-билде.
+	OrgBudget proxy.OrgBudgetChecker
 }
 
 // enterpriseDeps — входные данные, которые wire получает от main,

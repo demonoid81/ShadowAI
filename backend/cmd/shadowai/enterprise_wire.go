@@ -26,6 +26,7 @@ import (
 	"github.com/shadowai/backend/internal/legalhold"
 	"github.com/shadowai/backend/internal/oidcauth"
 	"github.com/shadowai/backend/internal/orgadmin"
+	"github.com/shadowai/backend/internal/orgbudget"
 	"github.com/shadowai/backend/internal/scim"
 	"github.com/shadowai/backend/internal/siem"
 )
@@ -96,6 +97,11 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	orgAdminRepo := orgadmin.NewRepository(deps.DB)
 	orgAdminHandler := orgadmin.NewHandler(orgAdminRepo, adminAuditRecorder)
 
+	// PR-G4: Org-level aggregate budget caps.
+	orgBudgetRepo := orgbudget.NewRepository(deps.DB)
+	orgBudgetSvc := orgbudget.NewService(orgBudgetRepo, adminAuditRecorder)
+	orgBudgetHandler := orgbudget.NewHandler(orgBudgetSvc)
+
 	// Provider/Model Governance (PR-G1). Singleton via migration 012.
 	governanceRepo := governance.NewPGRepository(deps.DB)
 	governanceSvc := governance.NewService(governanceRepo)
@@ -151,6 +157,7 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		AdminAudit: adminAuditRecorder,
 		Governance: governanceSvc,
 		Eraser:     erasureSvc,
+		OrgBudget:  orgBudgetSvc,
 
 		// PR-E2: SCIM 2.0 routes (separate bearer token, not admin JWT).
 		RegisterSCIMRoutes: func(r *mux.Router) {
@@ -229,6 +236,9 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			orgRoutes.HandleFunc("/scim-tokens", orgAdminHandler.ListSCIMTokens).Methods("GET")
 			orgRoutes.HandleFunc("/scim-tokens", orgAdminHandler.CreateSCIMToken).Methods("POST")
 			orgRoutes.HandleFunc("/scim-tokens/{token_id}", orgAdminHandler.RevokeSCIMToken).Methods("DELETE")
+			// PR-G4: org budget endpoints.
+			orgRoutes.HandleFunc("/budget", orgBudgetHandler.GetBudget).Methods("GET")
+			orgRoutes.HandleFunc("/budget", orgBudgetHandler.PutBudget).Methods("PUT")
 			// PR-G1: Provider/Model Governance CRUD.
 			admin.HandleFunc("/governance/policy", governanceHandler.GetPolicy).Methods("GET")
 			admin.HandleFunc("/governance/policy", governanceHandler.UpdatePolicy).Methods("PUT")

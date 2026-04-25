@@ -315,6 +315,10 @@ func main() {
 	// incremental означает transport-only). Normalize защищает от
 	// неизвестных значений (fallback buffered).
 	proxyHandler.SetStreamingMode(config.NormalizeStreamingMode(cfg.StreamingMode))
+	// PR-G4: wire org-level budget checker (enterprise-only; nil-safe in proxy).
+	if entBundle.OrgBudget != nil {
+		proxyHandler.SetOrgBudget(entBundle.OrgBudget)
+	}
 
 	connectivityCtx, connectivityCancel := context.WithCancel(context.Background())
 	defer connectivityCancel()
