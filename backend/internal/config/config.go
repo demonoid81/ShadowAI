@@ -258,6 +258,15 @@ type Config struct {
 	// Default false: unverified emails are rejected for link/provision/sync.
 	// In prod, requires OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD=true (double opt-in).
 	OIDCAllowUnverifiedEmail bool
+	// PR-E3: IdP MFA enforcement.
+	// OIDC_REQUIRE_MFA_FOR_ADMIN — deny OIDC admin login if IdP claims don't confirm MFA.
+	OIDCRequireMFAForAdmin bool
+	// OIDC_MFA_AMR_VALUES — comma-separated AMR values that count as MFA.
+	// Default when OIDC_REQUIRE_MFA_FOR_ADMIN=true: "mfa,otp,hwk,swk".
+	OIDCMFAAMRValues string
+	// OIDC_MFA_ACR_VALUES — comma-separated ACR values that count as MFA.
+	// Used for IdPs that express MFA via acr rather than amr.
+	OIDCMFAACRValues string
 	// OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD — explicit prod opt-in for the dangerous
 	// email_verified bypass. Without this, ValidateStartupConfig rejects the config.
 	OIDCAllowUnverifiedEmailInProd bool
@@ -369,6 +378,9 @@ func Load() *Config {
 		OIDCAllowUnverifiedEmail:       getEnv("OIDC_ALLOW_UNVERIFIED_EMAIL", "false") == "true",
 		OIDCAllowUnverifiedEmailInProd: getEnv("OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD", "false") == "true",
 		OIDCDiscoveryTimeout:           getDuration("OIDC_DISCOVERY_TIMEOUT", 10*time.Second),
+		OIDCRequireMFAForAdmin:         getEnv("OIDC_REQUIRE_MFA_FOR_ADMIN", "false") == "true",
+		OIDCMFAAMRValues:               getEnv("OIDC_MFA_AMR_VALUES", ""),
+		OIDCMFAACRValues:               getEnv("OIDC_MFA_ACR_VALUES", ""),
 
 		// PR-W4.2: immudb sink.
 		AuditImmuDBAddr:        getEnv("AUDIT_IMMUDB_ADDR", "127.0.0.1:3322"),

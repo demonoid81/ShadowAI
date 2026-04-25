@@ -26,9 +26,21 @@ type IDTokenClaims struct {
 	// account-takeover path: an attacker registers the target email at an IdP
 	// that doesn't verify it, triggering a link/provision for the victim's account.
 	EmailVerified bool
-	Name       string   // "name" claim (optional)
-	Groups     []string // "groups" claim — for role mapping
-	Department string   // extracted via Config.DepartmentClaim
+	Name          string   // "name" claim (optional)
+	Groups        []string // "groups" claim — for role mapping
+	Department    string   // extracted via Config.DepartmentClaim
+	// PR-E3: MFA claims from IdP.
+	// AMR (Authentication Methods References) — methods used during authentication.
+	// Common values: "mfa" (generic), "otp", "hwk" (hardware key), "swk" (software key),
+	// "sms", "pwd". IdPs: Okta uses "mfa"+"pwd", Azure AD uses "mfa", Google uses "otp".
+	AMR []string // "amr" claim
+	// ACR (Authentication Context Class Reference) — policy-level authentication context.
+	// Example: "urn:mace:incommon:iap:silver", "mfa" (Okta custom ACR).
+	ACR string // "acr" claim
+	// MFAVerifiedByIdP is true if the IdP's amr/acr claims confirm MFA was performed.
+	// Populated by Config.CheckMFAClaims; controls whether the issued JWT carries
+	// MFAVerified=true so that ADMIN_MFA_REQUIRED does not block OIDC admin sessions.
+	MFAVerifiedByIdP bool
 }
 
 // UserSyncer resolves an OIDC identity to a ShadowAI user, applying

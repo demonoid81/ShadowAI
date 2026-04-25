@@ -139,6 +139,14 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-E3: OIDC_REQUIRE_MFA_FOR_ADMIN=true is a security opt-in.
+	// No additional prod validation needed here: when OIDC_MFA_AMR_VALUES and
+	// OIDC_MFA_ACR_VALUES are both empty, FromAppConfig auto-applies defaults
+	// {"mfa","otp","hwk","swk"}, so admins are never locked out by misconfigured empties.
+	// Operators who set OIDC_MFA_AMR_VALUES to a non-empty custom value must verify
+	// their IdP actually sends those values — that's an operational runbook concern,
+	// not a startup validation concern.
+
 	// PR-E1: OIDC в prod требует HTTPS issuer/redirect и все обязательные поля.
 	if c.OIDCEnabled {
 		if strings.TrimSpace(c.OIDCIssuerURL) == "" {

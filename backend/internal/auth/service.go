@@ -212,11 +212,20 @@ func (s *Service) RevokeTokens(ctx context.Context, userID string) error {
 }
 
 func (s *Service) GenerateTokenForUserID(ctx context.Context, userID string) (string, error) {
+	return s.GenerateTokenForUserIDWithMFA(ctx, userID, false)
+}
+
+// GenerateTokenForUserIDWithMFA issues a JWT and optionally sets MFAVerified=true.
+// Used by OIDC callback when the IdP confirms MFA via amr/acr claims (PR-E3).
+func (s *Service) GenerateTokenForUserIDWithMFA(ctx context.Context, userID string, mfaVerified bool) (string, error) {
 	u, err := s.repo.GetByID(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	return s.generateToken(u)
+	if !mfaVerified {
+		return s.generateToken(u)
+	}
+	return s.generateMFAToken(u) // generateMFAToken sets MFAVerified=true
 }
 
 func (s *Service) ValidateToken(tokenStr string) (*Claims, error) {

@@ -166,9 +166,12 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Extract claims.
+	// 5. Extract claims (including amr/acr for MFA enforcement).
 	claims := extractClaims(claimMap, h.cfg.DepartmentClaim)
 	claims.Subject = idToken.Subject
+
+	// 5a. PR-E3: check IdP MFA claims.
+	claims.MFAVerifiedByIdP = h.cfg.CheckMFAClaims(claims)
 
 	// 6. Sync user.
 	result, err := h.syncer.Sync(ctx, idToken.Issuer, claims)
@@ -179,8 +182,19 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7. Issue internal JWT.
-	jwtStr, err := h.authSvc.GenerateTokenForUserID(ctx, result.User.ID)
+	// 6a. PR-E3: enforce MFA for admin role when OIDC_REQUIRE_MFA_FOR_ADMIN=true.
+	// This runs AFTER sync so we know the resolved role (which may have been
+	// mapped from OIDC groups).
+	if h.cfg.RequireMFAForAdmin && result.User.Role == auth.RoleAdmin && !claims.MFAVerifiedByIdP {
+		log.Printf("oidc: admin MFA not confirmed (amr=%v acr=%q user=%s)",
+			claims.AMR, claims.ACR, result.User.ID)
+		h.recordMFADenied(r, result.User.ID, claims)
+		writeOIDCError(w, http.StatusForbidden, "admin_mfa_required")
+		return
+	}
+
+	// 7. Issue internal JWT — MFAVerified=true if IdP confirmed MFA.
+	jwtStr, err := h.authSvc.GenerateTokenForUserIDWithMFA(ctx, result.User.ID, claims.MFAVerifiedByIdP)
 	if err != nil {
 		log.Printf("oidc: token issue: %v", err)
 		h.recordFail(r, "token_issue_failed", claims.Email)
@@ -215,6 +229,7 @@ func extractClaims(c map[string]any, deptClaim string) IDTokenClaims {
 		Email:         str("email"),
 		EmailVerified: emailVerified,
 		Name:          str("name"),
+		ACR:           str("acr"),
 	}
 	if deptClaim != "" {
 		claims.Department = str(deptClaim)
@@ -229,6 +244,19 @@ func extractClaims(c map[string]any, deptClaim string) IDTokenClaims {
 		}
 	case []string:
 		claims.Groups = v
+	}
+	// amr claim: []interface{} or []string.
+	switch v := c["amr"].(type) {
+	case []any:
+		for _, a := range v {
+			if s, ok := a.(string); ok && s != "" {
+				claims.AMR = append(claims.AMR, strings.ToLower(strings.TrimSpace(s)))
+			}
+		}
+	case []string:
+		for _, s := range v {
+			claims.AMR = append(claims.AMR, strings.ToLower(s))
+		}
 	}
 	return claims
 }
@@ -285,4 +313,30 @@ func writeOIDCError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": code})
+}
+
+// recordMFADenied emits an admin event when an OIDC admin login is denied
+// because the IdP did not confirm MFA.
+func (h *Handler) recordMFADenied(r *http.Request, userID string, claims IDTokenClaims) {
+	if h.adminAudit == nil {
+		return
+	}
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: &userID,
+		Action:      "oidc_mfa_not_confirmed",
+		Resource:    "oidc_session",
+		TargetID:    userID,
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  http.StatusForbidden,
+		Success:     false,
+		Metadata: map[string]any{
+			"issuer":       h.cfg.IssuerURL,
+			"amr":          claims.AMR,
+			"acr":          claims.ACR,
+			"required_amr": h.cfg.MFAAMRValues,
+			"required_acr": h.cfg.MFAACRValues,
+			// No sub/email — PII-minimized.
+		},
+	})
 }
