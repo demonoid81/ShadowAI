@@ -167,10 +167,15 @@ func (s *Service) generateMFAToken(u *domain.User) (string, error) {
 	if u.Department != nil {
 		dept = *u.Department
 	}
+	orgID := u.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	claims := &Claims{
 		UserID:       u.ID,
 		Email:        u.Email,
 		Role:         u.Role,
+		OrgID:        orgID,
 		Department:   dept,
 		TokenVersion: u.TokenVersion,
 		MFAVerified:  true,

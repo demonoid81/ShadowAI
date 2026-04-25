@@ -46,6 +46,11 @@ type Claims struct {
 	UserID       string `json:"user_id"`
 	Email        string `json:"email"`
 	Role         string `json:"role"`
+	// OrgID is the organization scope for this session (PR-T2.2).
+	// Set from users.org_id by AuthMiddleware after DB lookup — never from JWT payload.
+	// Empty string only for break-glass/global sessions (BreakGlass=true).
+	// Middleware rejects non-break-glass sessions with empty OrgID (fail-closed).
+	OrgID        string `json:"org_id,omitempty"`
 	// Department is the user's organizational department, populated from users.department.
 	// Used by PR-G3 context_scoped governance routing. Empty string = no department assigned.
 	// This field is server-issued (trusted). Request headers must NOT override it.
@@ -254,10 +259,15 @@ func (s *Service) generateToken(u *domain.User) (string, error) {
 	if u.Department != nil {
 		dept = *u.Department
 	}
+	orgID := u.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	claims := &Claims{
 		UserID:       u.ID,
 		Email:        u.Email,
 		Role:         u.Role,
+		OrgID:        orgID,
 		Department:   dept,
 		TokenVersion: u.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{

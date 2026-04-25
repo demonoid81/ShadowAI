@@ -2,11 +2,19 @@ package domain
 
 import "time"
 
+// DefaultOrgID is the stable UUID for the default single-tenant org.
+// Seeded by migration 018. Used as fallback for legacy rows and new users
+// before tenant isolation is fully active.
+const DefaultOrgID = "00000000-0000-0000-0000-000000000001"
+
 type User struct {
 	ID           string    `json:"id"`
 	Email        string    `json:"email"`
 	Password     string    `json:"-"`
 	Role         string    `json:"role"`
+	// OrgID is the organization this user belongs to (PR-T2.2).
+	// Always non-empty for real users; populated from users.org_id.
+	OrgID        string    `json:"org_id,omitempty"`
 	// Department is used by PR-G3 context_scoped governance routing.
 	// Nullable — set by admin or IdP sync. Empty = no department assigned.
 	Department   *string   `json:"department,omitempty"`

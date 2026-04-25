@@ -60,8 +60,10 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 					unauthorized()
 					return
 				}
+				// Refresh from DB — JWT payload is not source of truth for mutable fields.
 				c.Role = user.Role
 				c.Email = user.Email
+				c.OrgID = user.OrgID
 				c.TokenVersion = user.TokenVersion
 				c.Department = ptrStr(user.Department)
 
@@ -90,10 +92,15 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 						mfaRequired()
 						return
 					}
+					orgID := u.OrgID
+					if orgID == "" {
+						orgID = "00000000-0000-0000-0000-000000000001"
+					}
 					claims = &Claims{
 						UserID:       u.ID,
 						Email:        u.Email,
 						Role:         u.Role,
+						OrgID:        orgID,
 						Department:   ptrStr(u.Department),
 						TokenVersion: u.TokenVersion,
 					}
@@ -102,6 +109,15 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		if claims == nil {
+			unauthorized()
+			return
+		}
+
+		// PR-T2.2: Fail-closed for missing org.
+		// Non-break-glass sessions without an org are rejected. This prevents
+		// requests that pre-date the migration or have a corrupt user row from
+		// bypassing tenant filters in handlers. Break-glass is explicitly global.
+		if claims.OrgID == "" && !claims.BreakGlass {
 			unauthorized()
 			return
 		}

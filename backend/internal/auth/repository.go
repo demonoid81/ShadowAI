@@ -17,9 +17,13 @@ func NewRepository(db *sql.DB) *Repository {
 }
 
 func (r *Repository) CreateUser(ctx context.Context, u *domain.User) error {
+	orgID := u.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, password, role, api_key, is_active, token_version) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		u.ID, u.Email, u.Password, u.Role, u.APIKey, u.IsActive, u.TokenVersion)
+		`INSERT INTO users (id, email, password, role, api_key, is_active, token_version, org_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		u.ID, u.Email, u.Password, u.Role, u.APIKey, u.IsActive, u.TokenVersion, orgID)
 	return err
 }
 
@@ -27,9 +31,11 @@ func (r *Repository) GetByEmail(ctx context.Context, email string) (*domain.User
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
-		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE email = $1`, email).
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE email = $1`, email).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -48,9 +54,11 @@ func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.Us
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
-		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -61,9 +69,11 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, erro
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
-		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE id = $1`, id).
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE id = $1`, id).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +81,10 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, erro
 }
 
 func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, email, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version, created_at, updated_at FROM users ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, email, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +92,7 @@ func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
 	var users []domain.User
 	for rows.Next() {
 		var u domain.User
-		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt, &u.OrgID); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -124,10 +137,11 @@ func (r *Repository) GetBySCIMExternalID(ctx context.Context, externalID string)
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
-		        totp_secret, mfa_required, scim_external_id, created_at, updated_at
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
 		 FROM users WHERE scim_external_id = $1`, externalID).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -136,10 +150,14 @@ func (r *Repository) GetBySCIMExternalID(ctx context.Context, externalID string)
 
 // CreateUserSCIM inserts a SCIM-provisioned user. Password is empty (IdP-only auth).
 func (r *Repository) CreateUserSCIM(ctx context.Context, u *domain.User) error {
+	orgID := u.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO users (id, email, password, role, department, is_active, token_version, scim_external_id)
-		 VALUES ($1, $2, '', $3, $4, $5, 0, $6)`,
-		u.ID, u.Email, u.Role, u.Department, u.IsActive, u.SCIMExternalID)
+		`INSERT INTO users (id, email, password, role, department, is_active, token_version, scim_external_id, org_id)
+		 VALUES ($1, $2, '', $3, $4, $5, 0, $6, $7)`,
+		u.ID, u.Email, u.Role, u.Department, u.IsActive, u.SCIMExternalID, orgID)
 	return err
 }
 
@@ -159,7 +177,8 @@ func (r *Repository) UpdateUserSCIM(ctx context.Context, u *domain.User) error {
 // ListUsersSCIM returns all users for SCIM list operations.
 func (r *Repository) ListUsersSCIM(ctx context.Context) ([]domain.User, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, email, role, department, is_active, scim_external_id, created_at, updated_at
+		`SELECT id, email, role, department, is_active, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
 		 FROM users ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -169,7 +188,7 @@ func (r *Repository) ListUsersSCIM(ctx context.Context) ([]domain.User, error) {
 	for rows.Next() {
 		var u domain.User
 		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Department, &u.IsActive,
-			&u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			&u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -235,11 +254,12 @@ func (r *Repository) GetByOIDCSubject(ctx context.Context, issuer, subject strin
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
-		        oidc_issuer, oidc_subject, last_oidc_login_at, created_at, updated_at
+		        oidc_issuer, oidc_subject, last_oidc_login_at, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
 		 FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2`,
 		issuer, subject).Scan(
 		&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-		&u.OIDCIssuer, &u.OIDCSubject, &u.LastOIDCLoginAt, &u.CreatedAt, &u.UpdatedAt,
+		&u.OIDCIssuer, &u.OIDCSubject, &u.LastOIDCLoginAt, &u.CreatedAt, &u.UpdatedAt, &u.OrgID,
 	)
 	if err != nil {
 		return nil, err
@@ -252,11 +272,15 @@ func (r *Repository) GetByOIDCSubject(ctx context.Context, issuer, subject strin
 // api_key is NULL — users.api_key has a UNIQUE constraint; inserting '' would collide
 // with any other empty-string API key (including a second OIDC-provisioned user).
 func (r *Repository) CreateUserOIDC(ctx context.Context, u *domain.User) error {
+	orgID := u.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO users (id, email, password, role, department, is_active, token_version,
-		                   oidc_issuer, oidc_subject, last_oidc_login_at)
-		 VALUES ($1, $2, '', $3, $4, true, 0, $5, $6, $7)`,
-		u.ID, u.Email, u.Role, u.Department, u.OIDCIssuer, u.OIDCSubject, u.LastOIDCLoginAt)
+		                   oidc_issuer, oidc_subject, last_oidc_login_at, org_id)
+		 VALUES ($1, $2, '', $3, $4, true, 0, $5, $6, $7, $8)`,
+		u.ID, u.Email, u.Role, u.Department, u.OIDCIssuer, u.OIDCSubject, u.LastOIDCLoginAt, orgID)
 	return err
 }
 
