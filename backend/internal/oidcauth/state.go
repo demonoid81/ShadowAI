@@ -112,6 +112,7 @@ func randomToken() (string, error) {
 
 func (s *StateStore) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop() // prevent resource leak if goroutine ever exits
 	for range ticker.C {
 		now := time.Now()
 		s.mu.Lock()
