@@ -253,8 +253,7 @@ func (r *Repository) UpdateUserSCIM(ctx context.Context, u *domain.User) error {
 	return err
 }
 
-// ListUsersSCIM returns all users for SCIM list operations.
-// ListUsersSCIMByOrg returns users for SCIM list operations scoped to an org.
+// ListUsersSCIMByOrg returns users for SCIM list operations scoped to a single org.
 func (r *Repository) ListUsersSCIMByOrg(ctx context.Context, orgID string) ([]domain.User, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, email, role, department, is_active, scim_external_id, created_at, updated_at,
