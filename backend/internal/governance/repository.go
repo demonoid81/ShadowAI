@@ -27,19 +27,28 @@ func NewPGRepository(db *sql.DB) *PGRepository {
 	return &PGRepository{db: db}
 }
 
-// GetActive читает current active политику. Если строки нет вовсе
-// (не было миграции / seed удалён) — возвращает (nil, nil). Это
-// штатное "governance не сконфигурирован".
-func (r *PGRepository) GetActive(ctx context.Context) (*Policy, error) {
+// GetActive читает current active политику для org.
+// orgID="" — global scan (break-glass / legacy path), returns first active.
+func (r *PGRepository) GetActive(ctx context.Context, orgID string) (*Policy, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
-	const q = `SELECT id, name, mode, rules_json, role_rules_json, context_rules_json,
-	           updated_at, updated_by, is_active
-	           FROM provider_governance_policies
-	           WHERE is_active = true
-	           ORDER BY updated_at DESC
-	           LIMIT 1`
+	var q string
+	var args []any
+	if orgID != "" {
+		q = `SELECT id, name, mode, rules_json, role_rules_json, context_rules_json,
+		     updated_at, updated_by, is_active
+		     FROM provider_governance_policies
+		     WHERE is_active = true AND org_id = $1
+		     ORDER BY updated_at DESC LIMIT 1`
+		args = []any{orgID}
+	} else {
+		q = `SELECT id, name, mode, rules_json, role_rules_json, context_rules_json,
+		     updated_at, updated_by, is_active
+		     FROM provider_governance_policies
+		     WHERE is_active = true
+		     ORDER BY updated_at DESC LIMIT 1`
+	}
 	var (
 		p                Policy
 		rulesJSON        []byte
@@ -47,7 +56,7 @@ func (r *PGRepository) GetActive(ctx context.Context) (*Policy, error) {
 		contextRulesJSON []byte
 		updatedBy        sql.NullString
 	)
-	err := r.db.QueryRowContext(ctx, q).Scan(
+	err := r.db.QueryRowContext(ctx, q, args...).Scan(
 		&p.ID, &p.Name, &p.Mode, &rulesJSON, &roleRulesJSON, &contextRulesJSON,
 		&p.UpdatedAt, &updatedBy, &p.IsActive,
 	)
@@ -90,9 +99,12 @@ func (r *PGRepository) GetActive(ctx context.Context) (*Policy, error) {
 // В phase 1 мы НЕ переводим старую в is_active=false — просто
 // перезаписываем single row. В PR-G2 появится history (supersede-
 // chain через inactive rows).
-func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Policy, error) {
+func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor, orgID string) (*Policy, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("governance: repository not configured")
+	}
+	if orgID == "" {
+		orgID = "00000000-0000-0000-0000-000000000001" // fallback to default org
 	}
 	if p == nil {
 		return nil, fmt.Errorf("governance: nil policy")
@@ -135,21 +147,22 @@ func (r *PGRepository) Upsert(ctx context.Context, p *Policy, actor string) (*Po
 		actorArg = nil
 	}
 
-	// Ищем existing active. Если есть — UPDATE; если нет — INSERT.
+	// Ищем existing active для данного org. Если есть — UPDATE; если нет — INSERT.
 	var existingID string
 	err = r.db.QueryRowContext(ctx,
-		`SELECT id FROM provider_governance_policies WHERE is_active = true LIMIT 1`,
+		`SELECT id FROM provider_governance_policies WHERE is_active = true AND org_id = $1 LIMIT 1`,
+		orgID,
 	).Scan(&existingID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		const ins = `INSERT INTO provider_governance_policies
-		    (name, mode, rules_json, role_rules_json, context_rules_json, updated_at, updated_by, is_active)
-		    VALUES ($1, $2, $3, $4, $5, now(), $6, true)
+		    (name, mode, rules_json, role_rules_json, context_rules_json, updated_at, updated_by, is_active, org_id)
+		    VALUES ($1, $2, $3, $4, $5, now(), $6, true, $7)
 		    RETURNING id, updated_at`
 		var newID string
 		var updAt time.Time
 		if err := r.db.QueryRowContext(ctx, ins,
-			name, string(p.Mode), rulesJSON, roleRulesJSON, contextRulesJSON, actorArg,
+			name, string(p.Mode), rulesJSON, roleRulesJSON, contextRulesJSON, actorArg, orgID,
 		).Scan(&newID, &updAt); err != nil {
 			return nil, fmt.Errorf("governance: insert: %w", err)
 		}

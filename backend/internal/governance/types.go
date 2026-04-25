@@ -38,8 +38,9 @@ import (
 // sensitivity — из X-Data-Sensitivity header, нормализован ExtractGovernanceContext.
 //   Отсутствие/неизвестное → "unknown" (fail-restrictive).
 // Proxy всегда передаёт все поля, чтобы signature не менялся при смене mode.
+// orgID — claims.OrgID (PR-T2.3: per-org policy lookup). "" = global bypass.
 type Evaluator interface {
-	Evaluate(ctx context.Context, role, department, sensitivity, provider, model string) (Decision, error)
+	Evaluate(ctx context.Context, orgID, role, department, sensitivity, provider, model string) (Decision, error)
 }
 
 // Mode — режим политики.

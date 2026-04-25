@@ -67,7 +67,9 @@ type upsertRequest struct {
 // deploy без seed), возвращаем 200 {"configured":false} — проще
 // для UI, чем 404.
 func (h *Handler) GetPolicy(w http.ResponseWriter, r *http.Request) {
-	p, err := h.svc.GetActive(r.Context())
+	claims := auth.GetClaims(r.Context())
+	orgID, _, _ := auth.RequireOrg(claims)
+	p, err := h.svc.GetActive(r.Context(), orgID)
 	if err != nil {
 		h.recordAdmin(r, "read", "", http.StatusInternalServerError, false, map[string]any{
 			"error": "read_failed",
@@ -124,7 +126,8 @@ func (h *Handler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 		RoleRules:    req.RoleRules,
 		ContextRules: req.ContextRules,
 	}
-	saved, err := h.svc.Upsert(r.Context(), p, claims.UserID)
+	orgID, _, _ := auth.RequireOrg(claims)
+	saved, err := h.svc.Upsert(r.Context(), p, claims.UserID, orgID)
 	if err != nil {
 		var valErr *ValidationError
 		if errors.As(err, &valErr) {

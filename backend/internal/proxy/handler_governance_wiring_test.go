@@ -27,10 +27,10 @@ type govMemRepo struct {
 	policy *governance.Policy
 }
 
-func (r *govMemRepo) GetActive(ctx context.Context) (*governance.Policy, error) {
+func (r *govMemRepo) GetActive(ctx context.Context, _ string) (*governance.Policy, error) {
 	return r.policy, nil
 }
-func (r *govMemRepo) Upsert(ctx context.Context, p *governance.Policy, actor string) (*governance.Policy, error) {
+func (r *govMemRepo) Upsert(ctx context.Context, p *governance.Policy, actor, _ string) (*governance.Policy, error) {
 	r.policy = p
 	return p, nil
 }

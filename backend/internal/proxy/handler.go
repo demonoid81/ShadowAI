@@ -261,7 +261,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	// nil governanceSvc (Core build / dev) обходит enforcement.
 	if h.governanceSvc != nil {
 		gctx := auth.ExtractGovernanceContext(r, claims)
-		if dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, gctx.Department, gctx.Sensitivity, providerName, model); dec.Kind == governance.DecisionDeny {
+		if dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.OrgID, claims.Role, gctx.Department, gctx.Sensitivity, providerName, model); dec.Kind == governance.DecisionDeny {
 			h.recordGovernanceDeny(r, claims, providerName, model, dec, gctx)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -1517,7 +1517,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			if cm == "" {
 				cm = cand.Provider.DefaultModel()
 			}
-			dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.Role, gctxFallback.Department, gctxFallback.Sensitivity, cand.Name, cm)
+			dec, _ := h.governanceSvc.Evaluate(r.Context(), claims.OrgID, claims.Role, gctxFallback.Department, gctxFallback.Sensitivity, cand.Name, cm)
 			if dec.Kind == governance.DecisionAllow {
 				allowed = append(allowed, cand)
 				continue

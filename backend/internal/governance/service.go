@@ -89,15 +89,13 @@ func normalizeRules(in []ProviderRule) []ProviderRule {
 // Repository — источник active policy. В production — PG-backed
 // (см. repository.go); в тестах — in-memory mock.
 type Repository interface {
-	// GetActive возвращает текущую active policy. Если ни одной
-	// политики не создано, возвращает (nil, nil) — это штатное
-	// состояние свежего deploy.
-	GetActive(ctx context.Context) (*Policy, error)
+	// GetActive возвращает текущую active policy для org.
+	// orgID="" обходит фильтр (global / break-glass path).
+	// Если ни одной политики не создано, возвращает (nil, nil).
+	GetActive(ctx context.Context, orgID string) (*Policy, error)
 
-	// Upsert сохраняет политику. Для singleton-модели (phase 1)
-	// вызов перезаписывает существующую active policy. actor — UUID
-	// admin'а для audit (можно пустым строкой для system CLI).
-	Upsert(ctx context.Context, p *Policy, actor string) (*Policy, error)
+	// Upsert сохраняет политику для org. actor — UUID admin'а для audit.
+	Upsert(ctx context.Context, p *Policy, actor, orgID string) (*Policy, error)
 }
 
 // Service инкапсулирует логику Evaluate и доступ к Repository.
@@ -115,12 +113,11 @@ func NewService(repo Repository) *Service {
 }
 
 // GetActive — прокси к repo для handler'ов (admin CRUD).
-// Никаких side-effects здесь не делаем — это чистое чтение.
-func (s *Service) GetActive(ctx context.Context) (*Policy, error) {
+func (s *Service) GetActive(ctx context.Context, orgID string) (*Policy, error) {
 	if s == nil || s.repo == nil {
 		return nil, nil
 	}
-	return s.repo.GetActive(ctx)
+	return s.repo.GetActive(ctx, orgID)
 }
 
 // Upsert — прокси к repo. Валидация Mode + нормализация Rules.
@@ -135,7 +132,7 @@ func (s *Service) GetActive(ctx context.Context) (*Policy, error) {
 //   - Sensitivity values должны быть из enum (или empty = any).
 //
 // Validation errors возвращаются как *ValidationError — handler map'ит в 400.
-func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy, error) {
+func (s *Service) Upsert(ctx context.Context, p *Policy, actor, orgID string) (*Policy, error) {
 	if s == nil || s.repo == nil {
 		return nil, fmt.Errorf("governance: service not configured")
 	}
@@ -150,7 +147,7 @@ func (s *Service) Upsert(ctx context.Context, p *Policy, actor string) (*Policy,
 	p.Rules = normalizeRules(p.Rules)
 	p.RoleRules = normalizeRoleRules(p.RoleRules)
 	p.ContextRules = normalizeContextRules(p.ContextRules)
-	return s.repo.Upsert(ctx, p, actor)
+	return s.repo.Upsert(ctx, p, actor, orgID)
 }
 
 // ValidationError — user-facing validation error from Service.Upsert.
@@ -173,11 +170,11 @@ func (e *ValidationError) Error() string { return "governance: " + e.Msg }
 //	Mode == context_scoped (PR-G3)   → find ContextRule by (dept+role+sensitivity)
 //
 // Сравнение case-insensitive.
-func (s *Service) Evaluate(ctx context.Context, role, department, sensitivity, provider, model string) (Decision, error) {
+func (s *Service) Evaluate(ctx context.Context, orgID, role, department, sensitivity, provider, model string) (Decision, error) {
 	if s == nil || s.repo == nil {
 		return Decision{Kind: DecisionAllow, Code: CodeGovernanceDisabled, MatchedRuleIndex: -1}, nil
 	}
-	p, err := s.repo.GetActive(ctx)
+	p, err := s.repo.GetActive(ctx, orgID)
 	if err != nil {
 		return Decision{
 			Kind:             DecisionDeny,
