@@ -197,6 +197,88 @@ for every pre-existing row as part of the DDL. No separate
 
 ---
 
+### D6: T1.1 — Open question decisions (OQ-2…OQ-5)
+
+These decisions were deferred from the initial RFC to keep T1 scope focused.
+All four are resolved here; no further blockers remain before PR-T2 implementation.
+
+---
+
+#### D6.1: SCIM org source (was OQ-2)
+
+**Decision: one SCIM Bearer token = one org_id. No `X-Org-ID` header.**
+
+Rationale:
+- A header can be spoofed or accidentally omitted by any client with network access.
+- A Bearer token is a signed credential issued and stored server-side; its org binding
+  is immutable after issue. Audit trail is clear: token ID → org_id, no runtime
+  header manipulation possible.
+- Implementation is simpler: no per-request org lookup or header validation.
+
+PR-T2 consequence: Add `scim_tokens` table (or extend existing SCIM config) with
+`org_id UUID` column. SCIM bearer auth middleware resolves `org_id` from the token
+record, not from the request. One token can be issued per org; multiple tokens per
+org are allowed for key rotation purposes.
+
+---
+
+#### D6.2: Budget model (was OQ-3)
+
+**Decision: per-user budgets within org for T2. Org aggregate cap deferred to T2.1/G4.**
+
+Rationale:
+- Tenant isolation ≠ billing/quotas. Adding org-level aggregate caps introduces
+  product semantics (who gets blocked when the cap is hit? UI/API for cap management?)
+  that belong in a billing PR, not an isolation PR.
+- Per-user budgets already exist; making them tenant-safe (verify user ∈ org before
+  accessing budget) is a narrow, mechanical change.
+
+PR-T2 consequence:
+- `GET /api/budgets/{user_id}` and `PUT /api/budgets/{user_id}`: handler verifies
+  `targetUser.org_id == claims.org_id` for non-global-admin requests.
+- `global_admin` accessing another org's budget gets an `admin_event_log` entry
+  with `target_org_id` set.
+- No `org_id` column added to `budgets` table in T2; budget isolation is enforced
+  via the `users` JOIN (`budgets.user_id → users.id → users.org_id`).
+
+---
+
+#### D6.3: Global CLI semantics (was OQ-4)
+
+**Decision: dangerous global operations require explicit opt-in flags. `audit-verify` may default global (read-only).**
+
+| Tool | Default | Global flag | Rationale |
+|------|---------|-------------|-----------|
+| `audit-export-evidence` | Requires `--org-id` | `--global` (global_admin only) | Export is destructive if misused; must be opt-in |
+| `audit-purge` | Requires `--org-id` | `--all-orgs` (global_admin only) | Purge is irreversible; auto-detect from JWT dangerous |
+| `audit-verify` | Global (read-only) | `--org-id <uuid>` for scoped report | Verify is safe to run globally; org filter produces tenant-scoped report |
+
+Rationale: auto-detecting global scope from JWT creates implicit behavior where the
+same binary run by a global_admin produces different output than run by a tenant admin,
+with no visible indication at the call site. Explicit flags make the scope obvious in
+scripts and runbooks.
+
+---
+
+#### D6.4: internal_db_sources scope (was OQ-5)
+
+**Decision: `internal_db_sources` org-scoped by default. Shared/global sources deferred.**
+
+Rationale:
+- An internal DB source contains a DSN (possibly with credentials) and schema
+  visibility. Sharing one source between orgs allows cross-tenant schema inspection
+  even without data queries.
+- Deferred shared sources avoid complexity: `scope=org|global` column + authorization
+  rules + cross-org audit markers would all be required. This can be added later via
+  a dedicated PR with a separate RFC section.
+
+PR-T2 consequence:
+- Add `org_id UUID` to `internal_db_sources` table (Phase 1 migration).
+- All `/api/internal-dbs/*` reads filter by `claims.org_id`.
+- Future shared sources require `scope VARCHAR(16) DEFAULT 'org'` column + separate RFC.
+
+---
+
 ## 3. Table Inventory
 
 ### Core tables (migrations/*)
@@ -418,13 +500,13 @@ in a request-handling path. Exceptions allowed only in:
 | # | Question | Owner | Deadline | Status |
 |---|----------|-------|---------|--------|
 | ~~OQ-1~~ | ~~WORM chain: bundle README warn about global chain continuity?~~ | RFC author | — | **Closed** — answered in D4: Option A exports full digest inventory; README disclaimer is mandatory and wording is specified in D4 |
-| OQ-2 | SCIM: one endpoint per org (different Bearer tokens) or single endpoint with `X-Org-ID` header? | Mikhail | Before PR-T2 | Open |
-| OQ-3 | Budget model: per-user within org, or per-org aggregate cap, or both? | Product | Before PR-T2 | Open |
-| OQ-4 | Global admin UI/CLI: should `audit-verify` auto-detect global_admin from JWT or require explicit `--global` flag? | Security | Before PR-T2 | Open |
-| OQ-5 | `internal_db_sources`: are these org-scoped or global? (Internal DB sources may be shared across orgs in some deployments) | Architecture | Before PR-T2 | Open |
-| ~~OQ-6~~ | ~~Per-tenant bundle Merkle validation: subset proof vs skip InventoryCount?~~ | Architecture | — | **Closed** — resolved by D4: Option A with mandatory Merkle root recomputation from full inventory covers PR-T2 Phase 5. Merkle inclusion proofs (subset proof per-org row without full inventory) deferred to PR-T3 / W6 as a separate RFC when per-org bundle privacy becomes a hard requirement. |
+| ~~OQ-2~~ | ~~SCIM: one endpoint per org vs X-Org-ID header?~~ | Mikhail | — | **Closed** — D6.1: one Bearer token = one org_id; header rejected (spoofable). Add `scim_tokens.org_id`. |
+| ~~OQ-3~~ | ~~Budget model: per-user or per-org aggregate cap?~~ | Product | — | **Closed** — D6.2: per-user budgets tenant-safe via users JOIN for T2; org aggregate cap deferred to T2.1/G4. |
+| ~~OQ-4~~ | ~~Global CLI: auto-detect or explicit --global flag?~~ | Security | — | **Closed** — D6.3: explicit flags for export/purge; verify may default global (read-only). See flag table in D6.3. |
+| ~~OQ-5~~ | ~~internal_db_sources: org-scoped or global?~~ | Architecture | — | **Closed** — D6.4: org-scoped by default; shared sources deferred to separate RFC. |
+| ~~OQ-6~~ | ~~Per-tenant bundle Merkle validation: subset proof vs skip InventoryCount?~~ | Architecture | — | **Closed** — resolved by D4: Option A with mandatory Merkle root recomputation from full inventory covers PR-T2 Phase 5. Merkle inclusion proofs deferred to PR-T3/W6. |
 
-**Implementation must not begin until OQ-2 through OQ-5 are resolved.**
+**All open questions resolved. PR-T2 implementation may begin.**
 
 ---
 
@@ -434,10 +516,11 @@ Implementation is phased to ensure zero-downtime and incremental testability.
 
 ### Phase 1: Schema + seed (1 migration, no code changes)
 - Create `organizations` table with default row
-- Add `org_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'` to all tenant-scoped tables (see §3)
+- Add `org_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'` to all tenant-scoped tables (see §3; includes `internal_db_sources` per D6.4)
 - Add `canonical_version VARCHAR(4) NOT NULL DEFAULT 'v1'` to all chained tables (`audit_logs`, `admin_event_logs`, `legal_hold_events`, `audit_purge_runs`)
-- Add `source_org_id UUID` and `target_org_id UUID` (nullable, no FK — actor org may differ from default org) to `admin_event_logs` (see D2/D3)
+- Add `source_org_id UUID` and `target_org_id UUID` (nullable, no FK) to `admin_event_logs` (see D2/D3)
 - Add `scope VARCHAR(16) NOT NULL DEFAULT 'org'` to `audit_purge_runs` (see D3)
+- Create `scim_tokens` table with `org_id UUID NOT NULL` (per D6.1; token ↔ org binding)
 - No application changes required; existing queries continue to work
 - Smoke test: `go test -tags 'enterprise smoke' ./smoke/...` must pass
 
@@ -445,26 +528,30 @@ Implementation is phased to ensure zero-downtime and incremental testability.
 - Add `OrgID` to `Claims` struct
 - `AuthMiddleware`: set `claims.OrgID` from `users.org_id`
 - OIDC callback: map org claim to `users.org_id`
-- SCIM provisioner: accept org context
+- SCIM bearer auth: resolve `org_id` from `scim_tokens` record, not request header (D6.1)
 - Tests: middleware unit tests + OIDC smoke
 
 ### Phase 3: Repository filters
 - Add `orgID string` parameter to all tenant-scoped repo methods
 - Pass `claims.OrgID` from handler → service → repo
-- Global admin: `orgID = ""` passes through (no filter)
+- `internal_db_sources`: all reads/writes filter by `org_id` (D6.4)
+- Budget handlers: verify `targetUser.org_id == claims.org_id` via JOIN; no `org_id` column added to `budgets` (D6.2)
+- Global admin: `orgID = ""` passes through (no filter); budget/internal-db cross-org access logged with `target_org_id`
 - Tests: TDD — write failing tests first, then implement
 
 ### Phase 4: Handler enforcement
 - All non-global handlers: verify `claims.OrgID != ""` for non-global roles
-- Global admin paths: require `role == "global_admin"`, log cross-org access
+- Global admin paths: require `role == "global_admin"`, log cross-org access with `source_org_id`/`target_org_id` in `admin_event_logs`
 - Governance: per-org policy activation
 - Tests: handler-level tests for cross-org rejection
 
-### Phase 5: Evidence + export
-- `audit-export-evidence`: add `--org-id` flag; require for non-global-admin
-- `audit-verify`: add `--org-id` flag (optional; no filter = global)
+### Phase 5: Evidence + export (CLI flags per D6.3)
+- `audit-export-evidence --org-id <uuid>`: required for non-global-admin; `--global` flag for global_admin full export
+- `audit-verify`: defaults global (read-only safe); `--org-id <uuid>` for tenant-scoped report
+- `audit-purge --org-id <uuid>`: required; `--all-orgs` for global_admin cross-org purge
+- Bundle verifier: implement mandatory Merkle root recomputation (D4 requirement)
 - Bundle README: add per-tenant vs global disclaimer
-- Tests: smoke `TestSmoke_WORM_ChainAnchorBundle` extended with org filter
+- Tests: smoke `TestSmoke_WORM_ChainAnchorBundle` extended with org filter + Merkle check
 
 ### Phase 6: Smoke + runbook update
 - Extend enterprise smoke: create two orgs, verify data isolation
