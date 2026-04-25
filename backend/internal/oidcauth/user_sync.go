@@ -62,6 +62,12 @@ func (s *UserSyncer) GetBySubject(ctx context.Context, issuer, subject string) (
 	return s.repo.GetByOIDCSubject(ctx, issuer, subject)
 }
 
+// GetByEmail looks up an existing user by email. Used by the handler's
+// wouldBeAdmin() to check the email-link path (OIDC_LINK_BY_EMAIL=true).
+func (s *UserSyncer) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
+	return s.repo.GetByEmail(ctx, email)
+}
+
 // SyncResult carries the outcome of an OIDC sync.
 type SyncResult struct {
 	User          *domain.User

@@ -190,7 +190,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		if admin, reason := h.wouldBeAdmin(ctx, idToken.Issuer, claims); admin {
 			log.Printf("oidc: admin MFA not confirmed (amr=%v acr=%q reason=%s)",
 				claims.AMR, claims.ACR, reason)
-			h.recordMFADenied(r, "preflight:"+claims.Subject, claims)
+			h.recordMFADenied(r, reason, claims)
 			writeOIDCError(w, http.StatusForbidden, "admin_mfa_required")
 			return
 		}
@@ -328,21 +328,31 @@ func writeOIDCError(w http.ResponseWriter, status int, code string) {
 }
 
 // wouldBeAdmin returns (true, reason) if processing this callback would result
-// in an admin session — either because the user is already admin in the DB, or
-// because the OIDC groups claim maps to the admin role.
+// in an admin session. Checks three paths in order:
+//  1. OIDC groups claim maps to admin role.
+//  2. Existing user found by subject already has admin role.
+//  3. OIDC_LINK_BY_EMAIL=true: email is verified and existing user found by email
+//     already has admin role (the email-link path in Sync would link this session).
 //
-// Called BEFORE Sync() to prevent dirty writes (role upgrade, email update, etc.)
-// when admin MFA enforcement is triggered.
+// Called BEFORE Sync() to prevent dirty writes when admin MFA is denied.
 func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDTokenClaims) (bool, string) {
-	// Check if groups claim would map to admin.
+	// 1. Groups → admin mapping.
 	if mappedRole := h.cfg.MapRole(claims.Groups); mappedRole == auth.RoleAdmin {
 		return true, "groups_map_to_admin"
 	}
-	// Check if existing user (by subject) already has admin role in DB.
+	// 2. Existing user by subject already admin.
 	if claims.Subject != "" {
 		existing, err := h.syncer.GetBySubject(ctx, issuer, claims.Subject)
 		if err == nil && existing != nil && existing.Role == auth.RoleAdmin {
 			return true, "existing_admin_role"
+		}
+	}
+	// 3. Email-link path: OIDC_LINK_BY_EMAIL=true + verified email → would link to existing admin.
+	// If email is unverified we skip this check (email-link is also blocked for unverified email).
+	if h.cfg.LinkByEmail && claims.EmailVerified && claims.Email != "" {
+		byEmail, err := h.syncer.GetByEmail(ctx, claims.Email)
+		if err == nil && byEmail != nil && byEmail.Role == auth.RoleAdmin {
+			return true, "email_link_to_admin"
 		}
 	}
 	return false, ""
@@ -350,26 +360,30 @@ func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDToke
 
 // recordMFADenied emits an admin event when an OIDC admin login is denied
 // because the IdP did not confirm MFA.
-func (h *Handler) recordMFADenied(r *http.Request, userID string, claims IDTokenClaims) {
+//
+// ActorUserID is nil — at this point we don't have a verified UUID (the check
+// fires before Sync() in the pre-flight path, and the sub/email may not exist
+// in DB). Identification context is preserved in metadata instead.
+func (h *Handler) recordMFADenied(r *http.Request, reason string, claims IDTokenClaims) {
 	if h.adminAudit == nil {
 		return
 	}
 	h.adminAudit.Record(r.Context(), adminaudit.Event{
-		ActorUserID: &userID,
+		ActorUserID: nil, // not a UUID — never put "preflight:<sub>" here
 		Action:      "oidc_mfa_not_confirmed",
 		Resource:    "oidc_session",
-		TargetID:    userID,
 		Path:        r.URL.Path,
 		Method:      r.Method,
 		StatusCode:  http.StatusForbidden,
 		Success:     false,
 		Metadata: map[string]any{
 			"issuer":       h.cfg.IssuerURL,
+			"reason":       reason,
 			"amr":          claims.AMR,
 			"acr":          claims.ACR,
 			"required_amr": h.cfg.MFAAMRValues,
 			"required_acr": h.cfg.MFAACRValues,
-			// No sub/email — PII-minimized.
+			// No sub/email — PII-minimized; reason encodes which path triggered denial.
 		},
 	})
 }
