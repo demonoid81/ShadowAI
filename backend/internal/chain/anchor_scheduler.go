@@ -94,6 +94,12 @@ func (s *AnchorScheduler) Run(ctx context.Context) {
 	}
 }
 
+// RunOnce выполняет ровно один anchor pass для всех tables и возвращает.
+// Используется в тестах и smoke-harness где interval=0 неприменим.
+func (s *AnchorScheduler) RunOnce(ctx context.Context) {
+	s.anchorOnce(ctx)
+}
+
 // anchorOnce выполняет один anchor run для всех tables.
 func (s *AnchorScheduler) anchorOnce(ctx context.Context) {
 	for _, table := range s.tables {

@@ -195,12 +195,14 @@ func TestSmoke_WORM_ChainAnchorBundle(t *testing.T) {
 	}
 	t.Logf("smoke/worm: chain verify OK (rows=%d)", vr.RowCount)
 
-	// 3. Run anchor scheduler once (interval=0 → immediate + return).
+	// 3. Run anchor scheduler once via RunOnce.
+	// Run(ctx) with interval=0 is a no-op by contract; RunOnce executes exactly
+	// one anchor pass without starting the ticker loop.
 	sinkPath := t.TempDir() + "/anchors.ndjson"
 	chain.NewAnchorScheduler(chainRepo, chain.NewFileSink(sinkPath), 0,
 		[]string{"audit_logs"}).
 		WithSigning(priv, "smoke-key-1", pub).
-		Run(ctx)
+		RunOnce(ctx)
 
 	anchors, err := chainRepo.ListAnchors(ctx, "audit_logs")
 	if err != nil {
