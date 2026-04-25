@@ -302,7 +302,7 @@ func TestSmoke_Governance_RoleBased(t *testing.T) {
 				{Provider: "openai", Models: []string{"gpt-4"}},
 			}},
 		},
-	}, "smoke-test")
+	}, "")
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestSmoke_Governance_ContextScoped(t *testing.T) {
 				Rules:       []governance.ProviderRule{{Provider: "openai", Models: []string{"gpt-4"}}},
 			},
 		},
-	}, "smoke-test")
+	}, "")
 	if err != nil {
 		t.Fatalf("Upsert context_scoped: %v", err)
 	}
