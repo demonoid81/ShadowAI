@@ -25,6 +25,7 @@ import (
 	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/legalhold"
 	"github.com/shadowai/backend/internal/oidcauth"
+	"github.com/shadowai/backend/internal/orgadmin"
 	"github.com/shadowai/backend/internal/scim"
 	"github.com/shadowai/backend/internal/siem"
 )
@@ -90,6 +91,10 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	// pre-tx проверяет hold и возвращает ErasureHoldActive.
 	erasureSvc := auth.NewErasureService(deps.DB, deps.AuditRepo, deps.BudgetRepo).
 		WithHoldChecker(legalHoldSvc)
+
+	// PR-T2.6: Org management + SCIM token management (global_admin only).
+	orgAdminRepo := orgadmin.NewRepository(deps.DB)
+	orgAdminHandler := orgadmin.NewHandler(orgAdminRepo, adminAuditRecorder)
 
 	// Provider/Model Governance (PR-G1). Singleton via migration 012.
 	governanceRepo := governance.NewPGRepository(deps.DB)
@@ -209,6 +214,21 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			admin.HandleFunc("/users/{id}/erase", authHandler.EraseUser).Methods("POST")
 			// PR-D: admin access audit list.
 			admin.HandleFunc("/admin-events", adminAuditHandler.List).Methods("GET")
+
+			// PR-T2.6: Org management (global_admin only).
+			globalAdminOrgs := admin.PathPrefix("/orgs").Subrouter()
+			globalAdminOrgs.Use(auth.RequireGlobalAdmin)
+			globalAdminOrgs.HandleFunc("", orgAdminHandler.ListOrgs).Methods("GET")
+			globalAdminOrgs.HandleFunc("", orgAdminHandler.CreateOrg).Methods("POST")
+
+			// Org-scoped routes: global_admin or own-org admin.
+			orgRoutes := admin.PathPrefix("/orgs/{org_id}").Subrouter()
+			orgRoutes.Use(auth.RequireOrgAccess("org_id"))
+			orgRoutes.HandleFunc("", orgAdminHandler.GetOrg).Methods("GET")
+			orgRoutes.HandleFunc("", orgAdminHandler.UpdateOrg).Methods("PATCH")
+			orgRoutes.HandleFunc("/scim-tokens", orgAdminHandler.ListSCIMTokens).Methods("GET")
+			orgRoutes.HandleFunc("/scim-tokens", orgAdminHandler.CreateSCIMToken).Methods("POST")
+			orgRoutes.HandleFunc("/scim-tokens/{token_id}", orgAdminHandler.RevokeSCIMToken).Methods("DELETE")
 			// PR-G1: Provider/Model Governance CRUD.
 			admin.HandleFunc("/governance/policy", governanceHandler.GetPolicy).Methods("GET")
 			admin.HandleFunc("/governance/policy", governanceHandler.UpdatePolicy).Methods("PUT")

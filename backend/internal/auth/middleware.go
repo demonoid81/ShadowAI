@@ -166,6 +166,57 @@ func ptrStr(s *string) string {
 	return *s
 }
 
+// RequireGlobalAdmin allows only global_admin role or break-glass sessions.
+// Break-glass is accepted as emergency path; audit metadata carries break_glass=true.
+func RequireGlobalAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims := GetClaims(r.Context())
+		if claims == nil {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		if claims.Role != RoleGlobalAdmin && !claims.BreakGlass {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"forbidden: global_admin role required"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireOrgAccess allows global_admin/break-glass to access any org,
+// and admin to access only their own org (from URL param orgIDParam).
+func RequireOrgAccess(orgIDParam string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := GetClaims(r.Context())
+			if claims == nil {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			if IsGlobalClaims(claims) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if claims.Role != RoleAdmin {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				return
+			}
+			// Tenant admin: may only access their own org.
+			targetOrgID := mux.Vars(r)[orgIDParam]
+			if targetOrgID != "" && targetOrgID != claims.OrgID {
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"forbidden: cross-org access denied"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func RequireRole(roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

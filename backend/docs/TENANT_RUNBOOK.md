@@ -1,6 +1,6 @@
 # ShadowAI Tenant Isolation — Operator Runbook
 
-**Version:** T2.5 (2026-04-25)  
+**Version:** T2.5 (2026-04-25)
 **Applies to:** Enterprise deployments with multi-tenant isolation enabled (T2.1+)
 
 ---
