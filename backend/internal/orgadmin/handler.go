@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -54,7 +55,7 @@ func (h *Handler) ListOrgs(w http.ResponseWriter, r *http.Request) {
 		orgs = []domain.Organization{}
 	}
 	writeJSON(w, http.StatusOK, orgs)
-	h.record(r, "list", "organizations", "", nil)
+	h.record(r, "list", "organizations", "", http.StatusOK, "", nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +94,8 @@ func (h *Handler) CreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, org)
-	h.record(r, "create", "organization", org.ID, map[string]any{"slug": org.Slug})
+	// Pass org.ID as targetOrgIDOverride — POST /api/orgs has no {org_id} URL param.
+	h.record(r, "create", "organization", org.ID, http.StatusCreated, org.ID, map[string]any{"slug": org.Slug})
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +114,7 @@ func (h *Handler) GetOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, org)
-	h.record(r, "read", "organization", orgID, nil)
+	h.record(r, "read", "organization", orgID, http.StatusOK, "", nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ func (h *Handler) UpdateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, existing)
-	h.record(r, "update", "organization", orgID, map[string]any{"is_active": existing.IsActive})
+	h.record(r, "update", "organization", orgID, http.StatusOK, "", map[string]any{"is_active": existing.IsActive})
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ func (h *Handler) ListSCIMTokens(w http.ResponseWriter, r *http.Request) {
 		tokens = []domain.SCIMToken{}
 	}
 	writeJSON(w, http.StatusOK, tokens)
-	h.record(r, "list", "scim_tokens", orgID, nil)
+	h.record(r, "list", "scim_tokens", orgID, http.StatusOK, "", nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +200,13 @@ func (h *Handler) CreateSCIMToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Label string `json:"label"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Credential-issuing endpoint: malformed JSON must be rejected (fix T2.6.1).
+	// io.EOF = empty body = no label, which is allowed.
+	// Any other decode error (truncated/invalid JSON) = 400.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 
 	result, err := h.repo.CreateSCIMToken(r.Context(), orgID, strings.TrimSpace(req.Label))
 	if err != nil {
@@ -212,7 +220,7 @@ func (h *Handler) CreateSCIMToken(w http.ResponseWriter, r *http.Request) {
 		"plain_token": result.PlainToken, // operator must transmit to IdP and discard
 		"warning":     "Store this token securely. It will not be shown again.",
 	})
-	h.record(r, "create", "scim_token", result.Token.ID, map[string]any{
+	h.record(r, "create", "scim_token", result.Token.ID, http.StatusCreated, "", map[string]any{
 		"org_id": orgID,
 		"label":  result.Token.Label,
 	})
@@ -237,14 +245,18 @@ func (h *Handler) RevokeSCIMToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-	h.record(r, "revoke", "scim_token", tokenID, map[string]any{"org_id": orgID})
+	h.record(r, "revoke", "scim_token", tokenID, http.StatusNoContent, "", map[string]any{"org_id": orgID})
 }
 
 // ---------------------------------------------------------------------------
 // Audit helper
 // ---------------------------------------------------------------------------
 
-func (h *Handler) record(r *http.Request, action, resource, targetID string, metadata map[string]any) {
+// record writes an admin_event_log entry for the operation.
+// status is the HTTP response code (201, 204, etc.) — not hardcoded.
+// targetOrgIDOverride is used when the target org isn't available from the
+// URL params (e.g. POST /api/orgs where there is no {org_id} in the path).
+func (h *Handler) record(r *http.Request, action, resource, targetID string, status int, targetOrgIDOverride string, metadata map[string]any) {
 	if h.adminAudit == nil {
 		return
 	}
@@ -255,8 +267,10 @@ func (h *Handler) record(r *http.Request, action, resource, targetID string, met
 		id := claims.UserID
 		actor = &id
 		sourceOrg = claims.OrgID
-		// For cross-org operations, targetOrg is the org being acted upon.
-		if tid := mux.Vars(r)["org_id"]; tid != "" && tid != claims.OrgID {
+		// Prefer explicit override (e.g. newly created org ID), then URL param.
+		if targetOrgIDOverride != "" {
+			targetOrg = targetOrgIDOverride
+		} else if tid := mux.Vars(r)["org_id"]; tid != "" && tid != claims.OrgID {
 			targetOrg = tid
 		}
 	}
@@ -276,7 +290,7 @@ func (h *Handler) record(r *http.Request, action, resource, targetID string, met
 		TargetID:    targetID,
 		Path:        r.URL.Path,
 		Method:      r.Method,
-		StatusCode:  http.StatusOK,
+		StatusCode:  status,
 		Success:     true,
 		OrgID:       sourceOrg,
 		SourceOrgID: sourceOrg,
