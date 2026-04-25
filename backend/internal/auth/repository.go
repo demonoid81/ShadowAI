@@ -81,11 +81,22 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, erro
 	return u, nil
 }
 
-func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, email, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version, created_at, updated_at,
-		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
-		 FROM users ORDER BY created_at DESC`)
+func (r *Repository) ListUsers(ctx context.Context, orgID string) ([]domain.User, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if orgID == "" {
+		rows, err = r.db.QueryContext(ctx,
+			`SELECT id, email, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version, created_at, updated_at,
+			        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+			 FROM users ORDER BY created_at DESC`)
+	} else {
+		rows, err = r.db.QueryContext(ctx,
+			`SELECT id, email, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version, created_at, updated_at,
+			        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+			 FROM users WHERE org_id = $1 ORDER BY created_at DESC`, orgID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +110,38 @@ func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
 		users = append(users, u)
 	}
 	return users, nil
+}
+
+// GetByIDScoped looks up a user by id within the given org.
+// Used for admin endpoints; returns sql.ErrNoRows when user exists but belongs to a different org.
+func (r *Repository) GetByIDScoped(ctx context.Context, id, orgID string) (*domain.User, error) {
+	u := &domain.User{}
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE id = $1 AND org_id = $2`, id, orgID).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// UpdateUserScoped updates user fields with org ownership check (AND org_id=$N).
+func (r *Repository) UpdateUserScoped(ctx context.Context, u *domain.User, orgID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET email=$1, role=$2, is_active=$3, department=$4, updated_at=now() WHERE id=$5 AND org_id=$6`,
+		u.Email, u.Role, u.IsActive, u.Department, u.ID, orgID)
+	return err
+}
+
+// CountUsersByOrg returns the number of users in the given org.
+func (r *Repository) CountUsersByOrg(ctx context.Context, orgID string) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE org_id = $1`, orgID).Scan(&count)
+	return count, err
 }
 
 func (r *Repository) UpdateUser(ctx context.Context, u *domain.User) error {

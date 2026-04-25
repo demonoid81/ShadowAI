@@ -172,7 +172,17 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.service.GetRepo().ListUsers(r.Context())
+	claims := GetClaims(r.Context())
+	orgID, global, err := RequireOrg(claims)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	// global=true → break-glass/global_admin, pass "" to list all orgs.
+	if global {
+		orgID = ""
+	}
+	users, err := h.service.GetRepo().ListUsers(r.Context(), orgID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		h.recordUsersList(r, http.StatusInternalServerError, false, map[string]any{
@@ -225,7 +235,18 @@ func (h *Handler) recordUsersList(r *http.Request, status int, success bool, met
 
 func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	user, err := h.service.GetRepo().GetByID(r.Context(), id)
+	claims := GetClaims(r.Context())
+	orgID, global, err := RequireOrg(claims)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	var user *domain.User
+	if global {
+		user, err = h.service.GetRepo().GetByID(r.Context(), id)
+	} else {
+		user, err = h.service.GetRepo().GetByIDScoped(r.Context(), id, orgID)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "user not found"})
 		h.recordUserRead(r, id, http.StatusNotFound, false, map[string]any{
@@ -273,8 +294,19 @@ func (h *Handler) recordUserRead(r *http.Request, targetID string, status int, s
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	claims := GetClaims(r.Context())
+	orgID, global, err := RequireOrg(claims)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
 
-	existing, err := h.service.GetRepo().GetByID(r.Context(), id)
+	var existing *domain.User
+	if global {
+		existing, err = h.service.GetRepo().GetByID(r.Context(), id)
+	} else {
+		existing, err = h.service.GetRepo().GetByIDScoped(r.Context(), id, orgID)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "user not found"})
 		h.recordUserUpdate(r, id, http.StatusNotFound, false, map[string]any{
@@ -330,7 +362,13 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		existing.Department = req.Department.Value
 	}
 
-	if err := h.service.GetRepo().UpdateUser(r.Context(), existing); err != nil {
+	var updateErr error
+	if global {
+		updateErr = h.service.GetRepo().UpdateUser(r.Context(), existing)
+	} else {
+		updateErr = h.service.GetRepo().UpdateUserScoped(r.Context(), existing, orgID)
+	}
+	if updateErr != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		h.recordUserUpdate(r, id, http.StatusInternalServerError, false, map[string]any{
 			"error": "repo_failure",

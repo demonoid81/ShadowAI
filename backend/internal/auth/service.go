@@ -29,10 +29,14 @@ var (
 )
 
 const (
-	RoleAdmin   = "admin"
-	RoleUser    = "user"
-	RoleAnalyst = "analyst"
-	RoleAuditor = "auditor"
+	RoleAdmin       = "admin"
+	RoleUser        = "user"
+	RoleAnalyst     = "analyst"
+	RoleAuditor     = "auditor"
+	// RoleGlobalAdmin is a special cross-tenant role. It cannot be set via
+	// normal registration (NormalizeRole rejects it); it must be assigned via
+	// direct DB write or admin API by an existing global_admin.
+	RoleGlobalAdmin = "global_admin"
 )
 
 var allowedRoles = map[string]struct{}{
@@ -40,6 +44,29 @@ var allowedRoles = map[string]struct{}{
 	RoleUser:    {},
 	RoleAnalyst: {},
 	RoleAuditor: {},
+}
+
+// IsGlobalClaims returns true for break-glass sessions and global_admin role.
+// Both bypass per-org tenant filters.
+func IsGlobalClaims(c *Claims) bool {
+	return c != nil && (c.BreakGlass || c.Role == RoleGlobalAdmin)
+}
+
+// RequireOrg extracts the org scope from claims.
+// Returns (orgID, false, nil) for normal tenant sessions.
+// Returns ("", true, nil) for break-glass / global_admin (no org restriction).
+// Returns ("", false, err) if claims are nil or org is missing for a non-global session.
+func RequireOrg(c *Claims) (orgID string, global bool, err error) {
+	if c == nil {
+		return "", false, fmt.Errorf("no auth claims")
+	}
+	if IsGlobalClaims(c) {
+		return "", true, nil
+	}
+	if c.OrgID == "" {
+		return "", false, fmt.Errorf("missing org_id in claims")
+	}
+	return c.OrgID, false, nil
 }
 
 type Claims struct {
