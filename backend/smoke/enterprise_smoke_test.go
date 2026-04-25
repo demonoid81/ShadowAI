@@ -302,18 +302,18 @@ func TestSmoke_Governance_RoleBased(t *testing.T) {
 				{Provider: "openai", Models: []string{"gpt-4"}},
 			}},
 		},
-	}, "")
+	}, "", "")
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
 	// Admin + openai/gpt-4 → allow.
-	dec, err := svc.Evaluate(ctx, "admin", "", "", "openai", "gpt-4")
+	dec, err := svc.Evaluate(ctx, "", "admin", "", "", "openai", "gpt-4")
 	if err != nil || dec.Kind != governance.DecisionAllow {
 		t.Errorf("admin+openai/gpt-4: want Allow, got %v err=%v", dec.Kind, err)
 	}
 	// User role → deny.
-	dec, err = svc.Evaluate(ctx, "user", "", "", "openai", "gpt-4")
+	dec, err = svc.Evaluate(ctx, "", "user", "", "", "openai", "gpt-4")
 	if err != nil || dec.Kind != governance.DecisionDeny {
 		t.Errorf("user+openai/gpt-4: want Deny (unknown_role), got %v err=%v", dec.Kind, err)
 	}
@@ -339,18 +339,18 @@ func TestSmoke_Governance_ContextScoped(t *testing.T) {
 				Rules:       []governance.ProviderRule{{Provider: "openai", Models: []string{"gpt-4"}}},
 			},
 		},
-	}, "")
+	}, "", "")
 	if err != nil {
 		t.Fatalf("Upsert context_scoped: %v", err)
 	}
 
 	// finance/confidential → allow.
-	dec, _ := svc.Evaluate(ctx, "analyst", "finance", "confidential", "openai", "gpt-4")
+	dec, _ := svc.Evaluate(ctx, "", "analyst", "finance", "confidential", "openai", "gpt-4")
 	if dec.Kind != governance.DecisionAllow {
 		t.Errorf("finance+confidential: want Allow, got %v (code=%s)", dec.Kind, dec.Code)
 	}
 	// legal/confidential → unknown_department.
-	dec, _ = svc.Evaluate(ctx, "analyst", "legal", "confidential", "openai", "gpt-4")
+	dec, _ = svc.Evaluate(ctx, "", "analyst", "legal", "confidential", "openai", "gpt-4")
 	if dec.Kind != governance.DecisionDeny || dec.Code != governance.CodeUnknownDepartment {
 		t.Errorf("legal: want Deny/unknown_department, got %v/%s", dec.Kind, dec.Code)
 	}
