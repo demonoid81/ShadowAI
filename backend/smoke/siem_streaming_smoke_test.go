@@ -183,6 +183,10 @@ func TestSmoke_Streaming_Buffered(t *testing.T) {
 	if len(logs) == 0 {
 		t.Error("buffered: no audit record written")
 	} else {
+		// Buffered path with a short stream completes normally.
+		if logs[0].Outcome != proxy.OutcomeStreamCompleted {
+			t.Errorf("buffered: outcome=%q want stream_completed", logs[0].Outcome)
+		}
 		t.Logf("smoke/streaming-buffered: outcome=%q usage_source=%q", logs[0].Outcome, logs[0].UsageSource)
 	}
 }
@@ -199,12 +203,11 @@ func TestSmoke_Streaming_Incremental(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("incremental: status=%d body=%q", rr.Code, limitStr(rr.Body.String(), 300))
 	}
+	// Bytes identity: incremental transport must forward upstream bytes verbatim.
 	got := rr.Body.Bytes()
-	if !bytes.Contains(got, []byte("data:")) {
-		t.Error("incremental: SSE data missing")
-	}
-	if !bytes.Contains(got, []byte("[DONE]")) {
-		t.Error("incremental: [DONE] missing — transport may have dropped bytes")
+	if !bytes.Equal(got, smokeOpenAISSE) {
+		t.Errorf("incremental: bytes identity violated\nwant len=%d got len=%d\nwant=%q\ngot =%q",
+			len(smokeOpenAISSE), len(got), smokeOpenAISSE, got)
 	}
 
 	time.Sleep(60 * time.Millisecond)
@@ -212,6 +215,9 @@ func TestSmoke_Streaming_Incremental(t *testing.T) {
 	if len(logs) == 0 {
 		t.Error("incremental: no audit record")
 	} else {
+		if logs[0].Outcome != proxy.OutcomeStreamCompleted {
+			t.Errorf("incremental: outcome=%q want stream_completed", logs[0].Outcome)
+		}
 		t.Logf("smoke/streaming-incremental: outcome=%q usage_source=%q", logs[0].Outcome, logs[0].UsageSource)
 	}
 }
@@ -224,7 +230,7 @@ func TestSmoke_Streaming_Fallback(t *testing.T) {
 	judge := firewall.NewJudge(firewall.JudgeConfig{Enabled: true, Provider: "test"})
 	pipeline := firewall.NewPipeline()
 	pipeline.Register(firewall.NewContentModerationInspector(firewall.ContentModerationConfig{
-		Enabled: true, HeuristicThresh: 0.7, JudgeThresh: 0.3,
+		Enabled: true, HeuristicThreshold: 0.7, JudgeThreshold: 0.3,
 	}, judge))
 
 	h, repo, cleanup := buildSmokeStreamingHandler(t, smokeOpenAISSE, "incremental", pipeline)
