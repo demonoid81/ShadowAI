@@ -58,9 +58,12 @@ type enterpriseBundle struct {
 	AnchorExtraTables []string
 
 	// RegisterPublicRoutes добавляет enterprise-only public routes
-	// (без AuthMiddleware), например OIDC login/callback.
+	// (без AuthMiddleware), например OIDC login/callback + break-glass.
 	// В Core-билде — no-op.
 	RegisterPublicRoutes func(publicAuth *mux.Router)
+	// RegisterMFARoutes добавляет MFA/break-glass admin routes (за AuthMiddleware).
+	// В Core-билде — no-op.
+	RegisterMFARoutes func(api *mux.Router)
 }
 
 // enterpriseDeps — входные данные, которые wire получает от main,

@@ -21,8 +21,11 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrUserExists         = errors.New("user already exists")
-	ErrWeakPassword      = errors.New("password too weak")
-	ErrInvalidRole       = errors.New("invalid role")
+	ErrWeakPassword       = errors.New("password too weak")
+	ErrInvalidRole        = errors.New("invalid role")
+	// ErrMFARequired is returned by Login when the user has mfa_required=true.
+	// The caller should redirect to /api/auth/mfa/verify with the MFA challenge token.
+	ErrMFARequired = errors.New("mfa required")
 )
 
 const (
@@ -48,6 +51,11 @@ type Claims struct {
 	// This field is server-issued (trusted). Request headers must NOT override it.
 	Department   string `json:"department,omitempty"`
 	TokenVersion int    `json:"tv"`
+	// PR-E1.1: MFA and break-glass session markers.
+	// MFAVerified=true — session was authenticated with TOTP code in addition to password.
+	MFAVerified  bool   `json:"mfa_verified,omitempty"`
+	// BreakGlass=true — short-lived emergency session (1h TTL, all actions audited).
+	BreakGlass   bool   `json:"break_glass,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -119,18 +127,57 @@ func (s *Service) GetUserByAPIKey(ctx context.Context, apiKey string) (*domain.U
 	return s.repo.GetByAPIKeyHash(ctx, hashAPIKey(apiKey))
 }
 
+// LoginResult carries the outcome of a login attempt.
+type LoginResult struct {
+	// Token is set when login is complete (no MFA required or MFA not configured).
+	Token string
+	// MFARequired is true when the user has MFA enabled; Token is empty.
+	// The caller must exchange MFAChallengeToken for a TOTP code at /api/auth/mfa/verify.
+	MFARequired bool
+	// MFAChallengeToken is a short-lived JWT for the MFA step.
+	MFAChallengeToken string
+}
+
 func (s *Service) Login(ctx context.Context, email, password string) (string, error) {
+	result, err := s.LoginWithMFA(ctx, email, password)
+	if err != nil {
+		return "", err
+	}
+	if result.MFARequired {
+		return "", ErrMFARequired
+	}
+	return result.Token, nil
+}
+
+// LoginWithMFA performs password verification and returns a LoginResult.
+// If the user has mfa_required=true, Token is empty and MFARequired=true.
+func (s *Service) LoginWithMFA(ctx context.Context, email, password string) (LoginResult, error) {
 	u, err := s.repo.GetByEmail(ctx, email)
 	if err != nil {
-		return "", ErrInvalidCredentials
+		return LoginResult{}, ErrInvalidCredentials
 	}
 	if !u.IsActive {
-		return "", ErrInvalidCredentials
+		return LoginResult{}, ErrInvalidCredentials
+	}
+	if u.Password == "" {
+		// OIDC-provisioned user; no password login allowed.
+		return LoginResult{}, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password)); err != nil {
-		return "", ErrInvalidCredentials
+		return LoginResult{}, ErrInvalidCredentials
 	}
-	return s.generateToken(u)
+	if u.MFARequired {
+		challengeToken, err := s.IssueMFAChallenge(u.ID)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		return LoginResult{MFARequired: true, MFAChallengeToken: challengeToken}, nil
+	}
+	token, err := s.generateToken(u)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{Token: token}, nil
 }
 
 func (s *Service) RotateAPIKey(ctx context.Context, userID string) (string, error) {

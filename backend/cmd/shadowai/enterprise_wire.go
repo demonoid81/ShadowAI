@@ -93,6 +93,15 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	governanceSvc := governance.NewService(governanceRepo)
 	governanceHandler := governance.NewHandler(governanceSvc, adminAuditRecorder)
 
+	// PR-E1.1: MFA + break-glass handler.
+	mfaCfg := auth.MFAConfig{
+		MFATOTPIssuer:        deps.Cfg.MFATOTPIssuer,
+		BreakGlassEnabled:    deps.Cfg.BreakGlassEnabled,
+		BreakGlassSecretHash: deps.Cfg.BreakGlassSecretHash,
+		BreakGlassJWTTTL:     deps.Cfg.BreakGlassJWTTTL,
+	}
+	mfaHandler := auth.NewMFAHandler(deps.AuthSvc, mfaCfg, adminAuditRecorder)
+
 	// PR-E1: OIDC enterprise auth.
 	// Handler is created at wire time; actual HTTP server context not yet available,
 	// so provider discovery is deferred to RegisterPublicRoutes (called after server start).
@@ -106,8 +115,23 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		Governance: governanceSvc,
 		Eraser:     erasureSvc,
 
+		// PR-E1.1: MFA management routes (behind AuthMiddleware, admin-only).
+		RegisterMFARoutes: func(api *mux.Router) {
+			mfaAdmin := api.PathPrefix("").Subrouter()
+			mfaAdmin.Use(auth.RequireRole(auth.RoleAdmin))
+			mfaAdmin.HandleFunc("/auth/mfa/setup",   mfaHandler.MFASetup).Methods("POST")
+			mfaAdmin.HandleFunc("/auth/mfa/confirm", mfaHandler.MFAConfirm).Methods("POST")
+			mfaAdmin.HandleFunc("/auth/mfa",         mfaHandler.MFADisable).Methods("DELETE")
+		},
+
 		// PR-E1: register OIDC public routes.
 		RegisterPublicRoutes: func(publicAuth *mux.Router) {
+			// Break-glass (public — emergency access without existing JWT).
+			if mfaCfg.BreakGlassEnabled || true { // always register route; handler checks config
+				publicAuth.HandleFunc("/break-glass", mfaHandler.BreakGlass).Methods("POST")
+			}
+			// MFA verify (public — user has mfa_token from password-step, not full JWT).
+			publicAuth.HandleFunc("/mfa/verify", mfaHandler.MFAVerify).Methods("POST")
 			if oidcCfg == nil {
 				return // OIDC_ENABLED=false
 			}

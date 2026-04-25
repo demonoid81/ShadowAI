@@ -208,6 +208,22 @@ type Config struct {
 	// (см. ValidateStartupConfig).
 	StreamingMode string
 
+	// PR-E1.1: MFA / break-glass.
+	// BREAK_GLASS_ENABLED — allow emergency password-based admin login.
+	// Default false. In prod, admin password login is blocked unless this is true.
+	// Requires BREAK_GLASS_SECRET_HASH to be set.
+	BreakGlassEnabled bool
+	// BREAK_GLASS_SECRET_HASH — bcrypt hash of the break-glass password.
+	// Generate: htpasswd -bnBC 12 "" <password> | tr -d ':\n'
+	BreakGlassSecretHash string
+	// BREAK_GLASS_JWT_TTL — TTL for break-glass JWT. Default 1h.
+	BreakGlassJWTTTL time.Duration
+	// MFA_TOTP_ISSUER — issuer name shown in authenticator apps. Default "ShadowAI".
+	MFATOTPIssuer string
+	// ADMIN_MFA_REQUIRED — if true, all admin accounts must have MFA configured.
+	// Prod validation enforces this in enterprise build.
+	AdminMFARequired bool
+
 	// PR-E1: OIDC Enterprise Auth v1.
 	// Enterprise-only; wired only under -tags enterprise.
 	// When OIDC_ENABLED=false all these fields are ignored at runtime.
@@ -315,6 +331,13 @@ func Load() *Config {
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
 		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
+
+		// PR-E1.1: MFA / break-glass.
+		BreakGlassEnabled:    getEnv("BREAK_GLASS_ENABLED", "false") == "true",
+		BreakGlassSecretHash: getEnv("BREAK_GLASS_SECRET_HASH", ""),
+		BreakGlassJWTTTL:     getDuration("BREAK_GLASS_JWT_TTL", time.Hour),
+		MFATOTPIssuer:        getEnv("MFA_TOTP_ISSUER", "ShadowAI"),
+		AdminMFARequired:     getEnv("ADMIN_MFA_REQUIRED", "false") == "true",
 
 		// PR-E1: OIDC.
 		OIDCEnabled:         getEnv("OIDC_ENABLED", "false") == "true",

@@ -493,6 +493,8 @@ func main() {
 	internalDBAdmin.HandleFunc("/{id}", internalDBHandler.DeleteSource).Methods("DELETE")
 	api.HandleFunc("/auth/revoke", authHandler.RevokeTokens).Methods("POST")
 	api.HandleFunc("/auth/rotate-api-key", authHandler.RotateAPIKey).Methods("POST")
+	// PR-E1.1: MFA management (authenticated, admin-only).
+	entBundle.RegisterMFARoutes(api)
 
 	// Proxy routes (authenticated + rate limited) — wildcard for all providers
 	proxyRouter := r.PathPrefix("/proxy").Subrouter()

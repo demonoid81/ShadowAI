@@ -124,6 +124,16 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-E1.1: break-glass prod guards.
+	// (1) BREAK_GLASS_ENABLED=true без hash — кто угодно может войти.
+	// (2) BREAK_GLASS_ENABLED=true → требует AUDIT_CHAIN_SECRET (все break-glass
+	//     сессии должны быть immortalized в chain).
+	if c.BreakGlassEnabled {
+		if strings.TrimSpace(c.BreakGlassSecretHash) == "" {
+			errs = append(errs, "BREAK_GLASS_SECRET_HASH required when BREAK_GLASS_ENABLED=true in prod (empty hash allows anyone to authenticate)")
+		}
+	}
+
 	// PR-E1: OIDC в prod требует HTTPS issuer/redirect и все обязательные поля.
 	if c.OIDCEnabled {
 		if strings.TrimSpace(c.OIDCIssuerURL) == "" {

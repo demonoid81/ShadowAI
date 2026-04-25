@@ -128,6 +128,45 @@ func TestValidateStartupConfig_ImmuDBRestProfile_Valid(t *testing.T) {
 // PR-F8: semantic_v2 prod validation tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// PR-E1.1: break-glass prod validation tests
+// ---------------------------------------------------------------------------
+
+// TestValidateStartupConfig_BreakGlass_MissingHash — BREAK_GLASS_ENABLED without hash → error.
+func TestValidateStartupConfig_BreakGlass_MissingHash(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.BreakGlassEnabled = true
+	cfg.BreakGlassSecretHash = ""
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "BREAK_GLASS_SECRET_HASH") {
+		t.Fatalf("expected BREAK_GLASS_SECRET_HASH error, got: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_BreakGlass_Disabled_NoValidation — disabled break-glass skips check.
+func TestValidateStartupConfig_BreakGlass_Disabled_NoValidation(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.BreakGlassEnabled = false
+	cfg.BreakGlassSecretHash = ""
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "BREAK_GLASS") {
+			t.Errorf("disabled break-glass: unexpected error: %v", err)
+		}
+	}
+}
+
+// TestValidateStartupConfig_BreakGlass_WithHash_Passes.
+func TestValidateStartupConfig_BreakGlass_WithHash_Passes(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.BreakGlassEnabled = true
+	cfg.BreakGlassSecretHash = "$2b$12$examplehashthatisenoughcharsXXXXXXX"
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "BREAK_GLASS") {
+			t.Errorf("break-glass with hash: unexpected error: %v", err)
+		}
+	}
+}
+
 // TestValidateStartupConfig_SAV2_MissingEmbeddingEndpoint — SA_v2 enabled
 // without embedding endpoint must be rejected in prod (every inspect fail-opens).
 func TestValidateStartupConfig_SAV2_MissingEmbeddingEndpoint(t *testing.T) {

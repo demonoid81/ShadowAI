@@ -16,7 +16,10 @@ type User struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	// PR-E1: OIDC identity. Set after first OIDC login or admin linking.
-	OIDCIssuer      *string   `json:"oidc_issuer,omitempty"`
-	OIDCSubject     *string   `json:"oidc_subject,omitempty"`
+	OIDCIssuer      *string    `json:"oidc_issuer,omitempty"`
+	OIDCSubject     *string    `json:"oidc_subject,omitempty"`
 	LastOIDCLoginAt *time.Time `json:"last_oidc_login_at,omitempty"`
+	// PR-E1.1: MFA. TOTPSecret is the encrypted TOTP seed; never expose in API responses.
+	TOTPSecret  *string `json:"-"`
+	MFARequired bool    `json:"mfa_required"`
 }

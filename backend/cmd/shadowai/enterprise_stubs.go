@@ -25,6 +25,7 @@ func buildEnterpriseBundle(_ enterpriseDeps) *enterpriseBundle {
 		Eraser:     nil,
 		RegisterRoutes:       func(_ *mux.Router, _ *auth.Handler) {},
 		RegisterPublicRoutes: func(_ *mux.Router) {},
+		RegisterMFARoutes:    func(_ *mux.Router) {},
 		StartSchedulers:      func(_ context.Context, _ *config.Config) {},
 	}
 }

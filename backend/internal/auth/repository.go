@@ -25,8 +25,10 @@ func (r *Repository) CreateUser(ctx context.Context, u *domain.User) error {
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version, created_at, updated_at FROM users WHERE email = $1`, email).
-		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		        totp_secret, mfa_required, created_at, updated_at FROM users WHERE email = $1`, email).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +46,10 @@ func (r *Repository) GetByAPIKeyHash(ctx context.Context, apiKeyHash string) (*d
 func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
-		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		        totp_secret, mfa_required, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -55,8 +59,10 @@ func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.Us
 func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version, created_at, updated_at FROM users WHERE id = $1`, id).
-		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
+		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		        totp_secret, mfa_required, created_at, updated_at FROM users WHERE id = $1`, id).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +111,26 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count)
 	return count, err
+}
+
+// ---------------------------------------------------------------------------
+// PR-E1.1: MFA repository methods.
+// ---------------------------------------------------------------------------
+
+// SetTOTPSecret stores the encrypted TOTP secret and enables MFA for the user.
+func (r *Repository) SetTOTPSecret(ctx context.Context, userID, encryptedSecret string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET totp_secret=$1, mfa_required=true, updated_at=now() WHERE id=$2`,
+		encryptedSecret, userID)
+	return err
+}
+
+// ClearTOTPSecret removes the TOTP secret and disables MFA for the user.
+func (r *Repository) ClearTOTPSecret(ctx context.Context, userID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET totp_secret=NULL, mfa_required=false, updated_at=now() WHERE id=$1`,
+		userID)
+	return err
 }
 
 // ---------------------------------------------------------------------------

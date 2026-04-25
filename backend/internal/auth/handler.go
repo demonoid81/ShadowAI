@@ -97,13 +97,22 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.service.Login(r.Context(), req.Email, req.Password)
+	result, err := h.service.LoginWithMFA(r.Context(), req.Email, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid credentials"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, loginResponse{Token: token})
+	if result.MFARequired {
+		// PR-E1.1: MFA challenge — return short-lived token, not full JWT.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mfa_required": true,
+			"mfa_token":    result.MFAChallengeToken,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, loginResponse{Token: result.Token})
 }
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
