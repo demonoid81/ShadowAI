@@ -49,6 +49,7 @@ func CanonicalAuditLog(
 }
 
 // CanonicalAuditLogV2 returns v2 canonical including org_id (PR-T2.3).
+// Format: "v2|<fields>|<org_id>" — distinct v2| prefix, not built on v1 string.
 // A DBA changing org_id on a v2 row will break the chain; v1 rows remain valid.
 func CanonicalAuditLogV2(
 	id, userID, model, provider, endpoint string,
@@ -60,11 +61,19 @@ func CanonicalAuditLogV2(
 	createdAtUnix int64,
 	orgID string,
 ) string {
-	return CanonicalAuditLog(id, userID, model, provider, endpoint,
+	piiDet := "0"
+	if piiDetected {
+		piiDet = "1"
+	}
+	sortedPII := sortedJoin(piiTypes)
+	return fmt.Sprintf("v2|%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|%s|%s|%s|%s|%s|%s|%d|%s",
+		id, userID, model, provider, endpoint,
 		statusCode, promptTokens, completionTokens, totalTokens,
-		costMicrocents, piiDetected, piiTypes,
+		costMicrocents,
+		piiDet, sortedPII,
 		policyAction, outcome, fallbackReason, usageSource,
-		createdAtUnix) + "|" + orgID
+		createdAtUnix, orgID,
+	)
 }
 
 // CanonicalAdminEventLog возвращает v1 canonical для admin_event_logs row.
@@ -85,7 +94,7 @@ func CanonicalAdminEventLog(
 }
 
 // CanonicalAdminEventLogV2 returns v2 canonical including tenant columns (PR-T2.3).
-// orgID is the actor's org; sourceOrgID/targetOrgID are for cross-tenant events.
+// Format: "v2|<fields>|<org_id>|<source_org_id>|<target_org_id>" — distinct v2| prefix.
 func CanonicalAdminEventLogV2(
 	id, actorUserID, action, resource, targetID, path, method string,
 	statusCode int,
@@ -93,9 +102,15 @@ func CanonicalAdminEventLogV2(
 	createdAtUnix int64,
 	orgID, sourceOrgID, targetOrgID string,
 ) string {
-	return CanonicalAdminEventLog(id, actorUserID, action, resource, targetID,
-		path, method, statusCode, success, createdAtUnix) +
-		fmt.Sprintf("|%s|%s|%s", orgID, sourceOrgID, targetOrgID)
+	succ := "0"
+	if success {
+		succ = "1"
+	}
+	return fmt.Sprintf("v2|%s|%s|%s|%s|%s|%s|%s|%d|%s|%d|%s|%s|%s",
+		id, actorUserID, action, resource, targetID, path, method,
+		statusCode, succ, createdAtUnix,
+		orgID, sourceOrgID, targetOrgID,
+	)
 }
 
 // CanonicalLegalHoldEvent возвращает v1 canonical для legal_hold_events row.

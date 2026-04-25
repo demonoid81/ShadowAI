@@ -30,6 +30,13 @@ func (f *FanoutAdminRecorder) Record(ctx context.Context, ev adminaudit.Event) {
 	if f == nil {
 		return
 	}
+	// PR-T2.3.2: enrich OrgID from context before fanout.
+	// Most callers set OrgID="" and rely on Service.Record to inject it from ctx.
+	// FanoutAdminRecorder bypasses Service.Record's injection for the SIEM path,
+	// so we enrich here before both sinks receive the event.
+	if ev.OrgID == "" {
+		ev.OrgID = adminaudit.GetOrgFromContext(ctx)
+	}
 	if f.DB != nil {
 		f.DB.Record(ctx, ev)
 	}

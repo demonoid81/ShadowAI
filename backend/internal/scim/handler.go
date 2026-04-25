@@ -145,7 +145,7 @@ func (h *Handler) ServiceProviderConfig(w http.ResponseWriter, _ *http.Request) 
 // ---------------------------------------------------------------------------
 
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.syncer.repo.ListUsersSCIM(r.Context())
+	users, err := h.syncerFor(r).repo.ListUsersSCIM(r.Context())
 	if err != nil {
 		h.scimError(w, http.StatusInternalServerError, "failed to list users", "")
 		return
@@ -188,7 +188,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.syncer.Provision(r.Context(), scimUser)
+	result, err := h.syncerFor(r).Provision(r.Context(), scimUser)
 	if err != nil {
 		h.handleSyncError(w, err)
 		return
@@ -205,7 +205,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	u, err := h.syncer.repo.GetByID(r.Context(), id)
+	u, err := h.syncerFor(r).repo.GetByID(r.Context(), id)
 	if err != nil {
 		h.scimError(w, http.StatusNotFound, "user not found", "")
 		return
@@ -233,13 +233,13 @@ func (h *Handler) ReplaceUser(w http.ResponseWriter, r *http.Request) {
 	scimUser.ID = id
 
 	// Fetch existing user first; PUT is full replace of an existing resource.
-	existing, err := h.syncer.repo.GetByID(r.Context(), id)
+	existing, err := h.syncerFor(r).repo.GetByID(r.Context(), id)
 	if err != nil {
 		h.scimError(w, http.StatusNotFound, "user not found", "")
 		return
 	}
 
-	result, err := h.syncer.updateExisting(r.Context(), existing, scimUser, primaryEmailOrName(scimUser))
+	result, err := h.syncerFor(r).updateExisting(r.Context(), existing, scimUser, primaryEmailOrName(scimUser))
 	if err != nil {
 		h.handleSyncError(w, err)
 		return
@@ -261,7 +261,7 @@ func (h *Handler) PatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.syncer.ApplyPatch(r.Context(), id, req)
+	result, err := h.syncerFor(r).ApplyPatch(r.Context(), id, req)
 	if err != nil {
 		h.handleSyncError(w, err)
 		return
@@ -277,7 +277,7 @@ func (h *Handler) PatchUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	result, err := h.syncer.Deprovision(r.Context(), id)
+	result, err := h.syncerFor(r).Deprovision(r.Context(), id)
 	if err != nil {
 		h.handleSyncError(w, err)
 		return
@@ -340,6 +340,16 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// syncerFor returns a per-request UserSyncer scoped to the org resolved from
+// the SCIM bearer token (via scim_tokens DB lookup in BearerAuth). Falls back
+// to the handler-level syncer (which carries the static config orgID).
+func (h *Handler) syncerFor(r *http.Request) *UserSyncer {
+	if orgID := getSCIMOrg(r.Context()); orgID != "" {
+		return h.syncer.WithOrgID(orgID)
+	}
+	return h.syncer
+}
+
 func (h *Handler) handleSyncError(w http.ResponseWriter, err error) {
 	var scimErr *SCIMError
 	if errors.As(err, &scimErr) {
@@ -355,11 +365,17 @@ func (h *Handler) recordAudit(r *http.Request, result SyncResult) {
 	}
 	action := "scim_user_" + result.Action
 	userID := result.User.ID
+	// Use per-request org (from scim_tokens lookup or static config).
+	orgID := getSCIMOrg(r.Context())
+	if orgID == "" {
+		orgID = h.orgID
+	}
 	h.adminAudit.Record(r.Context(), adminaudit.Event{
 		ActorUserID: nil, // SCIM is IdP-initiated (no admin actor)
 		Action:      action,
 		Resource:    "user",
 		TargetID:    userID,
+		OrgID:       orgID,
 		Path:        r.URL.Path,
 		Method:      r.Method,
 		StatusCode:  http.StatusOK,

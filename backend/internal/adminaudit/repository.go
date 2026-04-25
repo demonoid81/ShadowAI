@@ -266,7 +266,8 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, actorID
 		args...).Scan(&total)
 
 	query := fmt.Sprintf(`SELECT id, actor_user_id, action, resource, target_id, path, method,
-		status_code, success, metadata_json, created_at
+		status_code, success, metadata_json, created_at,
+		COALESCE(org_id::text,''), COALESCE(source_org_id::text,''), COALESCE(target_org_id::text,'')
 		FROM admin_event_logs WHERE %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
 		whereClause, argIdx, argIdx+1)
 	args = append(args, limit, offset)
@@ -286,7 +287,8 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, actorID
 			metaJSON sql.NullString
 		)
 		if err := rows.Scan(&e.ID, &actor, &e.Action, &e.Resource, &target, &e.Path, &e.Method,
-			&e.StatusCode, &e.Success, &metaJSON, &e.CreatedAt); err != nil {
+			&e.StatusCode, &e.Success, &metaJSON, &e.CreatedAt,
+			&e.OrgID, &e.SourceOrgID, &e.TargetOrgID); err != nil {
 			return nil, 0, fmt.Errorf("adminaudit scan: %w", err)
 		}
 		if actor.Valid {

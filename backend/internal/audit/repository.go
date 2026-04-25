@@ -237,7 +237,8 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, userID,
 	// sql.NullString wrapping не нужен — поля всегда возвращают
 	// string (возможно пустую).
 	query := fmt.Sprintf(`SELECT id, user_id, request_body, response_body, model, provider, endpoint, status_code,
-		prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, created_at
+		prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, created_at,
+		COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001')
 		FROM audit_logs WHERE %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, whereClause, argIdx, argIdx+1)
 	args = append(args, limit, offset)
 
@@ -263,7 +264,7 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, userID,
 		if err := rows.Scan(&l.ID, &userID, &requestBody, &respBody, &l.Model, &l.Provider, &l.Endpoint,
 			&l.StatusCode, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.CostUSD,
 			&l.PIIDetected, pq.Array(&l.PIITypes), &l.PolicyAction, &shadowJSON, &l.DurationMs,
-			&l.Outcome, &l.FallbackReason, &l.UsageSource, &l.CreatedAt); err != nil {
+			&l.Outcome, &l.FallbackReason, &l.UsageSource, &l.CreatedAt, &l.OrgID); err != nil {
 			return nil, 0, err
 		}
 		if userID.Valid {
