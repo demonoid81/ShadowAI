@@ -34,11 +34,16 @@ import (
 // OrgBudgetChecker is the interface for org-level aggregate budget enforcement (PR-G4).
 // Implemented by orgbudget.Service; nil = feature off (core build / dev).
 type OrgBudgetChecker interface {
-	// CheckBefore runs before a provider call. Returns allowed=true unless
-	// mode=enforce and projected spend crosses the cap.
+	// CheckBefore runs before a provider call. Returns Allowed=false only in enforce mode
+	// when projected spend crosses the cap. Decision.ReservedCents is the amount
+	// atomically added to usage (enforce only); 0 for observe/disabled.
 	CheckBefore(ctx context.Context, orgID string, estimatedCents int64) (domain.OrgBudgetDecision, error)
-	// RecordActual adds actual post-call spend to org_budget_usage.
-	RecordActual(ctx context.Context, orgID string, actualCents int64) error
+	// Adjust finalizes or refunds a CheckBefore reservation. Must be called exactly once
+	// per CheckBefore that returned Allowed=true.
+	//   reserved>0 && actual>0  → writes actual-reserved delta (finalize).
+	//   reserved>0 && actual==0 → full refund (provider failed).
+	//   reserved==0 && actual>0 → writes actual (observe mode / backward compat).
+	Adjust(ctx context.Context, orgID string, reservedCents, actualCents int64) error
 }
 
 // costUSDToCents converts a float64 USD cost to integer cents.
@@ -455,14 +460,24 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6b. PR-G4: Org-level aggregate budget check (atomic reserve via advisory lock).
-	// orgBudgetReserved stores the amount atomically added to usage by CheckBefore.
-	// All post-call paths MUST call orgBudgetAdjust(actual) to finalize or refund.
+	// 6b. PR-G4: Org-level aggregate budget (atomic reserve → deferred Adjust).
 	var orgBudgetReserved int64
-	orgBudgetAdjust := func(actualCents int64) {
-		if h.orgBudget != nil && orgBudgetReserved > 0 {
-			_ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, actualCents)
+	orgBudgetActive := false // true after CheckBefore allows; reset to false after Adjust
+	// Deferred auto-refund: if any early return happens before explicit Adjust, this
+	// refunds the reservation so the cap doesn't leak. Observe mode (reserved=0) is
+	// a no-op here since Adjust(0,0) writes nothing.
+	defer func() {
+		if orgBudgetActive && h.orgBudget != nil {
+			_ = h.orgBudget.Adjust(r.Context(), claims.OrgID, orgBudgetReserved, 0)
 		}
+	}()
+	// orgBudgetFinalize calls Adjust with actual spend and disables the deferred refund.
+	orgBudgetFinalize := func(actualCents int64) {
+		if !orgBudgetActive || h.orgBudget == nil {
+			return
+		}
+		orgBudgetActive = false
+		_ = h.orgBudget.Adjust(r.Context(), claims.OrgID, orgBudgetReserved, actualCents)
 	}
 	if h.orgBudget != nil {
 		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002)
@@ -479,6 +494,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			orgBudgetReserved = dec.ReservedCents
+			orgBudgetActive = true // observe: reserved=0 but Adjust(0,actual) writes spend
 		}
 	}
 
@@ -547,7 +563,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			cost := streamUsage.CostUSD
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				orgBudgetAdjust(costUSDToCents(cost))
+				orgBudgetFinalize(costUSDToCents(cost))
 			}
 			// PR-F7.3: structured audit fields (RFC §11).
 			//   policy_action — policy/security verdict (block over
@@ -713,7 +729,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				orgBudgetAdjust(costUSDToCents(cost))
+				orgBudgetFinalize(costUSDToCents(cost))
 			}
 		}
 
@@ -827,7 +843,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	recordUsage := func() {
 		if cost > 0 {
 			_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				orgBudgetAdjust(costUSDToCents(cost))
+				orgBudgetFinalize(costUSDToCents(cost))
 		}
 	}
 
@@ -1552,12 +1568,20 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6b. PR-G4: Org-level aggregate budget check (atomic reserve).
+	// 6b. PR-G4: Org-level aggregate budget (atomic reserve → deferred Adjust).
 	var orgBudgetReserved2 int64
-	orgBudgetAdjust2 := func(actualCents int64) {
-		if h.orgBudget != nil && orgBudgetReserved2 > 0 {
-			_ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, actualCents)
+	orgBudgetActive2 := false
+	defer func() {
+		if orgBudgetActive2 && h.orgBudget != nil {
+			_ = h.orgBudget.Adjust(r.Context(), claims.OrgID, orgBudgetReserved2, 0)
 		}
+	}()
+	orgBudgetFinalize2 := func(actualCents int64) {
+		if !orgBudgetActive2 || h.orgBudget == nil {
+			return
+		}
+		orgBudgetActive2 = false
+		_ = h.orgBudget.Adjust(r.Context(), claims.OrgID, orgBudgetReserved2, actualCents)
 	}
 	if h.orgBudget != nil {
 		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002)
@@ -1573,6 +1597,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			orgBudgetReserved2 = dec.ReservedCents
+			orgBudgetActive2 = true
 		}
 	}
 
@@ -1720,7 +1745,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				cost := streamUsage.CostUSD
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				orgBudgetAdjust2(costUSDToCents(cost))
+				orgBudgetFinalize2(costUSDToCents(cost))
 				}
 				// PR-F7.3: structured audit fields — симметрично
 				// ProxyChat incremental ветке.
@@ -1858,7 +1883,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			recordStreamUsage := func() {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				orgBudgetAdjust2(costUSDToCents(cost))
+				orgBudgetFinalize2(costUSDToCents(cost))
 				}
 			}
 			allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
@@ -1931,7 +1956,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				orgBudgetAdjust2(costUSDToCents(cost))
+				orgBudgetFinalize2(costUSDToCents(cost))
 			}
 		}
 

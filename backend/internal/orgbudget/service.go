@@ -68,13 +68,21 @@ func (s *Service) GetStatus(ctx context.Context, orgID string) (*domain.OrgBudge
 	}, nil
 }
 
+// RecordActual is a convenience wrapper around Adjust(0, actualCents).
+// Use Adjust directly when you have a reserved amount from CheckBefore.
+func (s *Service) RecordActual(ctx context.Context, orgID string, actualCents int64) error {
+	return s.Adjust(ctx, orgID, 0, actualCents)
+}
+
 // OrgExists delegates to the repo for the org existence pre-check in handler.
 func (s *Service) OrgExists(ctx context.Context, orgID string) (bool, error) {
 	return s.repo.OrgExists(ctx, orgID)
 }
 
 // UpsertPolicy saves a new or updated org budget policy.
-func (s *Service) UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy, actorUserID string) error {
+// sourceOrgID is the org the actor belongs to (claims.OrgID); may differ from
+// p.OrgID when a global_admin modifies another tenant's policy.
+func (s *Service) UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy, actorUserID, sourceOrgID string) error {
 	p.UpdatedBy = &actorUserID
 	if err := s.repo.UpsertPolicy(ctx, p); err != nil {
 		return err
@@ -86,8 +94,8 @@ func (s *Service) UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy, a
 		}
 		s.adminAudit.Record(ctx, adminaudit.Event{
 			ActorUserID: actorPtr,
-			OrgID:       p.OrgID,
-			SourceOrgID: p.OrgID, // actor operates within the same org (or global_admin)
+			OrgID:       sourceOrgID,
+			SourceOrgID: sourceOrgID,
 			TargetOrgID: p.OrgID,
 			Action:      "upsert",
 			Resource:    "org_budget_policy",
@@ -178,30 +186,26 @@ func (s *Service) CheckBefore(ctx context.Context, orgID string, estimatedCents 
 	}, nil
 }
 
-// Adjust finalizes or refunds a reservation made by CheckBefore.
-// It adds (actualCents - reservedCents) to org_budget_usage atomically.
-// Call with actualCents=0 to fully refund a reservation (provider call failed).
+// Adjust implements proxy.OrgBudgetChecker.Adjust — finalizes or refunds a reservation.
+//   reserved>0, actual>0  → writes (actual-reserved) delta.
+//   reserved>0, actual==0 → full refund (provider call failed or no cost).
+//   reserved==0, actual>0 → writes actual (observe mode / backward compat path).
+//   reserved==0, actual==0 → no-op.
 func (s *Service) Adjust(ctx context.Context, orgID string, reservedCents, actualCents int64) error {
-	delta := actualCents - reservedCents
-	if delta == 0 || orgID == "" {
-		if actualCents > 0 {
-			metricSpentCents.Add(float64(actualCents))
-		}
+	if orgID == "" {
 		return nil
 	}
-	if err := s.repo.AddSpend(ctx, orgID, delta); err != nil {
-		log.Printf("orgbudget: Adjust err: %v", err)
-		return fmt.Errorf("orgbudget adjust: %w", err)
+	delta := actualCents - reservedCents
+	if delta != 0 {
+		if err := s.repo.AddSpend(ctx, orgID, delta); err != nil {
+			log.Printf("orgbudget: Adjust err: %v", err)
+			return fmt.Errorf("orgbudget adjust: %w", err)
+		}
 	}
 	if actualCents > 0 {
 		metricSpentCents.Add(float64(actualCents))
 	}
 	return nil
-}
-
-// RecordActual is kept for backward compat but delegates to Adjust(0, actualCents).
-func (s *Service) RecordActual(ctx context.Context, orgID string, actualCents int64) error {
-	return s.Adjust(ctx, orgID, 0, actualCents)
 }
 
 func (s *Service) recordBudgetEvent(ctx context.Context, orgID, action string, spent, limit int64) {

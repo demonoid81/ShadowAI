@@ -74,16 +74,17 @@ func (h *Handler) PutBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var actorID string
+	var actorID, sourceOrgID string
 	if claims != nil {
 		actorID = claims.UserID
+		sourceOrgID = claims.OrgID // may differ from orgID for global_admin cross-org ops
 	}
 	policy := &domain.OrgBudgetPolicy{
 		OrgID:             orgID,
 		MonthlyLimitCents: req.MonthlyLimitCents,
 		Mode:              mode,
 	}
-	if err := h.svc.UpsertPolicy(r.Context(), policy, actorID); err != nil {
+	if err := h.svc.UpsertPolicy(r.Context(), policy, actorID, sourceOrgID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errResp{"internal"})
 		return
 	}

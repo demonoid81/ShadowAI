@@ -34,7 +34,15 @@ func (m *memRepo) GetCurrentUsage(_ context.Context, orgID string) (*domain.OrgB
 	}
 	return &domain.OrgBudgetUsage{OrgID: orgID}, nil
 }
-func (m *memRepo) AddSpend(_ context.Context, _ string, _ int64) error { return m.addErr }
+func (m *memRepo) AddSpend(_ context.Context, _ string, delta int64) error {
+	if m.addErr != nil {
+		return m.addErr
+	}
+	if m.usage != nil {
+		m.usage.SpentCents += delta
+	}
+	return nil
+}
 func (m *memRepo) OrgExists(_ context.Context, _ string) (bool, error) { return true, nil }
 func (m *memRepo) AtomicCheckAndAdd(_ context.Context, orgID string, estimatedCents, limitCents int64, enforce bool) (int64, bool, error) {
 	current := int64(0)
@@ -150,6 +158,64 @@ func TestOrgBudget_RecordActual_PropagatesError(t *testing.T) {
 	err := svc.RecordActual(context.Background(), "org-1", 100)
 	if !errors.Is(err, boom) {
 		t.Errorf("expected wrapped boom, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Adjust truth table
+// ---------------------------------------------------------------------------
+
+func TestOrgBudget_Adjust_FinalizeReducesToActual(t *testing.T) {
+	repo := &memRepo{usage: &domain.OrgBudgetUsage{OrgID: "org", SpentCents: 100}}
+	svc := newSvc(repo)
+	// reserved=60 actual=40 → delta = 40-60 = -20 → usage drops to 80
+	if err := svc.Adjust(context.Background(), "org", 60, 40); err != nil {
+		t.Fatalf("Adjust: %v", err)
+	}
+	if repo.usage.SpentCents != 80 {
+		t.Errorf("after adjust usage=%d, want 80", repo.usage.SpentCents)
+	}
+}
+
+func TestOrgBudget_Adjust_Refund_ZeroActual(t *testing.T) {
+	repo := &memRepo{usage: &domain.OrgBudgetUsage{OrgID: "org", SpentCents: 100}}
+	svc := newSvc(repo)
+	// reserved=60 actual=0 → delta = -60 → usage drops to 40
+	if err := svc.Adjust(context.Background(), "org", 60, 0); err != nil {
+		t.Fatalf("Adjust refund: %v", err)
+	}
+	if repo.usage.SpentCents != 40 {
+		t.Errorf("after refund usage=%d, want 40", repo.usage.SpentCents)
+	}
+}
+
+func TestOrgBudget_Adjust_ObserveNoReservation(t *testing.T) {
+	repo := &memRepo{usage: &domain.OrgBudgetUsage{OrgID: "org", SpentCents: 0}}
+	svc := newSvc(repo)
+	// reserved=0 actual=50 → delta=50 (observe mode records actual spend)
+	if err := svc.Adjust(context.Background(), "org", 0, 50); err != nil {
+		t.Fatalf("Adjust observe: %v", err)
+	}
+	if repo.usage.SpentCents != 50 {
+		t.Errorf("observe usage=%d, want 50", repo.usage.SpentCents)
+	}
+}
+
+func TestOrgBudget_Adjust_NoOpWhenBothZero(t *testing.T) {
+	repo := &memRepo{usage: &domain.OrgBudgetUsage{OrgID: "org", SpentCents: 100}}
+	svc := newSvc(repo)
+	if err := svc.Adjust(context.Background(), "org", 0, 0); err != nil {
+		t.Fatalf("Adjust noop: %v", err)
+	}
+	if repo.usage.SpentCents != 100 {
+		t.Errorf("noop changed usage to %d, want 100", repo.usage.SpentCents)
+	}
+}
+
+func TestOrgBudget_Adjust_NoOpOnEmptyOrg(t *testing.T) {
+	svc := newSvc(&memRepo{})
+	if err := svc.Adjust(context.Background(), "", 10, 5); err != nil {
+		t.Errorf("empty org: unexpected err %v", err)
 	}
 }
 

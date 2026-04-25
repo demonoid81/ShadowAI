@@ -48,7 +48,7 @@ func TestSmoke_OrgBudget_TwoOrgs(t *testing.T) {
 		OrgID:             smokeBudgetOrgA,
 		Mode:              domain.OrgBudgetEnforce,
 		MonthlyLimitCents: 500,
-	}, ""); err != nil {
+	}, "", ""); err != nil {
 		t.Fatalf("UpsertPolicy orgA: %v", err)
 	}
 
@@ -57,7 +57,7 @@ func TestSmoke_OrgBudget_TwoOrgs(t *testing.T) {
 		OrgID:             smokeBudgetOrgB,
 		Mode:              domain.OrgBudgetObserve,
 		MonthlyLimitCents: 200,
-	}, ""); err != nil {
+	}, "", ""); err != nil {
 		t.Fatalf("UpsertPolicy orgB: %v", err)
 	}
 
