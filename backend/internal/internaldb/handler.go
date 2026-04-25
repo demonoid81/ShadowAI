@@ -143,7 +143,11 @@ func (h *Handler) ListManagedSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sources, err := h.repo.ListSources(r.Context(), true)
+	orgID, global, _ := auth.RequireOrg(claims)
+	if global {
+		orgID = ""
+	}
+	sources, err := h.repo.ListSources(r.Context(), orgID, true)
 	if err != nil {
 		h.auditAdminRequest(r.Context(), claims, "list", "all", "/api/internal-dbs/sources", http.StatusInternalServerError, err, start)
 		h.writeError(w, http.StatusInternalServerError, "internal error")
@@ -176,7 +180,11 @@ func (h *Handler) GetSource(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "invalid source id")
 		return
 	}
-	source, err := h.repo.GetByID(r.Context(), id)
+	getOrgID, getGlobal, _ := auth.RequireOrg(claims)
+	if getGlobal {
+		getOrgID = ""
+	}
+	source, err := h.repo.GetByIDScoped(r.Context(), id, getOrgID)
 	if err != nil {
 		if isNotFoundError(err) {
 			h.auditAdminRequest(r.Context(), claims, "get", id, "/api/internal-dbs/sources", http.StatusNotFound, err, start)
@@ -234,6 +242,10 @@ func (h *Handler) CreateSource(w http.ResponseWriter, r *http.Request) {
 		isActive = *req.IsActive
 	}
 
+	createOrgID, createGlobal, _ := auth.RequireOrg(claims)
+	if createGlobal {
+		createOrgID = ""
+	}
 	source := &InternalDBSource{
 		ID:          uuid.New().String(),
 		Name:        name,
@@ -242,7 +254,7 @@ func (h *Handler) CreateSource(w http.ResponseWriter, r *http.Request) {
 		IsActive:    isActive,
 	}
 
-	if err := h.repo.Create(r.Context(), source, claims.UserID); err != nil {
+	if err := h.repo.Create(r.Context(), source, claims.UserID, createOrgID); err != nil {
 		if isUniqueConstraintError(err) {
 			h.auditAdminRequest(r.Context(), claims, "create", source.Name, "/api/internal-dbs/sources", http.StatusConflict, err, start)
 			h.writeError(w, http.StatusConflict, "source already exists")
@@ -287,7 +299,11 @@ func (h *Handler) UpdateSource(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "invalid source id")
 		return
 	}
-	existing, err := h.repo.GetByID(r.Context(), id)
+	updateOrgID, updateGlobal, _ := auth.RequireOrg(claims)
+	if updateGlobal {
+		updateOrgID = ""
+	}
+	existing, err := h.repo.GetByIDScoped(r.Context(), id, updateOrgID)
 	if err != nil {
 		if isNotFoundError(err) {
 			h.auditAdminRequest(r.Context(), claims, "update", id, "/api/internal-dbs/sources", http.StatusNotFound, err, start)
@@ -341,7 +357,7 @@ func (h *Handler) UpdateSource(w http.ResponseWriter, r *http.Request) {
 		existing.IsActive = *req.IsActive
 	}
 
-	if err := h.repo.Update(r.Context(), existing, claims.UserID); err != nil {
+	if err := h.repo.UpdateScoped(r.Context(), existing, claims.UserID, updateOrgID); err != nil {
 		if isUniqueConstraintError(err) {
 			h.auditAdminRequest(r.Context(), claims, "update", existing.ID, "/api/internal-dbs/sources", http.StatusConflict, err, start)
 			h.writeError(w, http.StatusConflict, "source already exists")
@@ -391,7 +407,11 @@ func (h *Handler) DeleteSource(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "invalid source id")
 		return
 	}
-	if err := h.repo.Delete(r.Context(), id); err != nil {
+	deleteOrgID, deleteGlobal, _ := auth.RequireOrg(claims)
+	if deleteGlobal {
+		deleteOrgID = ""
+	}
+	if err := h.repo.DeleteScoped(r.Context(), id, deleteOrgID); err != nil {
 		if isNotFoundError(err) {
 			h.auditAdminRequest(r.Context(), claims, "delete", id, "/api/internal-dbs/sources", http.StatusNotFound, err, start)
 			h.writeError(w, http.StatusNotFound, "source not found")
@@ -455,7 +475,11 @@ func (h *Handler) TestSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source, err := h.repo.GetByID(r.Context(), id)
+	testOrgID, testGlobal, _ := auth.RequireOrg(claims)
+	if testGlobal {
+		testOrgID = ""
+	}
+	source, err := h.repo.GetByIDScoped(r.Context(), id, testOrgID)
 	if err != nil {
 		if isNotFoundError(err) {
 			h.auditAdminRequest(r.Context(), claims, "test", id, "/api/internal-dbs/sources/{id}/test", http.StatusNotFound, err, start)

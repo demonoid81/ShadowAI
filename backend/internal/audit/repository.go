@@ -179,11 +179,16 @@ func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cuto
 }
 
 
-func (r *Repository) List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
+func (r *Repository) List(ctx context.Context, limit, offset int, orgID, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
 	where := []string{"1=1"}
 	args := []any{}
 	argIdx := 1
 
+	if orgID != "" {
+		where = append(where, fmt.Sprintf("org_id = $%d", argIdx))
+		args = append(args, orgID)
+		argIdx++
+	}
 	if userID != "" {
 		where = append(where, fmt.Sprintf("user_id = $%d", argIdx))
 		args = append(args, userID)

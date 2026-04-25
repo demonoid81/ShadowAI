@@ -357,7 +357,7 @@ func (r *smokeCapAuditRepo) Snapshot() []*domain.AuditLog {
 	copy(out, r.entries)
 	return out
 }
-func (r *smokeCapAuditRepo) List(_ context.Context, _, _ int, _, _, _, _ string) ([]domain.AuditLog, int, error) {
+func (r *smokeCapAuditRepo) List(_ context.Context, _, _ int, _, _, _, _, _ string) ([]domain.AuditLog, int, error) {
 	return nil, 0, nil
 }
 func (r *smokeCapAuditRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (int, error) {

@@ -17,7 +17,7 @@ type Repo interface {
 	// hasShadow: "" | "any" | "yes" | "no" — фильтр по наличию
 	// shadow_decisions_json. "yes" → IS NOT NULL, "no" → IS NULL,
 	// пусто/"any" → без фильтра (backward compat для call-site'ов).
-	List(ctx context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error)
+	List(ctx context.Context, limit, offset int, orgID, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error)
 
 	// PR-A: retention/purge.
 	PurgeOlderThan(ctx context.Context, cutoff time.Time, chunkSize int) (int, error)

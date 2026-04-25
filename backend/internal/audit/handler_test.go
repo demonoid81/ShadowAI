@@ -38,7 +38,7 @@ type listCall struct {
 
 func (r *recordingRepo) Insert(_ context.Context, _ *domain.AuditLog) error { return nil }
 
-func (r *recordingRepo) List(_ context.Context, limit, offset int, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
+func (r *recordingRepo) List(_ context.Context, limit, offset int, orgID, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastCall = listCall{limit, offset, userID, model, policyAction, hasShadow}

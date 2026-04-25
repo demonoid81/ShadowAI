@@ -247,7 +247,7 @@ func (m *Manager) collectSources(ctx context.Context) (map[string]string, []stri
 		return combined, errs
 	}
 
-	dbSources, err := m.repository.ListSources(ctx, true)
+	dbSources, err := m.repository.ListSources(ctx, "", true) // manager refresh is global (no org filter)
 	if err != nil {
 		errs = append(errs, err.Error())
 		return combined, errs

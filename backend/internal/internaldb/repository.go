@@ -28,21 +28,27 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) ListSources(ctx context.Context, includeInactive bool) ([]InternalDBSource, error) {
+func (r *Repository) ListSources(ctx context.Context, orgID string, includeInactive bool) ([]InternalDBSource, error) {
 	if r == nil || r.db == nil {
 		return []InternalDBSource{}, nil
 	}
 
-	query := `
-		SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
-		FROM internal_db_sources
-	`
-	if !includeInactive {
-		query += " WHERE is_active = true"
+	var args []any
+	argIdx := 1
+	conds := "1=1"
+	if orgID != "" {
+		conds += " AND org_id = $1"
+		args = append(args, orgID)
+		argIdx++
 	}
-	query += " ORDER BY lower(name) ASC"
+	_ = argIdx
+	if !includeInactive {
+		conds += " AND is_active = true"
+	}
+	query := `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		FROM internal_db_sources WHERE ` + conds + ` ORDER BY lower(name) ASC`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		if isRelationMissing(err) {
 			return []InternalDBSource{}, nil
@@ -83,6 +89,31 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*InternalDBSource,
 	return &s, nil
 }
 
+// GetByIDScoped looks up an internal DB source by id within the given org.
+func (r *Repository) GetByIDScoped(ctx context.Context, id, orgID string) (*InternalDBSource, error) {
+	if r == nil || r.db == nil {
+		return nil, sql.ErrNoRows
+	}
+	var s InternalDBSource
+	var q string
+	var args []any
+	if orgID != "" {
+		q = `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		     FROM internal_db_sources WHERE id = $1 AND org_id = $2`
+		args = []any{id, orgID}
+	} else {
+		q = `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		     FROM internal_db_sources WHERE id = $1`
+		args = []any{id}
+	}
+	err := r.db.QueryRowContext(ctx, q, args...).Scan(
+		&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 func (r *Repository) GetByName(ctx context.Context, name string) (*InternalDBSource, error) {
 	if r == nil || r.db == nil {
 		return nil, sql.ErrNoRows
@@ -100,19 +131,73 @@ func (r *Repository) GetByName(ctx context.Context, name string) (*InternalDBSou
 	return &s, nil
 }
 
-func (r *Repository) Create(ctx context.Context, source *InternalDBSource, userID string) error {
+func (r *Repository) Create(ctx context.Context, source *InternalDBSource, userID, orgID string) error {
 	if r == nil || r.db == nil {
 		return errors.New("repository unavailable")
 	}
 	if source == nil {
 		return errors.New("internal db source is required")
 	}
+	if orgID == "" {
+		orgID = "00000000-0000-0000-0000-000000000001"
+	}
 
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO internal_db_sources (id, name, dsn, description, is_active, created_by, updated_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-		source.ID, source.Name, source.DSN, source.Description, source.IsActive, toNullableID(userID))
+		`INSERT INTO internal_db_sources (id, name, dsn, description, is_active, created_by, updated_by, org_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $6, $7)`,
+		source.ID, source.Name, source.DSN, source.Description, source.IsActive, toNullableID(userID), orgID)
 	return err
+}
+
+// UpdateScoped updates a source with org ownership check.
+func (r *Repository) UpdateScoped(ctx context.Context, source *InternalDBSource, userID, orgID string) error {
+	if r == nil || r.db == nil {
+		return errors.New("repository unavailable")
+	}
+	if source == nil {
+		return errors.New("internal db source is required")
+	}
+	var res sql.Result
+	var err error
+	if orgID != "" {
+		res, err = r.db.ExecContext(ctx,
+			`UPDATE internal_db_sources SET name=$1, dsn=$2, description=$3, is_active=$4, updated_by=$5, updated_at=now()
+			 WHERE id=$6 AND org_id=$7`,
+			source.Name, source.DSN, source.Description, source.IsActive, toNullableID(userID), source.ID, orgID)
+	} else {
+		res, err = r.db.ExecContext(ctx,
+			`UPDATE internal_db_sources SET name=$1, dsn=$2, description=$3, is_active=$4, updated_by=$5, updated_at=now()
+			 WHERE id=$6`,
+			source.Name, source.DSN, source.Description, source.IsActive, toNullableID(userID), source.ID)
+	}
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return ErrSourceNotFound
+	}
+	return nil
+}
+
+// DeleteScoped deletes a source with org ownership check.
+func (r *Repository) DeleteScoped(ctx context.Context, id, orgID string) error {
+	if r == nil || r.db == nil {
+		return sql.ErrNoRows
+	}
+	var res sql.Result
+	var err error
+	if orgID != "" {
+		res, err = r.db.ExecContext(ctx, `DELETE FROM internal_db_sources WHERE id = $1 AND org_id = $2`, id, orgID)
+	} else {
+		res, err = r.db.ExecContext(ctx, `DELETE FROM internal_db_sources WHERE id = $1`, id)
+	}
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return ErrSourceNotFound
+	}
+	return nil
 }
 
 func (r *Repository) Update(ctx context.Context, source *InternalDBSource, userID string) error {

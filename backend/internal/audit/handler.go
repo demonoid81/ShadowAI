@@ -96,7 +96,12 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		hasShadow = ""
 	}
 
-	logs, total, err := h.svc.GetRepo().List(r.Context(), limit, offset, userID, model, policyAction, hasShadow)
+	claims := auth.GetClaims(r.Context())
+	orgID, global, _ := auth.RequireOrg(claims)
+	if global {
+		orgID = "" // break-glass/global_admin: no org filter
+	}
+	logs, total, err := h.svc.GetRepo().List(r.Context(), limit, offset, orgID, userID, model, policyAction, hasShadow)
 	if err != nil {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return

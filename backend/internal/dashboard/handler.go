@@ -76,18 +76,37 @@ type Stats struct {
 }
 
 func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
-	var s Stats
-	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN policy_action='blocked' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
-		FROM audit_logs`).Scan(&s.TotalRequests, &s.BlockedRequests, &s.TotalCost, &s.TotalTokens); err != nil {
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
+	claims := auth.GetClaims(r.Context())
+	orgID, global, _ := auth.RequireOrg(claims)
+	if global {
+		orgID = ""
 	}
 
-	if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE is_active=true`).Scan(&s.ActiveUsers); err != nil {
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
+	var s Stats
+	if orgID != "" {
+		if err := h.db.QueryRowContext(r.Context(),
+			`SELECT COUNT(*), COALESCE(SUM(CASE WHEN policy_action='blocked' THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
+			FROM audit_logs WHERE org_id = $1`, orgID).Scan(&s.TotalRequests, &s.BlockedRequests, &s.TotalCost, &s.TotalTokens); err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
+		if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE is_active=true AND org_id=$1`, orgID).Scan(&s.ActiveUsers); err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if err := h.db.QueryRowContext(r.Context(),
+			`SELECT COUNT(*), COALESCE(SUM(CASE WHEN policy_action='blocked' THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
+			FROM audit_logs`).Scan(&s.TotalRequests, &s.BlockedRequests, &s.TotalCost, &s.TotalTokens); err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
+		if err := h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE is_active=true`).Scan(&s.ActiveUsers); err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -105,10 +124,24 @@ type UsagePoint struct {
 }
 
 func (h *Handler) GetUsage(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT created_at::date as day, COUNT(*), COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
-		FROM audit_logs WHERE created_at > now() - interval '30 days'
-		GROUP BY day ORDER BY day`)
+	claims := auth.GetClaims(r.Context())
+	orgID, global, _ := auth.RequireOrg(claims)
+	if global {
+		orgID = ""
+	}
+	var rows *sql.Rows
+	var err error
+	if orgID != "" {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT created_at::date as day, COUNT(*), COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
+			FROM audit_logs WHERE created_at > now() - interval '30 days' AND org_id = $1
+			GROUP BY day ORDER BY day`, orgID)
+	} else {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT created_at::date as day, COUNT(*), COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0)
+			FROM audit_logs WHERE created_at > now() - interval '30 days'
+			GROUP BY day ORDER BY day`)
+	}
 	if err != nil {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
@@ -150,10 +183,25 @@ type TopUser struct {
 }
 
 func (h *Handler) GetTopUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT a.user_id, u.email, COUNT(*), COALESCE(SUM(a.cost_usd),0)
-		FROM audit_logs a JOIN users u ON a.user_id = u.id
-		GROUP BY a.user_id, u.email ORDER BY SUM(a.cost_usd) DESC LIMIT 10`)
+	claims := auth.GetClaims(r.Context())
+	orgID, global, _ := auth.RequireOrg(claims)
+	if global {
+		orgID = ""
+	}
+	var rows *sql.Rows
+	var err error
+	if orgID != "" {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT a.user_id, u.email, COUNT(*), COALESCE(SUM(a.cost_usd),0)
+			FROM audit_logs a JOIN users u ON a.user_id = u.id
+			WHERE a.org_id = $1
+			GROUP BY a.user_id, u.email ORDER BY SUM(a.cost_usd) DESC LIMIT 10`, orgID)
+	} else {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT a.user_id, u.email, COUNT(*), COALESCE(SUM(a.cost_usd),0)
+			FROM audit_logs a JOIN users u ON a.user_id = u.id
+			GROUP BY a.user_id, u.email ORDER BY SUM(a.cost_usd) DESC LIMIT 10`)
+	}
 	if err != nil {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
