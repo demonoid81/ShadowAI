@@ -22,4 +22,6 @@ type User struct {
 	// PR-E1.1: MFA. TOTPSecret is the encrypted TOTP seed; never expose in API responses.
 	TOTPSecret  *string `json:"-"`
 	MFARequired bool    `json:"mfa_required"`
+	// PR-E2: SCIM external ID (IdP-assigned, from SCIM externalId attribute).
+	SCIMExternalID *string `json:"scim_external_id,omitempty"`
 }

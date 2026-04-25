@@ -208,6 +208,14 @@ type Config struct {
 	// (см. ValidateStartupConfig).
 	StreamingMode string
 
+	// PR-E2: SCIM 2.0 user provisioning.
+	SCIMEnabled              bool   // SCIM_ENABLED (default false)
+	SCIMBearerToken          string // SCIM_BEARER_TOKEN — plaintext token from IdP
+	SCIMProvisionDefaultRole string // SCIM_PROVISION_DEFAULT_ROLE (default "user")
+	SCIMRoleMapJSON          string // SCIM_ROLE_MAP_JSON — {"admins":"admin"}
+	SCIMDepartmentAttribute  string // SCIM_DEPARTMENT_ATTRIBUTE
+	SCIMLinkByEmail          bool   // SCIM_LINK_BY_EMAIL (default false)
+
 	// PR-E1.1: MFA / break-glass.
 	// BREAK_GLASS_ENABLED — allow emergency password-based admin login.
 	// Default false. In prod, admin password login is blocked unless this is true.
@@ -331,6 +339,14 @@ func Load() *Config {
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
 		StreamingAllowIncrementalInProd: getEnv("STREAMING_ALLOW_INCREMENTAL_IN_PROD", "false") == "true",
+
+		// PR-E2: SCIM 2.0.
+		SCIMEnabled:              getEnv("SCIM_ENABLED", "false") == "true",
+		SCIMBearerToken:          getEnv("SCIM_BEARER_TOKEN", ""),
+		SCIMProvisionDefaultRole: getEnv("SCIM_PROVISION_DEFAULT_ROLE", "user"),
+		SCIMRoleMapJSON:          getEnv("SCIM_ROLE_MAP_JSON", ""),
+		SCIMDepartmentAttribute:  getEnv("SCIM_DEPARTMENT_ATTRIBUTE", ""),
+		SCIMLinkByEmail:          getEnv("SCIM_LINK_BY_EMAIL", "false") == "true",
 
 		// PR-E1.1: MFA / break-glass.
 		BreakGlassEnabled:    getEnv("BREAK_GLASS_ENABLED", "false") == "true",

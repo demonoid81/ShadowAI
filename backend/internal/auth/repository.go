@@ -27,9 +27,9 @@ func (r *Repository) GetByEmail(ctx context.Context, email string) (*domain.User
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, api_key, is_active, token_version,
-		        totp_secret, mfa_required, created_at, updated_at FROM users WHERE email = $1`, email).
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE email = $1`, email).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -48,9 +48,9 @@ func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.Us
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, api_key, is_active, token_version,
-		        totp_secret, mfa_required, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -61,9 +61,9 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, erro
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, password, role, department, api_key, is_active, token_version,
-		        totp_secret, mfa_required, created_at, updated_at FROM users WHERE id = $1`, id).
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE id = $1`, id).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
-			&u.TOTPSecret, &u.MFARequired, &u.CreatedAt, &u.UpdatedAt)
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +112,69 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count)
 	return count, err
+}
+
+// ---------------------------------------------------------------------------
+// PR-E2: SCIM repository methods.
+// ---------------------------------------------------------------------------
+
+// GetBySCIMExternalID looks up a user by scim_external_id.
+// Returns (nil, sql.ErrNoRows) if not found.
+func (r *Repository) GetBySCIMExternalID(ctx context.Context, externalID string) (*domain.User, error) {
+	u := &domain.User{}
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at
+		 FROM users WHERE scim_external_id = $1`, externalID).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// CreateUserSCIM inserts a SCIM-provisioned user. Password is empty (IdP-only auth).
+func (r *Repository) CreateUserSCIM(ctx context.Context, u *domain.User) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO users (id, email, password, role, department, is_active, token_version, scim_external_id)
+		 VALUES ($1, $2, '', $3, $4, $5, 0, $6)`,
+		u.ID, u.Email, u.Role, u.Department, u.IsActive, u.SCIMExternalID)
+	return err
+}
+
+// UpdateUserSCIM updates SCIM-synced fields. Does not touch password or api_key.
+// Bumps token_version when IsActive changes (forces re-login after deprovisioning).
+func (r *Repository) UpdateUserSCIM(ctx context.Context, u *domain.User) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users
+		 SET email=$1, role=$2, department=$3, is_active=$4, scim_external_id=$5,
+		     token_version = CASE WHEN is_active != $4 THEN token_version + 1 ELSE token_version END,
+		     updated_at=now()
+		 WHERE id=$6`,
+		u.Email, u.Role, u.Department, u.IsActive, u.SCIMExternalID, u.ID)
+	return err
+}
+
+// ListUsersSCIM returns all users for SCIM list operations.
+func (r *Repository) ListUsersSCIM(ctx context.Context) ([]domain.User, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, email, role, department, is_active, scim_external_id, created_at, updated_at
+		 FROM users ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []domain.User
+	for rows.Next() {
+		var u domain.User
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.Department, &u.IsActive,
+			&u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
 }
 
 // ---------------------------------------------------------------------------

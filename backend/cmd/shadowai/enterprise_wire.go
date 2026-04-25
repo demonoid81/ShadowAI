@@ -23,6 +23,7 @@ import (
 	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/legalhold"
 	"github.com/shadowai/backend/internal/oidcauth"
+	"github.com/shadowai/backend/internal/scim"
 	"github.com/shadowai/backend/internal/siem"
 )
 
@@ -93,6 +94,29 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	governanceSvc := governance.NewService(governanceRepo)
 	governanceHandler := governance.NewHandler(governanceSvc, adminAuditRecorder)
 
+	// PR-E2: SCIM provisioning.
+	var scimHandler *scim.Handler
+	if deps.Cfg.SCIMEnabled {
+		scimCfg, err := scim.ParseSyncConfig(
+			deps.Cfg.SCIMProvisionDefaultRole,
+			deps.Cfg.SCIMRoleMapJSON,
+			deps.Cfg.SCIMDepartmentAttribute,
+			deps.Cfg.SCIMLinkByEmail,
+		)
+		if err != nil {
+			log.Fatalf("scim: config error: %v", err)
+		}
+		syncer := scim.NewUserSyncer(deps.AuthRepo, scimCfg)
+		scimBaseURL := deps.Cfg.OIDCRedirectURL // reuse base URL from OIDC config as hint
+		if idx := strings.Index(scimBaseURL, "/api/"); idx > 0 {
+			scimBaseURL = scimBaseURL[:idx]
+		}
+		scimBaseURL += "/scim/v2"
+		scimHandler = scim.NewHandler(syncer, deps.Cfg.SCIMBearerToken, scimBaseURL, adminAuditRecorder)
+		log.Printf("scim: provisioning enabled (default_role=%s link_by_email=%v)",
+			scimCfg.DefaultRole, scimCfg.LinkByEmail)
+	}
+
 	// PR-E1.1: MFA + break-glass handler.
 	mfaCfg := auth.MFAConfig{
 		MFATOTPIssuer:        deps.Cfg.MFATOTPIssuer,
@@ -114,6 +138,22 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		AdminAudit: adminAuditRecorder,
 		Governance: governanceSvc,
 		Eraser:     erasureSvc,
+
+		// PR-E2: SCIM 2.0 routes (separate bearer token, not admin JWT).
+		RegisterSCIMRoutes: func(r *mux.Router) {
+			if scimHandler == nil {
+				return // SCIM_ENABLED=false
+			}
+			scimRouter := r.PathPrefix("/scim/v2").Subrouter()
+			scimRouter.Use(scimHandler.BearerAuth)
+			scimRouter.HandleFunc("/ServiceProviderConfig", scimHandler.ServiceProviderConfig).Methods("GET")
+			scimRouter.HandleFunc("/Users",       scimHandler.ListUsers).Methods("GET")
+			scimRouter.HandleFunc("/Users",       scimHandler.CreateUser).Methods("POST")
+			scimRouter.HandleFunc("/Users/{id}",  scimHandler.GetUser).Methods("GET")
+			scimRouter.HandleFunc("/Users/{id}",  scimHandler.ReplaceUser).Methods("PUT")
+			scimRouter.HandleFunc("/Users/{id}",  scimHandler.PatchUser).Methods("PATCH")
+			scimRouter.HandleFunc("/Users/{id}",  scimHandler.DeleteUser).Methods("DELETE")
+		},
 
 		// PR-E1.1: MFA management routes (behind AuthMiddleware, admin-only).
 		RegisterMFARoutes: func(api *mux.Router) {

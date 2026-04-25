@@ -500,6 +500,9 @@ func main() {
 	// PR-E1.1: MFA management (authenticated, admin-only).
 	entBundle.RegisterMFARoutes(api)
 
+	// PR-E2: SCIM 2.0 provisioning (separate bearer token, not admin JWT).
+	entBundle.RegisterSCIMRoutes(r)
+
 	// Proxy routes (authenticated + rate limited) — wildcard for all providers
 	proxyRouter := r.PathPrefix("/proxy").Subrouter()
 	proxyRouter.Use(authSvc.AuthMiddleware)

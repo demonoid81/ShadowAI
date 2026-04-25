@@ -124,6 +124,11 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		}
 	}
 
+	// PR-E2: SCIM в prod требует SCIM_BEARER_TOKEN (иначе endpoint открыт для всех).
+	if c.SCIMEnabled && strings.TrimSpace(c.SCIMBearerToken) == "" {
+		errs = append(errs, "SCIM_BEARER_TOKEN required when SCIM_ENABLED=true in prod (empty token allows unauthenticated provisioning)")
+	}
+
 	// PR-E1.1: break-glass prod guards.
 	// (1) BREAK_GLASS_ENABLED=true без hash — кто угодно может войти.
 	// (2) BREAK_GLASS_ENABLED=true → требует AUDIT_CHAIN_SECRET (все break-glass

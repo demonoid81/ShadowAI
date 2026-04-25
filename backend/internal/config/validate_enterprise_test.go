@@ -132,6 +132,28 @@ func TestValidateStartupConfig_ImmuDBRestProfile_Valid(t *testing.T) {
 // PR-E1.1: break-glass prod validation tests
 // ---------------------------------------------------------------------------
 
+// TestValidateStartupConfig_SCIM_MissingToken — SCIM enabled without token → error.
+func TestValidateStartupConfig_SCIM_MissingToken(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SCIMEnabled = true
+	cfg.SCIMBearerToken = ""
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "SCIM_BEARER_TOKEN") {
+		t.Fatalf("expected SCIM_BEARER_TOKEN error, got: %v", err)
+	}
+}
+
+// TestValidateStartupConfig_SCIM_Disabled_OK — disabled SCIM skips validation.
+func TestValidateStartupConfig_SCIM_Disabled_OK(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.SCIMEnabled = false
+	if err := cfg.ValidateStartupConfig(); err != nil {
+		if strings.Contains(err.Error(), "SCIM") {
+			t.Errorf("disabled SCIM: unexpected error: %v", err)
+		}
+	}
+}
+
 // TestValidateStartupConfig_BreakGlass_MissingHash — BREAK_GLASS_ENABLED without hash → error.
 func TestValidateStartupConfig_BreakGlass_MissingHash(t *testing.T) {
 	cfg := prodConfigBase()

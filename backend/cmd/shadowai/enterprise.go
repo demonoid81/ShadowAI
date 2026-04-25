@@ -64,6 +64,9 @@ type enterpriseBundle struct {
 	// RegisterMFARoutes добавляет MFA/break-glass admin routes (за AuthMiddleware).
 	// В Core-билде — no-op.
 	RegisterMFARoutes func(api *mux.Router)
+	// RegisterSCIMRoutes добавляет SCIM 2.0 provisioning routes.
+	// В Core-билде — no-op.
+	RegisterSCIMRoutes func(r *mux.Router)
 }
 
 // enterpriseDeps — входные данные, которые wire получает от main,
