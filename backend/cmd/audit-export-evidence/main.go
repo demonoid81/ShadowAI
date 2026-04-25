@@ -270,7 +270,7 @@ func main() {
 	}
 
 	// Write README.txt.
-	if err := evidencebundle.WriteReadme(outDir, tables, hasPubKey); err != nil {
+	if err := evidencebundle.WriteReadme(outDir, tables, hasPubKey, tenantOrgID); err != nil {
 		exitErr("write README: %v", err)
 	}
 

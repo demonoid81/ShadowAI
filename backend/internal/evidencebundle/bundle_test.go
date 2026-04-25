@@ -204,7 +204,7 @@ func TestComputeBundleHashes(t *testing.T) {
 func TestWriteReadme(t *testing.T) {
 	t.Run("without_pubkey", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := WriteReadme(dir, []string{"audit_logs"}, false); err != nil {
+		if err := WriteReadme(dir, []string{"audit_logs"}, false, ""); err != nil {
 			t.Fatalf("WriteReadme: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(dir, "README.txt"))
@@ -225,7 +225,7 @@ func TestWriteReadme(t *testing.T) {
 
 	t.Run("with_pubkey", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := WriteReadme(dir, []string{"audit_logs", "admin_event_logs"}, true); err != nil {
+		if err := WriteReadme(dir, []string{"audit_logs", "admin_event_logs"}, true, ""); err != nil {
 			t.Fatalf("WriteReadme: %v", err)
 		}
 		data, _ := os.ReadFile(filepath.Join(dir, "README.txt"))
@@ -312,7 +312,7 @@ func TestRequireEmptyOrAbsentDir_IsFile(t *testing.T) {
 // DATABASE_URL and is not an offline check.
 func TestWriteReadme_NoDatabaseRequiringCommand(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteReadme(dir, []string{"audit_logs"}, true); err != nil {
+	if err := WriteReadme(dir, []string{"audit_logs"}, true, ""); err != nil {
 		t.Fatalf("WriteReadme: %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "README.txt"))
@@ -328,7 +328,7 @@ func TestWriteReadme_NoDatabaseRequiringCommand(t *testing.T) {
 // states that the current audit-verify CLI reads from DATABASE_URL, not bundle.
 func TestWriteReadme_MentionsDatabaseLimitation(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteReadme(dir, []string{"audit_logs"}, false); err != nil {
+	if err := WriteReadme(dir, []string{"audit_logs"}, false, ""); err != nil {
 		t.Fatalf("WriteReadme: %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "README.txt"))

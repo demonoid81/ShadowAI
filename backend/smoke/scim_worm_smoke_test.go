@@ -319,7 +319,7 @@ func buildSmokeBundle(ctx context.Context, t *testing.T, infra *infraStack, dir 
 	}
 
 	// Write README.
-	if err := evidencebundle.WriteReadme(dir, []string{"audit_logs"}, true); err != nil {
+	if err := evidencebundle.WriteReadme(dir, []string{"audit_logs"}, true, ""); err != nil {
 		return err
 	}
 

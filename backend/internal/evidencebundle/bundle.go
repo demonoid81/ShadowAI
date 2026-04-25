@@ -252,7 +252,10 @@ func ZipBundleDir(dir, zipPath string) error {
 
 // WriteReadme writes README.txt explaining what the bundle contains,
 // what can be verified offline, and what requires live infrastructure.
-func WriteReadme(dir string, tables []string, hasPubKey bool) error {
+// WriteReadme writes a README.txt to dir.
+// tenantOrgID non-empty → tenant bundle; global reports are not written and
+// the README reflects that.
+func WriteReadme(dir string, tables []string, hasPubKey bool, tenantOrgID string) error {
 	path := filepath.Join(dir, "README.txt")
 	f, err := os.Create(path)
 	if err != nil {
@@ -265,6 +268,29 @@ func WriteReadme(dir string, tables []string, hasPubKey bool) error {
 	offline := "none (public_key.b64 not provided)"
 	if hasPubKey {
 		offline = "Ed25519 anchor signatures (public_key.b64 + anchors.jsonl)"
+	}
+
+	reportsSection := `reports/
+  Operator-side verification results run at export time (JSON).
+  anchor_verify_<table>.json       — W3 Merkle anchor verification result
+  signature_verify_<table>.json    — W4.1 Ed25519 signature verification result
+  These reports were produced by the operator; they are informational.
+  For independent re-verification see the manual steps below.`
+
+	if tenantOrgID != "" {
+		reportsSection = fmt.Sprintf(`reports/
+  NOT PRESENT in this tenant bundle (org_id=%s).
+  Global verification reports are omitted to avoid exposing cross-tenant anchor
+  metadata to the tenant auditor. Use anchors.jsonl + chain_inventory.jsonl for
+  offline Merkle verification of this org's anchor ranges (see steps below).
+
+TENANT BUNDLE NOTE
+  This bundle contains evidence for org_id=%s only.
+  chain_inventory.jsonl includes ALL row hashes for intersecting anchor ranges,
+  including rows from other orgs. Those hashes are cryptographic commitments
+  (HMAC outputs) — they are opaque and do not expose other orgs' content.
+  They are present so you can recompute Merkle roots from the full leaf set.`,
+			tenantOrgID, tenantOrgID)
 	}
 
 	content := fmt.Sprintf(`ShadowAI Evidence Bundle
@@ -291,12 +317,7 @@ chain_inventory.jsonl
     - Cross-referencing row_hash values against anchor Merkle roots
   It does NOT prove that row_hash corresponds to specific row content.
 
-reports/
-  Operator-side verification results run at export time (JSON).
-  anchor_verify_<table>.json       — W3 Merkle anchor verification result
-  signature_verify_<table>.json    — W4.1 Ed25519 signature verification result
-  These reports were produced by the operator; they are informational.
-  For independent re-verification see the manual steps below.
+%s
 
 public_key.b64 (if present)
   Base64-encoded Ed25519 public key used for anchor signature verification.
@@ -351,7 +372,7 @@ To verify using any Ed25519 library (Python example):
       sig = binascii.unhexlify(a["signature_hex"])
       pubkey.verify(sig, msg)  # raises if invalid
       print("OK", a["id"], a["table"], a["seq_lo"], "-", a["seq_hi"])
-`, tablesStr, offline)
+`, tablesStr, reportsSection, offline)
 
 	_, err = f.WriteString(content)
 	return err
