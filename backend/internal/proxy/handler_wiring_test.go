@@ -79,7 +79,7 @@ func (c *captureAuditRepo) TotalRowsPurged(_ context.Context, _ string) (int, er
 // emptyPolicyRepo: policy engine без правил → всегда allowed.
 type emptyPolicyRepo struct{}
 
-func (emptyPolicyRepo) List(_ context.Context) ([]domain.PolicyRule, error) {
+func (emptyPolicyRepo) List(_ context.Context, _ string) ([]domain.PolicyRule, error) {
 	return nil, nil
 }
 

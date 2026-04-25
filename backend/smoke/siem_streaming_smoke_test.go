@@ -386,7 +386,7 @@ func (smokeUnlimitedBudgetRepo) UpdateSpent(_ context.Context, _ string, _ float
 
 type smokeEmptyPolicyRepo struct{}
 
-func (smokeEmptyPolicyRepo) List(_ context.Context) ([]domain.PolicyRule, error) { return nil, nil }
+func (smokeEmptyPolicyRepo) List(_ context.Context, _ string) ([]domain.PolicyRule, error) { return nil, nil }
 
 // ---------------------------------------------------------------------------
 // Helpers

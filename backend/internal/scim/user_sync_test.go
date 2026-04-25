@@ -26,6 +26,10 @@ func (m *mockSCIMRepo) GetBySCIMExternalID(_ context.Context, id string) (*domai
 	if u, ok := m.byExternalID[id]; ok { return u, nil }
 	return nil, sql.ErrNoRows
 }
+func (m *mockSCIMRepo) GetBySCIMExternalIDInOrg(_ context.Context, id, _ string) (*domain.User, error) {
+	if u, ok := m.byExternalID[id]; ok { return u, nil }
+	return nil, sql.ErrNoRows
+}
 func (m *mockSCIMRepo) GetByEmail(_ context.Context, email string) (*domain.User, error) {
 	if u, ok := m.byEmail[email]; ok { return u, nil }
 	return nil, sql.ErrNoRows

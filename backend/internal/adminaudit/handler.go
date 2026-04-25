@@ -41,7 +41,16 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	resource := q.Get("resource")
 	action := q.Get("action")
 
-	events, total, err := h.repo.List(r.Context(), limit, offset, actorID, resource, action)
+	// Use orgID set in context by auth middleware (avoids import cycle).
+	orgID := GetOrgFromContext(r.Context())
+	if orgID == domain.DefaultOrgID {
+		// For break-glass / global admin we want to pass "" (no filter).
+		// DefaultOrgID is the fallback for normal sessions — keep it as org filter.
+		// Real global bypass would require a custom context marker; for now use
+		// DefaultOrgID as-is (tenant admin sees their org, break-glass sees default).
+		// Full global_admin bypass is deferred to Phase 4 handler enforcement.
+	}
+	events, total, err := h.repo.List(r.Context(), limit, offset, orgID, actorID, resource, action)
 	if err != nil {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return

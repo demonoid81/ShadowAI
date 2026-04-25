@@ -7,6 +7,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -15,11 +18,10 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/shadowai/backend/internal/adminaudit"
-	"database/sql"
-
 	"github.com/shadowai/backend/internal/audit"
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/config"
+	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/governance"
 	"github.com/shadowai/backend/internal/legalhold"
 	"github.com/shadowai/backend/internal/oidcauth"
@@ -112,9 +114,13 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			scimBaseURL = scimBaseURL[:idx]
 		}
 		scimBaseURL += "/scim/v2"
-		scimHandler = scim.NewHandler(syncer, deps.Cfg.SCIMBearerToken, scimBaseURL, adminAuditRecorder)
-		log.Printf("scim: provisioning enabled (default_role=%s link_by_email=%v)",
-			scimCfg.DefaultRole, scimCfg.LinkByEmail)
+		baseHandler := scim.NewHandler(syncer, deps.Cfg.SCIMBearerToken, scimBaseURL, adminAuditRecorder)
+		// PR-T2.3.1: resolve org from scim_tokens by bearer token hash.
+		// Falls back to default org if token not found (single-tenant / legacy path).
+		scimOrgID := resolveSCIMTokenOrg(context.Background(), deps.DB, deps.Cfg.SCIMBearerToken)
+		scimHandler = baseHandler.WithOrgID(scimOrgID)
+		log.Printf("scim: provisioning enabled (default_role=%s link_by_email=%v org=%s)",
+			scimCfg.DefaultRole, scimCfg.LinkByEmail, scimOrgID)
 	}
 
 	// PR-E1.1: MFA + break-glass handler.
@@ -413,4 +419,23 @@ func runAdminEventsPurgeScheduler(ctx context.Context, cfg *config.Config, audit
 			return
 		}
 	}
+}
+
+// resolveSCIMTokenOrg looks up org_id in scim_tokens by bearer token hash.
+// Returns DefaultOrgID when the token is not registered (single-tenant / legacy path).
+func resolveSCIMTokenOrg(ctx context.Context, db *sql.DB, bearerToken string) string {
+	if db == nil || bearerToken == "" {
+		return domain.DefaultOrgID
+	}
+	sum := sha256.Sum256([]byte(bearerToken))
+	tokenHash := hex.EncodeToString(sum[:])
+	var orgID string
+	err := db.QueryRowContext(ctx,
+		`SELECT org_id FROM scim_tokens WHERE token_hash = $1 AND is_active = true LIMIT 1`,
+		tokenHash).Scan(&orgID)
+	if err != nil {
+		// Token not in scim_tokens (pre-migration / single-tenant): use default org.
+		return domain.DefaultOrgID
+	}
+	return orgID
 }

@@ -17,20 +17,47 @@
 // dashboard, internaldb, governance).
 package adminaudit
 
-import "context"
+import (
+	"context"
+
+	"github.com/shadowai/backend/internal/domain"
+)
+
+// orgCtxKey is the context key for per-request org_id set by auth middleware.
+type orgCtxKey struct{}
+
+// SetOrgContext injects orgID into context. Called by auth.AuthMiddleware after
+// claims are resolved — avoids an import cycle (adminaudit ↔ auth).
+func SetOrgContext(ctx context.Context, orgID string) context.Context {
+	return context.WithValue(ctx, orgCtxKey{}, orgID)
+}
+
+// GetOrgFromContext returns orgID previously set by SetOrgContext.
+// Falls back to domain.DefaultOrgID when not set.
+func GetOrgFromContext(ctx context.Context) string {
+	if s, ok := ctx.Value(orgCtxKey{}).(string); ok && s != "" {
+		return s
+	}
+	return domain.DefaultOrgID
+}
 
 // Event — данные, которые caller передаёт в Recorder. JSON-encoding
 // выполняется в enterprise-реализации (Service).
 type Event struct {
-	ActorUserID *string
-	Action      string
-	Resource    string
-	TargetID    string
-	Path        string
-	Method      string
-	StatusCode  int
-	Success     bool
-	Metadata    any
+	ActorUserID  *string
+	Action       string
+	Resource     string
+	TargetID     string
+	Path         string
+	Method       string
+	StatusCode   int
+	Success      bool
+	Metadata     any
+	// PR-T2.3.1: tenant isolation. OrgID is populated automatically from context
+	// by Service.Record; callers may override SourceOrgID/TargetOrgID for cross-org events.
+	OrgID        string
+	SourceOrgID  string
+	TargetOrgID  string
 }
 
 // Recorder — интерфейс для DI в core handler'ах. Enterprise-сборка

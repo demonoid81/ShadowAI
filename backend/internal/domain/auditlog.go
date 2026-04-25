@@ -5,6 +5,9 @@ import "time"
 type AuditLog struct {
 	ID               string    `json:"id"`
 	UserID           string    `json:"user_id"`
+	// OrgID is the tenant this audit row belongs to (PR-T2.3.1).
+	// Written from claims.OrgID at request time; falls back to DefaultOrgID.
+	OrgID            string    `json:"org_id,omitempty"`
 	RequestBody      string    `json:"request_body,omitempty"`
 	ResponseBody     string    `json:"response_body,omitempty"`
 	Model            string    `json:"model"`

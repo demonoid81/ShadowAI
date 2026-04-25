@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/shadowai/backend/internal/audit"
+	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/firewall"
 )
@@ -73,6 +74,15 @@ func encodeShadowFromCtx(ctx context.Context) string {
 func (h *Handler) auditLog(ctx context.Context, log *domain.AuditLog) {
 	if h.auditSvc == nil {
 		return
+	}
+	// PR-T2.3.1: inject org from claims if not already set by caller.
+	if log.OrgID == "" {
+		if c := auth.GetClaims(ctx); c != nil && c.OrgID != "" {
+			log.OrgID = c.OrgID
+		}
+		if log.OrgID == "" {
+			log.OrgID = domain.DefaultOrgID
+		}
 	}
 	log.ShadowDecisionsJSON = encodeShadowFromCtx(ctx)
 	mode := h.auditPayloadMode

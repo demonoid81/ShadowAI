@@ -23,8 +23,9 @@ type EvalResult struct {
 }
 
 // RuleLister абстрагирует источник правил для тестируемости.
+// orgID="" — global (break-glass / default-org) path.
 type RuleLister interface {
-	List(ctx context.Context) ([]domain.PolicyRule, error)
+	List(ctx context.Context, orgID string) ([]domain.PolicyRule, error)
 }
 
 type Engine struct {
@@ -35,8 +36,17 @@ func NewEngine(repo RuleLister) *Engine {
 	return &Engine{repo: repo}
 }
 
+// policyOrgKey is the context key for per-request org_id used by policy.Engine.
+type policyOrgKey struct{}
+
+// WithPolicyOrg injects orgID into context for Engine.Evaluate to use.
+func WithPolicyOrg(ctx context.Context, orgID string) context.Context {
+	return context.WithValue(ctx, policyOrgKey{}, orgID)
+}
+
 func (e *Engine) Evaluate(ctx context.Context, text string, model string, piiFindings []pii.Finding) (*EvalResult, error) {
-	rules, err := e.repo.List(ctx)
+	orgID, _ := ctx.Value(policyOrgKey{}).(string)
+	rules, err := e.repo.List(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}

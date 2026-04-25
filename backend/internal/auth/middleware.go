@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+
+	"github.com/shadowai/backend/internal/adminaudit"
 )
 
 type contextKey string
@@ -141,6 +143,8 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		ctx := context.WithValue(r.Context(), claimsKey, claims)
+		// PR-T2.3.1: inject orgID for adminaudit package (avoids auth↔adminaudit cycle).
+		ctx = adminaudit.SetOrgContext(ctx, claims.OrgID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -18,8 +18,8 @@ func NewService(repo *Repository) *Service {
 	}
 }
 
-func (s *Service) List(ctx context.Context) ([]domain.PolicyRule, error) {
-	return s.repo.List(ctx)
+func (s *Service) List(ctx context.Context, orgID string) ([]domain.PolicyRule, error) {
+	return s.repo.List(ctx, orgID)
 }
 
 func (s *Service) Create(ctx context.Context, p *domain.PolicyRule) error {
@@ -33,4 +33,8 @@ func (s *Service) Update(ctx context.Context, p *domain.PolicyRule) error {
 
 func (s *Service) Delete(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
+}
+
+func (s *Service) DeleteScoped(ctx context.Context, id, orgID string) error {
+	return s.repo.DeleteScoped(ctx, id, orgID)
 }

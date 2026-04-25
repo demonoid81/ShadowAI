@@ -122,9 +122,25 @@ func (h *Handler) ListSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sources := []string{}
-	if h.manager != nil {
-		sources = h.manager.ListSources()
+	var sources []string
+	if h.repo != nil {
+		// PR-T2.3.1: org-filtered list of source names.
+		orgID, global, _ := auth.RequireOrg(claims)
+		if global {
+			orgID = ""
+		}
+		if dbSources, err := h.repo.ListSources(r.Context(), orgID, true); err == nil {
+			for _, s := range dbSources {
+				if s.IsActive {
+					sources = append(sources, s.Name)
+				}
+			}
+		}
+	} else if h.manager != nil {
+		sources = h.manager.ListSources() // fallback: manager not yet org-aware
+	}
+	if sources == nil {
+		sources = []string{}
 	}
 
 	h.writeJSON(w, http.StatusOK, sourceListResponse{Sources: sources})
@@ -576,6 +592,21 @@ func (h *Handler) Query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PR-T2.3.1: verify source belongs to requesting org before querying.
+	if h.repo != nil {
+		queryOrgID, queryGlobal, _ := auth.RequireOrg(claims)
+		if !queryGlobal && queryOrgID != "" {
+			if _, srcErr := h.repo.GetByIDScoped(r.Context(), req.Source, queryOrgID); srcErr != nil {
+				// Source not found in this org — also try by name.
+				// (Manager uses name for routing; source ID may differ from name.)
+				if srcByName, nameErr := h.repo.GetByName(r.Context(), req.Source); nameErr != nil || srcByName.OrgID != queryOrgID {
+					h.auditRequest(r.Context(), claims, req.Source, req.Query, "/api/internal-dbs/query", http.StatusNotFound, ErrSourceNotFound, start)
+					h.writeError(w, http.StatusNotFound, ErrSourceNotFound.Error())
+					return
+				}
+			}
+		}
+	}
 	columns, rows, truncated, err := h.manager.Query(r.Context(), req.Source, req.Query, req.MaxRows)
 	if err != nil {
 		status := http.StatusBadRequest

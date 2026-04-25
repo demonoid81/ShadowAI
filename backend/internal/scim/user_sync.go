@@ -76,6 +76,7 @@ func (c *SyncConfig) roleMap(key string) (string, bool) {
 // SCIMRepo is the subset of auth.Repository used by SCIM sync.
 type SCIMRepo interface {
 	GetBySCIMExternalID(ctx context.Context, externalID string) (*domain.User, error)
+	GetBySCIMExternalIDInOrg(ctx context.Context, externalID, orgID string) (*domain.User, error)
 	GetByEmail(ctx context.Context, email string) (*domain.User, error)
 	GetByEmailInOrg(ctx context.Context, email, orgID string) (*domain.User, error)
 	GetByIDScoped(ctx context.Context, id, orgID string) (*domain.User, error)
@@ -122,9 +123,15 @@ func (s *UserSyncer) Provision(ctx context.Context, scimUser User) (SyncResult, 
 		return SyncResult{}, &SCIMError{Status: 400, Detail: "userName or primary email is required", ScimType: "invalidValue"}
 	}
 
-	// 1. ExternalID match.
+	// 1. ExternalID match — org-scoped to prevent cross-tenant ID collision.
 	if scimUser.ExternalID != "" {
-		existing, err := s.repo.GetBySCIMExternalID(ctx, scimUser.ExternalID)
+		var existing *domain.User
+		var err error
+		if s.orgID != "" {
+			existing, err = s.repo.GetBySCIMExternalIDInOrg(ctx, scimUser.ExternalID, s.orgID)
+		} else {
+			existing, err = s.repo.GetBySCIMExternalID(ctx, scimUser.ExternalID)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			return SyncResult{}, err
 		}

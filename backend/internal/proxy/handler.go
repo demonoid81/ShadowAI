@@ -390,7 +390,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	estimatedTotalTokens := estimatedTokens + maxCompletionTokens
 
 	// 5. Policy Evaluation
-	evalResult, err := h.policySvc.Engine.Evaluate(r.Context(), allText, model, findings)
+	evalResult, err := h.policySvc.Engine.Evaluate(policy.WithPolicyOrg(r.Context(), claims.OrgID), allText, model, findings)
 	if err != nil {
 		http.Error(w, `{"error":"policy error"}`, http.StatusInternalServerError)
 		return
@@ -1459,7 +1459,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Policy Evaluation
-	evalResult, err := h.policySvc.Engine.Evaluate(r.Context(), allText, model, findings)
+	evalResult, err := h.policySvc.Engine.Evaluate(policy.WithPolicyOrg(r.Context(), claims.OrgID), allText, model, findings)
 	if err != nil {
 		http.Error(w, `{"error":"policy error"}`, http.StatusInternalServerError)
 		return

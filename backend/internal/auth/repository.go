@@ -192,6 +192,23 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 // PR-E2: SCIM repository methods.
 // ---------------------------------------------------------------------------
 
+// GetBySCIMExternalIDInOrg looks up a user by scim_external_id within the given org.
+// Used by SCIM syncer to prevent cross-tenant externalID collision.
+func (r *Repository) GetBySCIMExternalIDInOrg(ctx context.Context, externalID, orgID string) (*domain.User, error) {
+	u := &domain.User{}
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
+		        totp_secret, mfa_required, scim_external_id, created_at, updated_at,
+		        COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001') AS org_id
+		 FROM users WHERE scim_external_id = $1 AND org_id = $2`, externalID, orgID).
+		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
+			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt, &u.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 // GetBySCIMExternalID looks up a user by scim_external_id.
 // Returns (nil, sql.ErrNoRows) if not found.
 func (r *Repository) GetBySCIMExternalID(ctx context.Context, externalID string) (*domain.User, error) {

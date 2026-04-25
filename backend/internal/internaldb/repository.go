@@ -16,6 +16,7 @@ type InternalDBSource struct {
 	DSN         string    `json:"dsn"`
 	Description string    `json:"description"`
 	IsActive    bool      `json:"is_active"`
+	OrgID       string    `json:"org_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -45,7 +46,7 @@ func (r *Repository) ListSources(ctx context.Context, orgID string, includeInact
 	if !includeInactive {
 		conds += " AND is_active = true"
 	}
-	query := `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+	query := `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at, COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001')
 		FROM internal_db_sources WHERE ` + conds + ` ORDER BY lower(name) ASC`
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -60,7 +61,7 @@ func (r *Repository) ListSources(ctx context.Context, orgID string, includeInact
 	var out []InternalDBSource
 	for rows.Next() {
 		var s InternalDBSource
-		if err := rows.Scan(&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt, &s.OrgID); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -79,10 +80,10 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*InternalDBSource,
 
 	var s InternalDBSource
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at, COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001')
 		FROM internal_db_sources
 		WHERE id = $1
-	`, id).Scan(&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+	`, id).Scan(&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt, &s.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,16 +99,16 @@ func (r *Repository) GetByIDScoped(ctx context.Context, id, orgID string) (*Inte
 	var q string
 	var args []any
 	if orgID != "" {
-		q = `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		q = `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at, COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001')
 		     FROM internal_db_sources WHERE id = $1 AND org_id = $2`
 		args = []any{id, orgID}
 	} else {
-		q = `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		q = `SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at, COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001')
 		     FROM internal_db_sources WHERE id = $1`
 		args = []any{id}
 	}
 	err := r.db.QueryRowContext(ctx, q, args...).Scan(
-		&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+		&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt, &s.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -121,10 +122,10 @@ func (r *Repository) GetByName(ctx context.Context, name string) (*InternalDBSou
 
 	var s InternalDBSource
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at
+		SELECT id, name, dsn, COALESCE(description, ''), is_active, created_at, updated_at, COALESCE(org_id::text,'00000000-0000-0000-0000-000000000001')
 		FROM internal_db_sources
 		WHERE lower(name) = lower($1)
-	`, name).Scan(&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt)
+	`, name).Scan(&s.ID, &s.Name, &s.DSN, &s.Description, &s.IsActive, &s.CreatedAt, &s.UpdatedAt, &s.OrgID)
 	if err != nil {
 		return nil, err
 	}

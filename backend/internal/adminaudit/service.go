@@ -47,6 +47,11 @@ func (s *Service) Record(ctx context.Context, ev Event) {
 			metaStr = string(b)
 		}
 	}
+	// PR-T2.3.1: inject org from context when caller doesn't set OrgID explicitly.
+	orgID := ev.OrgID
+	if orgID == "" {
+		orgID = GetOrgFromContext(ctx) // set by auth.AuthMiddleware via SetOrgContext
+	}
 	if err := s.repo.Insert(ctx, &domain.AdminEvent{
 		ActorUserID:  ev.ActorUserID,
 		Action:       ev.Action,
@@ -57,6 +62,9 @@ func (s *Service) Record(ctx context.Context, ev Event) {
 		StatusCode:   ev.StatusCode,
 		Success:      ev.Success,
 		MetadataJSON: metaStr,
+		OrgID:        orgID,
+		SourceOrgID:  ev.SourceOrgID,
+		TargetOrgID:  ev.TargetOrgID,
 	}); err != nil {
 		log.Printf("adminaudit: insert failed (non-fatal): %v", err)
 	}

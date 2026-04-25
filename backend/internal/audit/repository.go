@@ -70,13 +70,17 @@ func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
 	if len(r.chainSecret) > 0 {
 		return r.insertWithChain(ctx, log, shadowJSON)
 	}
+	orgID := log.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, org_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
 		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
 		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
-		log.Outcome, log.FallbackReason, log.UsageSource)
+		log.Outcome, log.FallbackReason, log.UsageSource, orgID)
 	return err
 }
 
@@ -122,16 +126,20 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 		hashArg = rowHash
 	}
 
+	orgID := log.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	// INSERT с явным created_at ($23) — не полагаемся на DB DEFAULT.
 	// Это гарантирует совпадение с canonical.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, seq_no, row_hash, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, seq_no, row_hash, created_at, org_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
 		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
 		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
 		log.Outcome, log.FallbackReason, log.UsageSource,
-		seqArg, hashArg, createdAt); err != nil {
+		seqArg, hashArg, createdAt, orgID); err != nil {
 		return fmt.Errorf("audit chain: insert: %w", err)
 	}
 

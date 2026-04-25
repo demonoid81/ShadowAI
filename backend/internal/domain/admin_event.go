@@ -22,5 +22,9 @@ type AdminEvent struct {
 	StatusCode   int       `json:"status_code"`
 	Success      bool      `json:"success"`
 	MetadataJSON string    `json:"metadata_json,omitempty"`
+	// PR-T2.3.1: tenant isolation columns.
+	OrgID        string    `json:"org_id,omitempty"`
+	SourceOrgID  string    `json:"source_org_id,omitempty"`
+	TargetOrgID  string    `json:"target_org_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }

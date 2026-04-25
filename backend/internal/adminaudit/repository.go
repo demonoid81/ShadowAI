@@ -139,11 +139,24 @@ func (r *Repository) Insert(ctx context.Context, e *domain.AdminEvent) error {
 		return r.insertWithChain(ctx, e, actor, target, meta)
 	}
 
+	orgID := e.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
+	var sourceOrg any
+	if e.SourceOrgID != "" {
+		sourceOrg = e.SourceOrgID
+	}
+	var targetOrg any
+	if e.TargetOrgID != "" {
+		targetOrg = e.TargetOrgID
+	}
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO admin_event_logs
-		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		actor, e.Action, e.Resource, target, e.Path, e.Method, e.StatusCode, e.Success, meta)
+		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, org_id, source_org_id, target_org_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		actor, e.Action, e.Resource, target, e.Path, e.Method, e.StatusCode, e.Success, meta,
+		orgID, sourceOrg, targetOrg)
 	if err != nil {
 		return fmt.Errorf("adminaudit insert: %w", err)
 	}
@@ -189,24 +202,41 @@ func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, 
 		hashArg = rowHash
 	}
 
+	orgID := e.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
+	var sourceOrg any
+	if e.SourceOrgID != "" {
+		sourceOrg = e.SourceOrgID
+	}
+	var targetOrg any
+	if e.TargetOrgID != "" {
+		targetOrg = e.TargetOrgID
+	}
 	// INSERT с явными id и created_at ($12, $13) — совпадают с canonical.
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO admin_event_logs
-		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash, id, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash, id, created_at, org_id, source_org_id, target_org_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		actor, e.Action, e.Resource, target, e.Path, e.Method, e.StatusCode, e.Success, meta,
-		seqArg, hashArg, e.ID, createdAt); err != nil {
+		seqArg, hashArg, e.ID, createdAt, orgID, sourceOrg, targetOrg); err != nil {
 		return fmt.Errorf("adminaudit chain: insert: %w", err)
 	}
 	return tx.Commit()
 }
 
-// List возвращает страницу admin-event'ов с фильтрами. actorID/resource/
+// List возвращает страницу admin-event'ов с фильтрами. orgID/actorID/resource/
 // action = "" → no-op фильтр.
-func (r *Repository) List(ctx context.Context, limit, offset int, actorID, resource, action string) ([]domain.AdminEvent, int, error) {
+func (r *Repository) List(ctx context.Context, limit, offset int, orgID, actorID, resource, action string) ([]domain.AdminEvent, int, error) {
 	where := []string{"1=1"}
 	args := []any{}
 	argIdx := 1
+	if orgID != "" {
+		where = append(where, fmt.Sprintf("org_id = $%d", argIdx))
+		args = append(args, orgID)
+		argIdx++
+	}
 	if actorID != "" {
 		where = append(where, fmt.Sprintf("actor_user_id = $%d", argIdx))
 		args = append(args, actorID)
