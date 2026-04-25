@@ -131,12 +131,18 @@ func uuidArrayLiteral(ids []string) string {
 // both are infrequent operator/scheduler operations, not hot-path.
 // The coordinated hold-aware purge (PurgeOlderThanRespectingHoldsAndRecordRun)
 // was already tx-based from the start.
-func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, target string) (int, error) {
+// PurgeAndRecord — W2.5 + PR-T2.4: atomic chunked delete + chained evidence.
+// orgID="" and scope="global" → delete all orgs (backward-compat / --all-orgs).
+// orgID!=="" and scope="org" → delete only rows WHERE org_id=orgID.
+func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, target, orgID, scope string) (int, error) {
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)
 	}
 	if target == "" {
 		target = PurgeTargetAuditLogs
+	}
+	if scope == "" {
+		scope = "global"
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -145,12 +151,20 @@ func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunk
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const q = `DELETE FROM audit_logs WHERE id IN (
-		SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2
-	)`
 	total := 0
 	for {
-		res, err := tx.ExecContext(ctx, q, cutoff, chunkSize)
+		var res sql.Result
+		if orgID != "" {
+			res, err = tx.ExecContext(ctx,
+				`DELETE FROM audit_logs WHERE id IN (
+				 SELECT id FROM audit_logs WHERE created_at < $1 AND org_id = $3 LIMIT $2)`,
+				cutoff, chunkSize, orgID)
+		} else {
+			res, err = tx.ExecContext(ctx,
+				`DELETE FROM audit_logs WHERE id IN (
+				 SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2)`,
+				cutoff, chunkSize)
+		}
 		if err != nil {
 			return 0, fmt.Errorf("purge exec: %w", err)
 		}
@@ -169,21 +183,19 @@ func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunk
 		}
 	}
 
-	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, target); err != nil {
+	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, target, orgID, scope); err != nil {
 		return 0, fmt.Errorf("purge record run: %w", err)
 	}
 	return total, tx.Commit()
 }
 
-// RecordPurgeRunTx — W2.3: записывает chained audit_purge_runs row
-// внутри уже открытой транзакции. Используется cross-repo atomic purge
-// (например, adminaudit DELETE + audit.RecordPurgeRunTx в shared tx).
-// Caller открывает tx и отвечает за Commit/Rollback.
-func (r *Repository) RecordPurgeRunTx(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target string) error {
+// RecordPurgeRunTx — W2.3 + PR-T2.4: записывает chained audit_purge_runs row
+// внутри уже открытой транзакции. orgID/scope express the purge scope.
+func (r *Repository) RecordPurgeRunTx(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target, orgID, scope string) error {
 	if target == "" {
 		target = PurgeTargetAuditLogs
 	}
-	return r.recordPurgeRunChained(ctx, tx, cutoff, rowsDeleted, target)
+	return r.recordPurgeRunChained(ctx, tx, cutoff, rowsDeleted, target, orgID, scope)
 }
 
 // RecordPurgeRun сохраняет запись о завершённом purge-run для указанной
@@ -193,27 +205,32 @@ func (r *Repository) RecordPurgeRunTx(ctx context.Context, tx *sql.Tx, cutoff ti
 //
 // PR-W2.1: если chainSecret установлен, пишет chained INSERT в короткой
 // транзакции (симметрично coordinated purge в retention_hold.go).
-func (r *Repository) RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error {
+func (r *Repository) RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target, orgID, scope string) error {
 	if target == "" {
 		target = PurgeTargetAuditLogs
 	}
+	if scope == "" {
+		scope = "global"
+	}
 	if len(r.chainSecret) == 0 {
+		if orgID == "" {
+			orgID = domain.DefaultOrgID
+		}
 		_, err := r.db.ExecContext(ctx,
-			`INSERT INTO audit_purge_runs (cutoff, rows_deleted, completed_at, target)
-			 VALUES ($1, $2, now(), $3)`,
-			cutoff, rowsDeleted, target)
+			`INSERT INTO audit_purge_runs (cutoff, rows_deleted, completed_at, target, org_id, scope)
+			 VALUES ($1, $2, now(), $3, $4, $5)`,
+			cutoff, rowsDeleted, target, orgID, scope)
 		if err != nil {
 			return fmt.Errorf("record purge run: %w", err)
 		}
 		return nil
 	}
-	// Chain path: short tx for advisory lock + chain INSERT.
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("record purge run chain: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := r.recordPurgeRunChained(ctx, tx, cutoff, rowsDeleted, target); err != nil {
+	if err := r.recordPurgeRunChained(ctx, tx, cutoff, rowsDeleted, target, orgID, scope); err != nil {
 		return err
 	}
 	return tx.Commit()

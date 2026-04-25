@@ -159,19 +159,30 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 // два rows на одну операцию с rows_deleted=0, ломая LastPurgeRun).
 //
 // Если chainSecret пустой — пишет обычный INSERT без chain fields.
-func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target string) error {
+// recordPurgeRunChained writes a chained audit_purge_runs row.
+// orgID and scope express the tenant scope of this purge operation (PR-T2.4):
+//   scope='org'    — org-specific purge (orgID = tenant UUID)
+//   scope='global' — full-deployment purge (orgID = DefaultOrgID or "")
+func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target, orgID, scope string) error {
 	runID := uuid.New().String()
 	completedAt := time.Now().UTC()
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
+	if scope == "" {
+		scope = "global"
+	}
 
 	if len(r.chainSecret) == 0 {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target)
-			 VALUES ($1, $2, $3, $4, $5)`,
-			runID, cutoff, rowsDeleted, completedAt, target)
+			`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target, org_id, scope)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			runID, cutoff, rowsDeleted, completedAt, target, orgID, scope)
 		return err
 	}
 
-	canonical := chain.CanonicalAuditPurgeRun(runID, cutoff.Unix(), rowsDeleted, target, completedAt.Unix())
+	// PR-T2.4: use v2 canonical to cover org_id and scope in the HMAC chain.
+	canonical := chain.CanonicalAuditPurgeRunV2(runID, cutoff.Unix(), rowsDeleted, target, completedAt.Unix(), orgID, scope)
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableAuditPurgeRuns, "audit_purge_runs", chain.SeqAuditPurgeRuns,
 		canonical, r.chainSecret)
@@ -185,9 +196,9 @@ func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cuto
 		hashArg = rowHash
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target, seq_no, row_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		runID, cutoff, rowsDeleted, completedAt, target, seqArg, hashArg)
+		`INSERT INTO audit_purge_runs (id, cutoff, rows_deleted, completed_at, target, seq_no, row_hash, org_id, scope, canonical_version)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'v2')`,
+		runID, cutoff, rowsDeleted, completedAt, target, seqArg, hashArg, orgID, scope)
 	return err
 }
 

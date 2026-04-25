@@ -366,7 +366,7 @@ func (r *smokeCapAuditRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int
 func (r *smokeCapAuditRepo) PurgeOlderThanExcept(_ context.Context, _ time.Time, _ int, _ []string) (int, error) {
 	return 0, nil
 }
-func (r *smokeCapAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
+func (r *smokeCapAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _, _, _ string) error {
 	return nil
 }
 func (r *smokeCapAuditRepo) LastPurgeRun(_ context.Context, _ string) (*domain.PurgeRun, error) {

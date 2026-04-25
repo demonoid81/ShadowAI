@@ -88,7 +88,7 @@ func TestPurgeAndRecord_TrueAtomic_SuccessCase(t *testing.T) {
 	}
 
 	cutoff := time.Now().UTC()
-	deleted, err := auditRepo.PurgeAndRecord(ctx, cutoff, 100, audit.PurgeTargetAuditLogs)
+	deleted, err := auditRepo.PurgeAndRecord(ctx, cutoff, 100, audit.PurgeTargetAuditLogs, "", "global")
 	if err != nil {
 		t.Fatalf("PurgeAndRecord err: %v", err)
 	}

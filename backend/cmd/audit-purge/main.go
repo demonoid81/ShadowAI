@@ -3,21 +3,19 @@
 // Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
 // Compiled only under -tags enterprise.
 
-// Command audit-purge удаляет audit_logs старше TTL. Запускается
-// оператором вручную или scheduler'ом внутри backend (AUDIT_PURGE_INTERVAL).
+// Command audit-purge удаляет audit_logs старше TTL.
 //
-// Usage:
+// Usage (PR-T2.4: explicit org scope required):
 //
-//	audit-purge --retention-days 30
-//	audit-purge --retention-days 30 --dry-run
-//	audit-purge --retention-days 30 --chunk-size 500
+//	audit-purge --retention-days 30 --org-id <uuid>     # tenant purge
+//	audit-purge --retention-days 30 --all-orgs          # global purge (privileged)
+//	audit-purge --retention-days 30 --org-id <uuid> --dry-run
 //
 // Exit codes:
 //
 //	0 — purge завершён (возможно 0 строк, это ок)
-//	1 — runtime error (bad flags, DB unreachable, SQL fail)
-//
-// Reads DATABASE_URL из env (same shape, что cmd/shadowai).
+//	1 — runtime error (DB unreachable, SQL fail)
+//	2 — config error (bad flags, missing scope)
 package main
 
 import (
@@ -27,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -38,6 +37,7 @@ import (
 const (
 	exitOK      = 0
 	exitRuntime = 1
+	exitCfg     = 2 // missing/invalid flags — distinct from runtime failures
 )
 
 func main() {
@@ -53,27 +53,41 @@ func run(args []string, stdout, stderr io.Writer) int {
 		dryRun        = fs.Bool("dry-run", false, "count what would be deleted but do not modify rows")
 		chunkSize     = fs.Int("chunk-size", 1000, "batch size for chunked DELETE (protects against long locks)")
 		dbURL         = fs.String("database-url", "", "override DATABASE_URL env")
-		target        = fs.String("target", "audit_logs", "purge target: audit_logs | admin_event_logs (PR-D.1)")
+		target        = fs.String("target", "audit_logs", "purge target: audit_logs | admin_event_logs")
+		orgID         = fs.String("org-id", "", "purge only this org's rows (required unless --all-orgs)")
+		allOrgs       = fs.Bool("all-orgs", false, "purge all orgs (global; requires elevated privilege)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return exitRuntime
 	}
 
+	// PR-T2.4: explicit scope required — fail-fast with exit 2 if neither provided.
+	if strings.TrimSpace(*orgID) == "" && !*allOrgs {
+		fmt.Fprintln(stderr, "error: --org-id <uuid> or --all-orgs is required (PR-T2.4: purge scope must be explicit)")
+		fmt.Fprintln(stderr, "  --org-id <uuid>   purge rows for a single org")
+		fmt.Fprintln(stderr, "  --all-orgs        purge all orgs (global, privileged operation)")
+		fs.Usage()
+		return exitCfg
+	}
+	if strings.TrimSpace(*orgID) != "" && *allOrgs {
+		fmt.Fprintln(stderr, "error: --org-id and --all-orgs are mutually exclusive")
+		return exitCfg
+	}
+
 	if *retentionDays <= 0 {
 		fmt.Fprintln(stderr, "error: --retention-days is required and must be > 0")
 		fs.Usage()
-		return exitRuntime
+		return exitCfg
 	}
 	if *chunkSize <= 0 {
 		fmt.Fprintln(stderr, "error: --chunk-size must be > 0")
-		return exitRuntime
+		return exitCfg
 	}
 	switch *target {
 	case audit.PurgeTargetAuditLogs, adminaudit.PurgeTarget:
-		// OK
 	default:
 		fmt.Fprintf(stderr, "error: invalid --target %q (want audit_logs|admin_event_logs)\n", *target)
-		return exitRuntime
+		return exitCfg
 	}
 
 	url := *dbURL
@@ -82,7 +96,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if url == "" {
 		fmt.Fprintln(stderr, "error: DATABASE_URL env or --database-url flag required")
-		return exitRuntime
+		return exitCfg
+	}
+
+	// Determine scope for evidence record.
+	scope := "global"
+	effectiveOrgID := ""
+	if strings.TrimSpace(*orgID) != "" {
+		scope = "org"
+		effectiveOrgID = strings.TrimSpace(*orgID)
 	}
 
 	db, err := sql.Open("postgres", url)
@@ -96,59 +118,59 @@ func run(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 
 	cutoff := time.Now().UTC().Add(-time.Duration(*retentionDays) * 24 * time.Hour)
-	fmt.Fprintf(stdout, "audit-purge: target=%s cutoff=%s (retention=%d days), chunk_size=%d, dry_run=%v\n",
-		*target, cutoff.Format(time.RFC3339), *retentionDays, *chunkSize, *dryRun)
+	fmt.Fprintf(stdout, "audit-purge: target=%s scope=%s org=%s cutoff=%s (retention=%d days), chunk_size=%d, dry_run=%v\n",
+		*target, scope, effectiveOrgID, cutoff.Format(time.RFC3339), *retentionDays, *chunkSize, *dryRun)
 
 	auditRepo := audit.NewRepository(db)
 
 	if *dryRun {
-		// Dry-run: COUNT через прямой SELECT. PurgeOlderThan не вызываем,
-		// чтобы не модифицировать строки.
 		table := "audit_logs"
 		if *target == adminaudit.PurgeTarget {
 			table = "admin_event_logs"
 		}
 		var n int
-		//nolint:gosec // table name из whitelist, не user input.
-		if err := db.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE created_at < $1`, table),
-			cutoff).Scan(&n); err != nil {
-			fmt.Fprintf(stderr, "error: count: %v\n", err)
+		var scanErr error
+		if effectiveOrgID != "" {
+			//nolint:gosec // table name is from whitelist
+			scanErr = db.QueryRowContext(ctx,
+				fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE created_at < $1 AND org_id = $2`, table),
+				cutoff, effectiveOrgID).Scan(&n)
+		} else {
+			//nolint:gosec // table name is from whitelist
+			scanErr = db.QueryRowContext(ctx,
+				fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE created_at < $1`, table),
+				cutoff).Scan(&n)
+		}
+		if scanErr != nil {
+			fmt.Fprintf(stderr, "error: count: %v\n", scanErr)
 			return exitRuntime
 		}
 		fmt.Fprintf(stdout, "dry-run: would delete %d rows\n", n)
 		return exitOK
 	}
 
-	// W2.3: use atomic PurgeAndRecord so evidence row is in the same tx
-	// as the final DELETE chunk. Eliminates the evidence gap where delete
-	// succeeds but RecordPurgeRun fails in a separate transaction.
+	// W2.3 + PR-T2.4: atomic PurgeAndRecord with org scope.
 	var deleted int
 	var purgeErr error
 	if *target == adminaudit.PurgeTarget {
-		// adminRepo for DELETE; auditRepo.RecordPurgeRunTx for chained
-		// evidence record — both in same final tx.
 		adminRepo := adminaudit.NewRepository(db)
 		deleted, purgeErr = adminRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, func(c context.Context, tx *sql.Tx, total int) error {
-			return auditRepo.RecordPurgeRunTx(c, tx, cutoff, total, *target)
+			return auditRepo.RecordPurgeRunTx(c, tx, cutoff, total, *target, effectiveOrgID, scope)
 		})
 	} else {
-		deleted, purgeErr = auditRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, *target)
+		deleted, purgeErr = auditRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, *target, effectiveOrgID, scope)
 	}
 	if purgeErr != nil {
 		fmt.Fprintf(stderr, "error: purge: %v\n", purgeErr)
-		recordPurgeAdminEvent(ctx, db, cutoff, 0, "cli", *target, purgeErr.Error())
+		recordPurgeAdminEvent(ctx, db, cutoff, 0, "cli", *target, effectiveOrgID, scope, purgeErr.Error())
 		return exitRuntime
 	}
-	recordPurgeAdminEvent(ctx, db, cutoff, deleted, "cli", *target, "")
+	recordPurgeAdminEvent(ctx, db, cutoff, deleted, "cli", *target, effectiveOrgID, scope, "")
 	fmt.Fprintf(stdout, "deleted %d rows\n", deleted)
 	return exitOK
 }
 
-// recordPurgeAdminEvent — PR-D: логирует успешный/неудачный purge в
-// admin_event_logs. actor_user_id = NULL (системная CLI-операция).
-// Метаданные включают mode=cli|scheduler, cutoff RFC3339, target.
-func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, rowsDeleted int, mode, target, errMsg string) {
+func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, rowsDeleted int, mode, target, orgID, scope, errMsg string) {
 	repo := adminaudit.NewRepository(db)
 	svc := adminaudit.NewService(repo)
 	success := errMsg == ""
@@ -157,6 +179,10 @@ func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, ro
 		"cutoff":       cutoff.Format(time.RFC3339),
 		"rows_deleted": rowsDeleted,
 		"target":       target,
+		"scope":        scope,
+	}
+	if orgID != "" {
+		metadata["org_id"] = orgID
 	}
 	if !success {
 		metadata["error"] = errMsg
@@ -165,6 +191,7 @@ func recordPurgeAdminEvent(ctx context.Context, db *sql.DB, cutoff time.Time, ro
 		ActorUserID: nil,
 		Action:      "purge",
 		Resource:    target,
+		OrgID:       orgID,
 		Path:        "cmd/audit-purge",
 		Method:      "CLI",
 		StatusCode:  0,

@@ -115,7 +115,8 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 	// LastPurgeRun() при одинаковом started_at в одной tx.
 	// Теперь chain write встраивается в ЭТОТ INSERT (после DELETE,
 	// внутри той же tx), содержит реальный rows_deleted.
-	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, PurgeTargetAuditLogs); err != nil {
+	// Scheduler is always system-level global purge (scope='global', no org filter).
+	if err := r.recordPurgeRunChained(ctx, tx, cutoff, total, PurgeTargetAuditLogs, "", "global"); err != nil {
 		return total, fmt.Errorf("purge record run: %w", err)
 	}
 

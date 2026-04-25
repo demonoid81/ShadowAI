@@ -184,6 +184,103 @@ func (r *AnchorRepository) FetchChainInventory(ctx context.Context, tableName st
 	return result, rows.Err()
 }
 
+// FetchChainInventoryForOrgAnchors returns the full digest inventory for anchor ranges
+// that contain at least one row belonging to orgID (PR-T2.4 Option A per RFC D4).
+//
+// Per-tenant export: we export ALL row hashes in intersecting anchor ranges —
+// including other-org rows — so the verifier can recompute Merkle roots.
+// The README bundle disclaimer explains why cross-tenant hashes are present.
+// Returns (inventory, intersectingAnchors, error).
+func (r *AnchorRepository) FetchChainInventoryForOrgAnchors(ctx context.Context, tableName, orgID string) ([]ChainInventoryRow, []AnchorRecord, error) {
+	if err := validateChainTable(tableName); err != nil {
+		return nil, nil, err
+	}
+	// Fetch anchors that contain at least one org row (by seq_no range).
+	//nolint:gosec // tableName from allowlist
+	orgSeqRows, err := r.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT seq_no FROM %s WHERE org_id = $1 AND seq_no IS NOT NULL`, tableName),
+		orgID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("chain inventory org seq: %w", err)
+	}
+	defer orgSeqRows.Close()
+	var orgSeqNos []int64
+	for orgSeqRows.Next() {
+		var s int64
+		if err := orgSeqRows.Scan(&s); err != nil {
+			return nil, nil, fmt.Errorf("chain inventory org seq scan: %w", err)
+		}
+		orgSeqNos = append(orgSeqNos, s)
+	}
+	if err := orgSeqRows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(orgSeqNos) == 0 {
+		return nil, nil, nil // org has no chained rows in this table
+	}
+
+	// Find anchors whose [SeqLo, SeqHi] range intersects any org seq_no.
+	allAnchors, err := r.ListAnchors(ctx, tableName)
+	if err != nil {
+		return nil, nil, err
+	}
+	seqSet := make(map[int64]struct{}, len(orgSeqNos))
+	for _, s := range orgSeqNos {
+		seqSet[s] = struct{}{}
+	}
+	var intersecting []AnchorRecord
+	for _, a := range allAnchors {
+		for s := a.SeqLo; s <= a.SeqHi; s++ {
+			if _, ok := seqSet[s]; ok {
+				intersecting = append(intersecting, a)
+				break
+			}
+		}
+	}
+	if len(intersecting) == 0 {
+		return nil, nil, nil
+	}
+
+	// Determine the full seq_no range covered by intersecting anchors.
+	var minSeq, maxSeq int64
+	for i, a := range intersecting {
+		if i == 0 || a.SeqLo < minSeq {
+			minSeq = a.SeqLo
+		}
+		if i == 0 || a.SeqHi > maxSeq {
+			maxSeq = a.SeqHi
+		}
+	}
+
+	// Fetch ALL rows in that range (full digest inventory for Merkle recomputation).
+	//nolint:gosec // tableName from allowlist
+	invRows, err := r.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id::text, seq_no, row_hash FROM %s
+		             WHERE seq_no >= $1 AND seq_no <= $2
+		             ORDER BY seq_no`, tableName),
+		minSeq, maxSeq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("chain inventory range: %w", err)
+	}
+	defer invRows.Close()
+	var result []ChainInventoryRow
+	for invRows.Next() {
+		var rowID string
+		var seqNo int64
+		var rowHash []byte
+		if err := invRows.Scan(&rowID, &seqNo, &rowHash); err != nil {
+			return nil, nil, fmt.Errorf("chain inventory range scan: %w", err)
+		}
+		h := sha256.Sum256([]byte(rowID))
+		result = append(result, ChainInventoryRow{
+			SeqNo:      seqNo,
+			RowIDHash:  hex.EncodeToString(h[:]),
+			RowHashHex: hex.EncodeToString(rowHash),
+		})
+	}
+	return result, intersecting, invRows.Err()
+}
+
 // ListAnchors возвращает anchor записи для таблицы в порядке seq_lo ASC.
 // Используется verifier'ом для --include-anchors.
 func (r *AnchorRepository) ListAnchors(ctx context.Context, tableName string) ([]AnchorRecord, error) {

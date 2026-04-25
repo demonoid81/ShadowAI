@@ -53,7 +53,7 @@ func (r *recordingRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int) (i
 func (r *recordingRepo) PurgeOlderThanExcept(_ context.Context, _ time.Time, _ int, _ []string) (int, error) {
 	return 0, nil
 }
-func (r *recordingRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
+func (r *recordingRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _, _, _ string) error {
 	return nil
 }
 func (r *recordingRepo) LastPurgeRun(_ context.Context, _ string) (*domain.PurgeRun, error) {

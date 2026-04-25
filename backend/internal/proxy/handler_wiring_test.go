@@ -66,7 +66,7 @@ func (c *captureAuditRepo) PurgeOlderThan(_ context.Context, _ time.Time, _ int)
 func (c *captureAuditRepo) PurgeOlderThanExcept(_ context.Context, _ time.Time, _ int, _ []string) (int, error) {
 	return 0, nil
 }
-func (c *captureAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _ string) error {
+func (c *captureAuditRepo) RecordPurgeRun(_ context.Context, _ time.Time, _ int, _, _, _ string) error {
 	return nil
 }
 func (c *captureAuditRepo) LastPurgeRun(_ context.Context, _ string) (*domain.PurgeRun, error) {

@@ -33,7 +33,8 @@ type Repo interface {
 	PurgeOlderThanExcept(ctx context.Context, cutoff time.Time, chunkSize int, exceptUserIDs []string) (int, error)
 	// PR-D.1: target parameter разделяет purge-runs по таблицам
 	// (audit_logs vs admin_event_logs). target="" → audit_logs (BC).
-	RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target string) error
+	// orgID/scope express the purge scope (PR-T2.4). "" defaults: orgID=DefaultOrgID, scope="global".
+	RecordPurgeRun(ctx context.Context, cutoff time.Time, rowsDeleted int, target, orgID, scope string) error
 	LastPurgeRun(ctx context.Context, target string) (*domain.PurgeRun, error)
 	TotalRowsPurged(ctx context.Context, target string) (int, error)
 }

@@ -325,7 +325,10 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, extract(epoch FROM cutoff)::bigint, rows_deleted,
-		        coalesce(target,''), completed_at, seq_no, row_hash
+		        coalesce(target,''), completed_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001'),
+		        coalesce(scope,'global')
 		 FROM audit_purge_runs
 		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
 		 ORDER BY seq_no`)
@@ -339,9 +342,11 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 
 	for rows.Next() {
 		var r AuditPurgeRunRow
+		var canonVer, orgID, scope string
 		if err := rows.Scan(
 			&r.ID, &r.CutoffEpoch, &r.RowsDeleted, &r.Target,
 			&r.CompletedAt, &r.SeqNo, &r.RowHash,
+			&canonVer, &orgID, &scope,
 		); err != nil {
 			return res, fmt.Errorf("verify audit_purge_runs: scan: %w", err)
 		}
@@ -353,10 +358,18 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 			}
 		}
 
-		canonical := CanonicalAuditPurgeRun(
-			r.ID, r.CutoffEpoch, r.RowsDeleted, r.Target,
-			r.CompletedAt.UTC().Unix(),
-		)
+		var canonical string
+		if canonVer == "v2" {
+			canonical = CanonicalAuditPurgeRunV2(
+				r.ID, r.CutoffEpoch, r.RowsDeleted, r.Target,
+				r.CompletedAt.UTC().Unix(), orgID, scope,
+			)
+		} else {
+			canonical = CanonicalAuditPurgeRun(
+				r.ID, r.CutoffEpoch, r.RowsDeleted, r.Target,
+				r.CompletedAt.UTC().Unix(),
+			)
+		}
 		if !Verify(prevHash, canonical, secret, r.RowHash) {
 			res.Breaks = append(res.Breaks, ChainBreak{
 				SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash,

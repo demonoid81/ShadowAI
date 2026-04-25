@@ -138,6 +138,22 @@ func CanonicalAuditPurgeRun(
 	)
 }
 
+// CanonicalAuditPurgeRunV2 returns v2 canonical including org_id and scope (PR-T2.4).
+// Format: "v2|<id>|<cutoff>|<rowsDeleted>|<target>|<completedAt>|<orgID>|<scope>"
+// scope is 'org' or 'global'; orgID is the org being purged or DefaultOrgID for global.
+func CanonicalAuditPurgeRunV2(
+	id string,
+	cutoffEpoch int64,
+	rowsDeleted int,
+	target string,
+	completedAtEpoch int64,
+	orgID, scope string,
+) string {
+	return fmt.Sprintf("v2|%s|%d|%d|%s|%d|%s|%s",
+		id, cutoffEpoch, rowsDeleted, target, completedAtEpoch, orgID, scope,
+	)
+}
+
 // CostMicrocents конвертирует float64 USD в int64 microcents для canonical.
 // 1 USD = 1_000_000 microcents. Rounding: nearest integer.
 func CostMicrocents(costUSD float64) int64 {

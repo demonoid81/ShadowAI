@@ -49,6 +49,9 @@ type BundleManifest struct {
 	// DBFingerprint is SHA256(host+"/"+dbname) from DATABASE_URL. Identifies
 	// which database the bundle came from without exposing connection credentials.
 	DBFingerprint string            `json:"db_fingerprint"`
+	// OrgID is non-empty for tenant-scoped exports (--org-id flag, PR-T2.4).
+	// Empty for global bundles (--global flag).
+	OrgID         string            `json:"org_id,omitempty"`
 	// FileSHA256 maps relative path → SHA256 hex for every file in the bundle
 	// except bundle_manifest.json itself (which is written last).
 	FileSHA256    map[string]string `json:"file_sha256"`

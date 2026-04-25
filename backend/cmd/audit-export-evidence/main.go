@@ -60,6 +60,8 @@ func main() {
 	tableFlag   := flag.String("table", "all", "Table: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
 	pubKeyFile  := flag.String("pubkey-file", "", "Path to base64 Ed25519 public key for signature verification reports")
 	doZip       := flag.Bool("zip", false, "Create <output>.zip after writing directory")
+	orgIDFlag   := flag.String("org-id", "", "Export evidence for a single org (tenant export)")
+	globalFlag  := flag.Bool("global", false, "Export full evidence bundle across all orgs (privileged)")
 	flag.Parse()
 
 	exitCfg := func(format string, args ...any) {
@@ -74,6 +76,18 @@ func main() {
 	if strings.TrimSpace(*outputFlag) == "" {
 		exitCfg("--output is required")
 	}
+
+	// PR-T2.4: explicit scope required — fail-fast with exit 2 if neither provided.
+	if strings.TrimSpace(*orgIDFlag) == "" && !*globalFlag {
+		exitCfg("--org-id <uuid> or --global is required (PR-T2.4: export scope must be explicit)\n" +
+			"  --org-id <uuid>   export evidence for a single org (tenant)\n" +
+			"  --global          export full evidence bundle (privileged, all orgs)")
+	}
+	if strings.TrimSpace(*orgIDFlag) != "" && *globalFlag {
+		exitCfg("--org-id and --global are mutually exclusive")
+	}
+
+	tenantOrgID := strings.TrimSpace(*orgIDFlag)
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -128,19 +142,60 @@ func main() {
 	repo := chain.NewAnchorRepository(db)
 	dbFingerprint := dbFingerprint(dsn)
 
-	fmt.Printf("Exporting evidence bundle → %s\n", outDir)
+	if tenantOrgID != "" {
+		fmt.Printf("Exporting tenant evidence bundle → %s (org=%s)\n", outDir, tenantOrgID)
+	} else {
+		fmt.Printf("Exporting global evidence bundle → %s\n", outDir)
+	}
 	fmt.Printf("Tables: %v\n", tables)
 
-	// Collect all anchors and chain inventory across tables.
+	// Collect anchors and chain inventory across tables.
+	// Tenant mode (--org-id): per RFC D4 Option A — export full digest inventory
+	// for anchor ranges that intersect org rows; include cross-tenant hashes so
+	// the verifier can recompute Merkle roots. README carries disclaimer.
 	var allAnchors []evidencebundle.AnchorLine
 	var allInventory []evidencebundle.ChainInventoryLine
 
 	for _, table := range tables {
-		anchors, err := repo.ListAnchors(ctx, table)
-		if err != nil {
-			exitErr("list anchors %s: %v", table, err)
+		var anchorsForTable []chain.AnchorRecord
+		if tenantOrgID != "" {
+			inv, orgAnchors, err := repo.FetchChainInventoryForOrgAnchors(ctx, table, tenantOrgID)
+			if err != nil {
+				exitErr("chain inventory %s (org=%s): %v", table, tenantOrgID, err)
+			}
+			anchorsForTable = orgAnchors
+			for _, row := range inv {
+				allInventory = append(allInventory, evidencebundle.ChainInventoryLine{
+					Table:      table,
+					SeqNo:      row.SeqNo,
+					RowIDHash:  row.RowIDHash,
+					RowHashHex: row.RowHashHex,
+				})
+			}
+			fmt.Printf("  %s: %d intersecting anchors, %d inventory rows (tenant=%s)\n",
+				table, len(orgAnchors), len(inv), tenantOrgID)
+		} else {
+			var err error
+			anchorsForTable, err = repo.ListAnchors(ctx, table)
+			if err != nil {
+				exitErr("list anchors %s: %v", table, err)
+			}
+			inv, err := repo.FetchChainInventory(ctx, table)
+			if err != nil {
+				exitErr("chain inventory %s: %v", table, err)
+			}
+			for _, row := range inv {
+				allInventory = append(allInventory, evidencebundle.ChainInventoryLine{
+					Table:      table,
+					SeqNo:      row.SeqNo,
+					RowIDHash:  row.RowIDHash,
+					RowHashHex: row.RowHashHex,
+				})
+			}
+			fmt.Printf("  %s: %d anchors, %d chained rows\n", table, len(anchorsForTable), len(inv))
 		}
-		for _, a := range anchors {
+
+		for _, a := range anchorsForTable {
 			line := evidencebundle.AnchorLine{
 				ID:            a.ID,
 				Table:         a.TableName,
@@ -159,21 +214,6 @@ func main() {
 			}
 			allAnchors = append(allAnchors, line)
 		}
-
-		inv, err := repo.FetchChainInventory(ctx, table)
-		if err != nil {
-			exitErr("chain inventory %s: %v", table, err)
-		}
-		for _, row := range inv {
-			allInventory = append(allInventory, evidencebundle.ChainInventoryLine{
-				Table:      table,
-				SeqNo:      row.SeqNo,
-				RowIDHash:  row.RowIDHash,
-				RowHashHex: row.RowHashHex,
-			})
-		}
-
-		fmt.Printf("  %s: %d anchors, %d chained rows\n", table, len(anchors), len(inv))
 	}
 
 	// Write anchors.jsonl.
@@ -237,6 +277,9 @@ func main() {
 		ExporterCommit: exporterCommit,
 		DBFingerprint:  dbFingerprint,
 		FileSHA256:     hashes,
+	}
+	if tenantOrgID != "" {
+		manifest.OrgID = tenantOrgID
 	}
 	if err := evidencebundle.WriteManifest(outDir, manifest); err != nil {
 		exitErr("write manifest: %v", err)
