@@ -114,9 +114,12 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// PR-T2.2: Fail-closed for missing org.
-		// Non-break-glass sessions without an org are rejected. This prevents
-		// requests that pre-date the migration or have a corrupt user row from
-		// bypassing tenant filters in handlers. Break-glass is explicitly global.
+		// Non-break-glass sessions without an org are rejected.
+		// Note: repository reads use COALESCE(org_id, default), so legacy/NULL rows
+		// are mapped to the default org before reaching here — they will NOT be
+		// rejected. This check catches cases where org resolution was skipped
+		// entirely (e.g. a future code path that builds Claims without a DB lookup).
+		// Break-glass is explicitly global (OrgID="" is valid when BreakGlass=true).
 		if claims.OrgID == "" && !claims.BreakGlass {
 			unauthorized()
 			return

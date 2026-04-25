@@ -21,6 +21,7 @@ func (r *Repository) CreateUser(ctx context.Context, u *domain.User) error {
 	if orgID == "" {
 		orgID = domain.DefaultOrgID
 	}
+	u.OrgID = orgID
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO users (id, email, password, role, api_key, is_active, token_version, org_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		u.ID, u.Email, u.Password, u.Role, u.APIKey, u.IsActive, u.TokenVersion, orgID)
@@ -154,6 +155,7 @@ func (r *Repository) CreateUserSCIM(ctx context.Context, u *domain.User) error {
 	if orgID == "" {
 		orgID = domain.DefaultOrgID
 	}
+	u.OrgID = orgID
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO users (id, email, password, role, department, is_active, token_version, scim_external_id, org_id)
 		 VALUES ($1, $2, '', $3, $4, $5, 0, $6, $7)`,
@@ -276,6 +278,7 @@ func (r *Repository) CreateUserOIDC(ctx context.Context, u *domain.User) error {
 	if orgID == "" {
 		orgID = domain.DefaultOrgID
 	}
+	u.OrgID = orgID
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO users (id, email, password, role, department, is_active, token_version,
 		                   oidc_issuer, oidc_subject, last_oidc_login_at, org_id)
