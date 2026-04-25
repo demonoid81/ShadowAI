@@ -31,7 +31,11 @@ const PurgeTarget = "admin_event_logs"
 // PurgeAndRecord — W2.5: truly atomic admin_event_logs chunked delete +
 // cross-repo evidence record. All DELETEs and the recordFn call run inside
 // ONE transaction. Contract mirrors audit.Repository.PurgeAndRecord.
-func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, recordFn func(context.Context, *sql.Tx, int) error) (int, error) {
+// PurgeAndRecord atomically deletes admin_event_logs rows older than cutoff and
+// calls recordFn (which writes the chained evidence row) in the same transaction.
+// orgID="" deletes globally (scheduler / --all-orgs); orgID!=="" restricts DELETE
+// to WHERE org_id = orgID (PR-T2.4 tenant-scoped purge).
+func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunkSize int, orgID string, recordFn func(context.Context, *sql.Tx, int) error) (int, error) {
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("admin purge: chunkSize must be > 0, got %d", chunkSize)
 	}
@@ -41,12 +45,20 @@ func (r *Repository) PurgeAndRecord(ctx context.Context, cutoff time.Time, chunk
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const q = `DELETE FROM admin_event_logs WHERE id IN (
-		SELECT id FROM admin_event_logs WHERE created_at < $1 LIMIT $2
-	)`
 	total := 0
 	for {
-		res, err := tx.ExecContext(ctx, q, cutoff, chunkSize)
+		var res interface{ RowsAffected() (int64, error) }
+		if orgID != "" {
+			res, err = tx.ExecContext(ctx,
+				`DELETE FROM admin_event_logs WHERE id IN (
+				 SELECT id FROM admin_event_logs WHERE created_at < $1 AND org_id = $3 LIMIT $2)`,
+				cutoff, chunkSize, orgID)
+		} else {
+			res, err = tx.ExecContext(ctx,
+				`DELETE FROM admin_event_logs WHERE id IN (
+				 SELECT id FROM admin_event_logs WHERE created_at < $1 LIMIT $2)`,
+				cutoff, chunkSize)
+		}
 		if err != nil {
 			return 0, fmt.Errorf("admin purge exec: %w", err)
 		}

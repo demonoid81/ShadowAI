@@ -388,8 +388,8 @@ func runAdminEventsPurgeScheduler(ctx context.Context, cfg *config.Config, audit
 		}
 		var deleted int
 		var err error
-		// Scheduler = system-level global purge; scope='global', no org filter.
-		deleted, err = adminAuditRepo.PurgeAndRecord(rctx, cutoff, cfg.AuditPurgeChunkSize, func(c context.Context, tx *sql.Tx, total int) error {
+		// Scheduler = system-level global purge; orgID="" = no org filter.
+		deleted, err = adminAuditRepo.PurgeAndRecord(rctx, cutoff, cfg.AuditPurgeChunkSize, "", func(c context.Context, tx *sql.Tx, total int) error {
 			return auditConcreteRepo.RecordPurgeRunTx(c, tx, cutoff, total, adminaudit.PurgeTarget, "", "global")
 		})
 		if err != nil {

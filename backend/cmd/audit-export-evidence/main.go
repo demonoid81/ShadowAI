@@ -235,29 +235,38 @@ func main() {
 	}
 
 	// Run anchor verification reports (W3 + W4.1).
-	for _, table := range tables {
-		// W3: anchor verify.
-		anchorResult, err := chain.VerifyAnchors(ctx, db, table, "")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARNING: anchor verify %s failed: %v\n", table, err)
-		} else {
-			if err := writeJSON(filepath.Join(outDir, "reports", fmt.Sprintf("anchor_verify_%s.json", table)), anchorResult); err != nil {
-				exitErr("write anchor report %s: %v", table, err)
-			}
-		}
-
-		// W4.1: signature verify (only if pubkey provided).
-		if hasPubKey {
-			pubKey, _ := chain.ParsePublicKey(pubKeyB64)
-			sigResult, err := chain.VerifyAnchorSignatures(ctx, db, table, pubKey)
+	// Tenant bundles (--org-id) skip global verification reports: VerifyAnchors and
+	// VerifyAnchorSignatures operate on the full table and would expose global anchor
+	// counts and metadata to the tenant auditor. For tenant export the chain_inventory
+	// and anchors.jsonl already contain all information for offline Merkle verification.
+	if tenantOrgID == "" {
+		for _, table := range tables {
+			// W3: anchor verify.
+			anchorResult, err := chain.VerifyAnchors(ctx, db, table, "")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "WARNING: signature verify %s failed: %v\n", table, err)
+				fmt.Fprintf(os.Stderr, "WARNING: anchor verify %s failed: %v\n", table, err)
 			} else {
-				if err := writeJSON(filepath.Join(outDir, "reports", fmt.Sprintf("signature_verify_%s.json", table)), sigResult); err != nil {
-					exitErr("write sig report %s: %v", table, err)
+				if err := writeJSON(filepath.Join(outDir, "reports", fmt.Sprintf("anchor_verify_%s.json", table)), anchorResult); err != nil {
+					exitErr("write anchor report %s: %v", table, err)
+				}
+			}
+
+			// W4.1: signature verify (only if pubkey provided).
+			if hasPubKey {
+				pubKey, _ := chain.ParsePublicKey(pubKeyB64)
+				sigResult, err := chain.VerifyAnchorSignatures(ctx, db, table, pubKey)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "WARNING: signature verify %s failed: %v\n", table, err)
+				} else {
+					if err := writeJSON(filepath.Join(outDir, "reports", fmt.Sprintf("signature_verify_%s.json", table)), sigResult); err != nil {
+						exitErr("write sig report %s: %v", table, err)
+					}
 				}
 			}
 		}
+	} else {
+		fmt.Printf("Note: global verification reports skipped for tenant bundle (org=%s).\n", tenantOrgID)
+		fmt.Printf("  Use anchors.jsonl + chain_inventory.jsonl for offline Merkle verification.\n")
 	}
 
 	// Write README.txt.

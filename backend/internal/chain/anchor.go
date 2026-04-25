@@ -241,44 +241,47 @@ func (r *AnchorRepository) FetchChainInventoryForOrgAnchors(ctx context.Context,
 		return nil, nil, nil
 	}
 
-	// Determine the full seq_no range covered by intersecting anchors.
-	var minSeq, maxSeq int64
-	for i, a := range intersecting {
-		if i == 0 || a.SeqLo < minSeq {
-			minSeq = a.SeqLo
-		}
-		if i == 0 || a.SeqHi > maxSeq {
-			maxSeq = a.SeqHi
-		}
-	}
-
-	// Fetch ALL rows in that range (full digest inventory for Merkle recomputation).
-	//nolint:gosec // tableName from allowlist
-	invRows, err := r.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id::text, seq_no, row_hash FROM %s
-		             WHERE seq_no >= $1 AND seq_no <= $2
-		             ORDER BY seq_no`, tableName),
-		minSeq, maxSeq)
-	if err != nil {
-		return nil, nil, fmt.Errorf("chain inventory range: %w", err)
-	}
-	defer invRows.Close()
+	// Fetch rows per-anchor-range, not a single merged span.
+	// RFC D4 Option A: full digest inventory for *intersecting* anchor ranges only —
+	// not for gaps between them. Dedup by seq_no in case anchor ranges overlap.
+	seen := make(map[int64]struct{})
 	var result []ChainInventoryRow
-	for invRows.Next() {
-		var rowID string
-		var seqNo int64
-		var rowHash []byte
-		if err := invRows.Scan(&rowID, &seqNo, &rowHash); err != nil {
-			return nil, nil, fmt.Errorf("chain inventory range scan: %w", err)
+	for _, a := range intersecting {
+		//nolint:gosec // tableName from allowlist
+		invRows, err := r.db.QueryContext(ctx,
+			fmt.Sprintf(`SELECT id::text, seq_no, row_hash FROM %s
+			             WHERE seq_no >= $1 AND seq_no <= $2
+			             ORDER BY seq_no`, tableName),
+			a.SeqLo, a.SeqHi)
+		if err != nil {
+			return nil, nil, fmt.Errorf("chain inventory anchor [%d,%d]: %w", a.SeqLo, a.SeqHi, err)
 		}
-		h := sha256.Sum256([]byte(rowID))
-		result = append(result, ChainInventoryRow{
-			SeqNo:      seqNo,
-			RowIDHash:  hex.EncodeToString(h[:]),
-			RowHashHex: hex.EncodeToString(rowHash),
-		})
+		for invRows.Next() {
+			var rowID string
+			var seqNo int64
+			var rowHash []byte
+			if err := invRows.Scan(&rowID, &seqNo, &rowHash); err != nil {
+				invRows.Close()
+				return nil, nil, fmt.Errorf("chain inventory anchor scan: %w", err)
+			}
+			if _, dup := seen[seqNo]; dup {
+				continue
+			}
+			seen[seqNo] = struct{}{}
+			h := sha256.Sum256([]byte(rowID))
+			result = append(result, ChainInventoryRow{
+				SeqNo:      seqNo,
+				RowIDHash:  hex.EncodeToString(h[:]),
+				RowHashHex: hex.EncodeToString(rowHash),
+			})
+		}
+		if err := invRows.Err(); err != nil {
+			invRows.Close()
+			return nil, nil, fmt.Errorf("chain inventory anchor rows: %w", err)
+		}
+		invRows.Close()
 	}
-	return result, intersecting, invRows.Err()
+	return result, intersecting, nil
 }
 
 // ListAnchors возвращает anchor записи для таблицы в порядке seq_lo ASC.

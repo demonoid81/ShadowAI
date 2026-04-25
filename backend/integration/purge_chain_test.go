@@ -45,7 +45,7 @@ func TestPurgeAndRecord_TrueAtomic_RollbackOnRecordFailure(t *testing.T) {
 	boom := errors.New("simulated record failure")
 
 	// recordFn that always returns error.
-	_, err := adminRepo.PurgeAndRecord(ctx, cutoff, 100, func(c context.Context, tx *sql.Tx, total int) error {
+	_, err := adminRepo.PurgeAndRecord(ctx, cutoff, 100, "", func(c context.Context, tx *sql.Tx, total int) error {
 		return boom
 	})
 	if err == nil {
@@ -129,7 +129,7 @@ func TestAdminPurgeAndRecord_TrueAtomic_RollbackOnRecordFailure(t *testing.T) {
 
 	adminRepo := adminaudit.NewRepository(db)
 	cutoff := time.Now().UTC()
-	_, err := adminRepo.PurgeAndRecord(ctx, cutoff, 100, func(c context.Context, tx *sql.Tx, total int) error {
+	_, err := adminRepo.PurgeAndRecord(ctx, cutoff, 100, "", func(c context.Context, tx *sql.Tx, total int) error {
 		return errors.New("record fail")
 	})
 	if err == nil {

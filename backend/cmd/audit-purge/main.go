@@ -154,7 +154,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var purgeErr error
 	if *target == adminaudit.PurgeTarget {
 		adminRepo := adminaudit.NewRepository(db)
-		deleted, purgeErr = adminRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, func(c context.Context, tx *sql.Tx, total int) error {
+		// Pass effectiveOrgID so the DELETE is org-scoped when --org-id is given.
+		deleted, purgeErr = adminRepo.PurgeAndRecord(ctx, cutoff, *chunkSize, effectiveOrgID, func(c context.Context, tx *sql.Tx, total int) error {
 			return auditRepo.RecordPurgeRunTx(c, tx, cutoff, total, *target, effectiveOrgID, scope)
 		})
 	} else {
