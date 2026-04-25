@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -160,10 +161,18 @@ func TestSmoke_WORM_ChainAnchorBundle(t *testing.T) {
 		t.Fatalf("keygen: %v", err)
 	}
 
-	// 1. Write 5 chained audit_logs.
+	// Create a real user for FK-compliant audit_logs.user_id.
+	authRepo := auth.NewRepository(infra.DB)
+	auditUser, err := auth.NewService(authRepo, "smoke-jwt-worm-32chars!!!!!!!!!").
+		Register(ctx, "worm@smoke.test", "StrongPassword123!", auth.RoleUser)
+	if err != nil {
+		t.Fatalf("Register audit user: %v", err)
+	}
+
+	// 1. Write 5 chained audit_logs with valid user_id.
 	for i := 0; i < 5; i++ {
 		if err := auditRepo.Insert(ctx, &domain.AuditLog{
-			ID: uuid.NewString(), UserID: uuid.NewString(),
+			ID: uuid.NewString(), UserID: auditUser.ID,
 			Model: "gpt-4", Provider: "openai",
 			Endpoint: "/v1/chat/completions", StatusCode: 200,
 			PromptTokens: 100 + i, PolicyAction: "allowed",
@@ -265,7 +274,10 @@ func buildSmokeBundle(ctx context.Context, t *testing.T, infra *infraStack, dir 
 			allAnchors = append(allAnchors, line)
 		}
 
-		inv, _ := chainRepo.FetchChainInventory(ctx, table)
+		inv, err := chainRepo.FetchChainInventory(ctx, table)
+		if err != nil {
+			return fmt.Errorf("FetchChainInventory %s: %w", table, err)
+		}
 		for _, row := range inv {
 			allInventory = append(allInventory, evidencebundle.ChainInventoryLine{
 				Table:      table,

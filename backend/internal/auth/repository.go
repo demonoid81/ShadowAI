@@ -26,7 +26,7 @@ func (r *Repository) CreateUser(ctx context.Context, u *domain.User) error {
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
 		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE email = $1`, email).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
 			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
@@ -47,7 +47,7 @@ func (r *Repository) GetByAPIKeyHash(ctx context.Context, apiKeyHash string) (*d
 func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
 		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE api_key = $1 AND is_active = true`, apiKey).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
 			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
@@ -60,7 +60,7 @@ func (r *Repository) getByAPIKey(ctx context.Context, apiKey string) (*domain.Us
 func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
 		        totp_secret, mfa_required, scim_external_id, created_at, updated_at FROM users WHERE id = $1`, id).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
 			&u.TOTPSecret, &u.MFARequired, &u.SCIMExternalID, &u.CreatedAt, &u.UpdatedAt)
@@ -71,7 +71,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*domain.User, erro
 }
 
 func (r *Repository) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, email, role, department, api_key, is_active, token_version, created_at, updated_at FROM users ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, email, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version, created_at, updated_at FROM users ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +123,7 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 func (r *Repository) GetBySCIMExternalID(ctx context.Context, externalID string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
 		        totp_secret, mfa_required, scim_external_id, created_at, updated_at
 		 FROM users WHERE scim_external_id = $1`, externalID).
 		Scan(&u.ID, &u.Email, &u.Password, &u.Role, &u.Department, &u.APIKey, &u.IsActive, &u.TokenVersion,
@@ -234,7 +234,7 @@ func (r *Repository) ClearTOTPSecret(ctx context.Context, userID string) error {
 func (r *Repository) GetByOIDCSubject(ctx context.Context, issuer, subject string) (*domain.User, error) {
 	u := &domain.User{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, email, password, role, department, api_key, is_active, token_version,
+		`SELECT id, email, password, role, department, COALESCE(api_key,'') AS api_key, is_active, token_version,
 		        oidc_issuer, oidc_subject, last_oidc_login_at, created_at, updated_at
 		 FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2`,
 		issuer, subject).Scan(
