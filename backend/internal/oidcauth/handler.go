@@ -29,6 +29,7 @@ import (
 
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/auth"
+	"github.com/shadowai/backend/internal/domain"
 )
 
 // Handler serves OIDC login and callback routes.
@@ -327,30 +328,48 @@ func writeOIDCError(w http.ResponseWriter, status int, code string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
-// wouldBeAdmin returns (true, reason) if processing this callback would result
+// oidcAdminLookup is the minimal interface used by wouldBeAdminWith for pre-sync
+// DB lookups. *UserSyncer satisfies this interface; tests can use a mock.
+type oidcAdminLookup interface {
+	GetBySubject(ctx context.Context, issuer, subject string) (*domain.User, error)
+	GetByEmail(ctx context.Context, email string) (*domain.User, error)
+}
+
+// wouldBeAdmin is the Handler entry point; it delegates to wouldBeAdminWith
+// so the logic can be unit-tested independently of the Handler struct.
+func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDTokenClaims) (bool, string) {
+	return wouldBeAdminWith(ctx, issuer, claims, h.cfg, h.syncer)
+}
+
+// wouldBeAdminWith returns (true, reason) if processing this callback would result
 // in an admin session. Checks three paths in order:
+//
 //  1. OIDC groups claim maps to admin role.
 //  2. Existing user found by subject already has admin role.
-//  3. OIDC_LINK_BY_EMAIL=true: email is verified and existing user found by email
-//     already has admin role (the email-link path in Sync would link this session).
+//  3. Email-link path: OIDC_LINK_BY_EMAIL=true AND email link is allowed
+//     (verified email OR AllowUnverifiedEmail=true, mirroring requireVerifiedEmail)
+//     AND existing user found by email already has admin role.
 //
 // Called BEFORE Sync() to prevent dirty writes when admin MFA is denied.
-func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDTokenClaims) (bool, string) {
+func wouldBeAdminWith(ctx context.Context, issuer string, claims IDTokenClaims, cfg *Config, lookup oidcAdminLookup) (bool, string) {
 	// 1. Groups → admin mapping.
-	if mappedRole := h.cfg.MapRole(claims.Groups); mappedRole == auth.RoleAdmin {
+	if mappedRole := cfg.MapRole(claims.Groups); mappedRole == auth.RoleAdmin {
 		return true, "groups_map_to_admin"
 	}
 	// 2. Existing user by subject already admin.
 	if claims.Subject != "" {
-		existing, err := h.syncer.GetBySubject(ctx, issuer, claims.Subject)
+		existing, err := lookup.GetBySubject(ctx, issuer, claims.Subject)
 		if err == nil && existing != nil && existing.Role == auth.RoleAdmin {
 			return true, "existing_admin_role"
 		}
 	}
-	// 3. Email-link path: OIDC_LINK_BY_EMAIL=true + verified email → would link to existing admin.
-	// If email is unverified we skip this check (email-link is also blocked for unverified email).
-	if h.cfg.LinkByEmail && claims.EmailVerified && claims.Email != "" {
-		byEmail, err := h.syncer.GetByEmail(ctx, claims.Email)
+	// 3. Email-link path: mirrors requireVerifiedEmail logic in Sync().
+	// Sync() allows email-link when email is verified OR AllowUnverifiedEmail=true.
+	// Preflight must use the same condition to avoid gaps in ALLOW_UNVERIFIED configs.
+	emailLinkAllowed := cfg.LinkByEmail && claims.Email != "" &&
+		(claims.EmailVerified || cfg.AllowUnverifiedEmail)
+	if emailLinkAllowed {
+		byEmail, err := lookup.GetByEmail(ctx, claims.Email)
 		if err == nil && byEmail != nil && byEmail.Role == auth.RoleAdmin {
 			return true, "email_link_to_admin"
 		}

@@ -163,9 +163,9 @@ func TestCheckMFAClaims_NonAdmin_Unaffected(t *testing.T) {
 // wouldBeAdmin regression tests — email-link path and audit safety
 // ---------------------------------------------------------------------------
 
-// TestWouldBeAdmin_EmailLinkToAdmin_Denied — regression: OIDC_LINK_BY_EMAIL=true
-// + verified email matching an existing admin → must be caught by wouldBeAdmin()
-// BEFORE Sync() writes anything to DB.
+// TestWouldBeAdmin_EmailLinkToAdmin — regression: OIDC_LINK_BY_EMAIL=true
+// + verified email matching an existing admin → wouldBeAdminWith returns
+// (true, "email_link_to_admin") using the production function.
 func TestWouldBeAdmin_EmailLinkToAdmin(t *testing.T) {
 	adminUser := &domain.User{ID: "admin-uuid", Email: "admin@example.com", Role: "admin", IsActive: true}
 	cfg := &Config{
@@ -173,70 +173,71 @@ func TestWouldBeAdmin_EmailLinkToAdmin(t *testing.T) {
 		MFAAMRValues:       []string{"mfa"},
 		LinkByEmail:        true,
 	}
-
-	// Simulate: claims with email matching an existing admin, no MFA.
 	claims := IDTokenClaims{
-		Subject:          "new-subject-no-existing-match",
-		Email:            "admin@example.com",
-		EmailVerified:    true,
-		AMR:              nil, // no MFA in token
-		MFAVerifiedByIdP: false,
+		Subject:       "new-subject-no-existing-match",
+		Email:         "admin@example.com",
+		EmailVerified: true,
+		AMR:           nil,
 	}
-
-	// mockSyncer: subject lookup returns nothing, email lookup returns admin.
 	mock := &mockPreflightSyncer{
 		bySubject: map[string]*domain.User{},
 		byEmail:   map[string]*domain.User{"admin@example.com": adminUser},
 	}
 
-	wouldBeAdminFn := func() (bool, string) {
-		// Replicate wouldBeAdmin logic for test (without needing a full Handler).
-		if mappedRole := cfg.MapRole(claims.Groups); mappedRole == "admin" {
-			return true, "groups_map_to_admin"
-		}
-		if claims.Subject != "" {
-			if u, _ := mock.GetBySubject(nil, "issuer", claims.Subject); u != nil && u.Role == "admin" {
-				return true, "existing_admin_role"
-			}
-		}
-		if cfg.LinkByEmail && claims.EmailVerified && claims.Email != "" {
-			if u, _ := mock.GetByEmail(nil, claims.Email); u != nil && u.Role == "admin" {
-				return true, "email_link_to_admin"
-			}
-		}
-		return false, ""
-	}
-
-	admin, reason := wouldBeAdminFn()
+	// Call the PRODUCTION function, not a local closure.
+	admin, reason := wouldBeAdminWith(context.Background(), "https://idp.example.com", claims, cfg, mock)
 	if !admin {
-		t.Error("wouldBeAdmin: email-link to existing admin must be detected pre-sync")
+		t.Error("wouldBeAdminWith: email-link to existing admin must be detected pre-sync")
 	}
 	if reason != "email_link_to_admin" {
 		t.Errorf("reason = %q, want email_link_to_admin", reason)
 	}
 }
 
-// TestWouldBeAdmin_EmailLinkUnverified_NotBlocked — unverified email with link_by_email
-// must NOT be caught by wouldBeAdmin (email link itself is blocked for unverified email).
-func TestWouldBeAdmin_EmailLinkUnverified_NotBlocked(t *testing.T) {
+// TestWouldBeAdmin_EmailLinkUnverified_AllowUnverifiedFalse — unverified email +
+// AllowUnverifiedEmail=false must NOT match email-link path.
+func TestWouldBeAdmin_EmailLinkUnverified_AllowUnverifiedFalse(t *testing.T) {
 	adminUser := &domain.User{ID: "admin-uuid", Email: "admin@example.com", Role: "admin"}
-	cfg := &Config{LinkByEmail: true, MFAAMRValues: []string{"mfa"}}
+	cfg := &Config{LinkByEmail: true, AllowUnverifiedEmail: false}
 	claims := IDTokenClaims{
 		Subject:       "new-sub",
 		Email:         "admin@example.com",
-		EmailVerified: false, // unverified — email link won't happen
+		EmailVerified: false, // unverified + AllowUnverifiedEmail=false → no link
 	}
 	mock := &mockPreflightSyncer{
 		bySubject: map[string]*domain.User{},
 		byEmail:   map[string]*domain.User{"admin@example.com": adminUser},
 	}
-	// Replicate the wouldBeAdmin check for email-link path.
-	if cfg.LinkByEmail && claims.EmailVerified && claims.Email != "" {
-		if u, _ := mock.GetByEmail(nil, claims.Email); u != nil && u.Role == "admin" {
-			t.Error("unverified email: must NOT trigger wouldBeAdmin email-link check")
-		}
+	admin, reason := wouldBeAdminWith(context.Background(), "https://idp.example.com", claims, cfg, mock)
+	if admin {
+		t.Errorf("unverified email + AllowUnverifiedEmail=false: must NOT detect admin (got reason=%q)", reason)
 	}
-	// Passes if the inner block is not entered.
+}
+
+// TestWouldBeAdmin_EmailLinkUnverified_AllowUnverifiedTrue — unverified email +
+// AllowUnverifiedEmail=true mirrors Sync() and MUST match (High fix).
+func TestWouldBeAdmin_EmailLinkUnverified_AllowUnverifiedTrue(t *testing.T) {
+	adminUser := &domain.User{ID: "admin-uuid", Email: "admin@example.com", Role: "admin"}
+	cfg := &Config{
+		LinkByEmail:          true,
+		AllowUnverifiedEmail: true, // dangerous config, but explicitly supported
+	}
+	claims := IDTokenClaims{
+		Subject:       "new-sub",
+		Email:         "admin@example.com",
+		EmailVerified: false, // unverified, but AllowUnverifiedEmail=true
+	}
+	mock := &mockPreflightSyncer{
+		bySubject: map[string]*domain.User{},
+		byEmail:   map[string]*domain.User{"admin@example.com": adminUser},
+	}
+	admin, reason := wouldBeAdminWith(context.Background(), "https://idp.example.com", claims, cfg, mock)
+	if !admin {
+		t.Error("unverified email + AllowUnverifiedEmail=true: preflight must match (mirrors Sync() behaviour)")
+	}
+	if reason != "email_link_to_admin" {
+		t.Errorf("reason = %q, want email_link_to_admin", reason)
+	}
 }
 
 // TestRecordMFADenied_ActorUserIDIsNil — regression: preflight denial must use
