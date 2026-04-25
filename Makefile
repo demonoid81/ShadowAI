@@ -1,5 +1,5 @@
 .PHONY: dev up down migrate migrate-enterprise seed \
-        test test-enterprise test-integration test-all \
+        test test-enterprise test-integration test-smoke test-all \
         build build-enterprise build-all \
         lint vet \
         docker docker-enterprise \
@@ -51,6 +51,12 @@ test-enterprise:
 
 test-integration:
 	cd backend && go test -tags 'enterprise integration' ./integration/... -count=1 -v -timeout 10m
+
+# O3.1: Enterprise smoke harness — full end-to-end against real PG+Redis.
+# Requires Docker. Covers migrations, auth, MFA, break-glass, governance,
+# SCIM, evidence chain, health probes.
+test-smoke:
+	cd backend && go test -tags 'enterprise smoke' ./smoke/... -count=1 -v -timeout 15m
 
 test-all: test test-enterprise
 

@@ -86,6 +86,31 @@ jobs:
           TESTCONTAINERS_RYUK_DISABLED: "false"
 
   # ─────────────────────────────────────────────────────────────────────────
+  # 3b. O3.1 Enterprise smoke harness (PR-O3)
+  # End-to-end scenario coverage against real PG + Redis via testcontainers.
+  # ─────────────────────────────────────────────────────────────────────────
+  smoke-enterprise:
+    name: Smoke (enterprise)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      - name: go test -tags 'enterprise smoke' ./smoke/...
+        run: |
+          go test -tags 'enterprise smoke' ./smoke/... \
+            -count=1 -timeout 15m -v
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+
+  # ─────────────────────────────────────────────────────────────────────────
   # 4. Build matrix — core + enterprise binaries
   # ─────────────────────────────────────────────────────────────────────────
   build:
