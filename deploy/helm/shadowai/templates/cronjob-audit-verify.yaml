@@ -32,7 +32,13 @@ spec:
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command:
                 - audit-verify
+                {{- if .Values.auditVerifyCron.chainSecret }}
+                # AUDIT_CHAIN_SECRET available → run W2 chain + W3 anchor verification.
+                - --include-anchors
+                {{- else }}
+                # No chain secret → W3 anchor-only (no HMAC chain verification).
                 - --anchor-only
+                {{- end }}
                 - --table
                 - all
                 {{- if .Values.auditVerifyCron.verbose }}
