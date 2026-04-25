@@ -63,7 +63,11 @@ func main() {
 	internalDBRepo := internaldb.NewRepository(db)
 
 	// Services
-	authSvc := auth.NewService(authRepo, cfg.JWTSecret)
+	var authOpts []auth.ServiceOption
+	if cfg.AdminMFARequired {
+		authOpts = append(authOpts, auth.WithAdminMFARequired())
+	}
+	authSvc := auth.NewService(authRepo, cfg.JWTSecret, authOpts...)
 	auditSvc := audit.NewService(auditRepo)
 	policySvc := policy.NewService(policyRepo)
 	budgetSvc := budget.NewService(budgetRepo, redisClient)

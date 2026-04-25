@@ -117,10 +117,16 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 // PR-E1.1: MFA repository methods.
 // ---------------------------------------------------------------------------
 
-// SetTOTPSecret stores the encrypted TOTP secret and enables MFA for the user.
+// SetTOTPSecret stores the encrypted TOTP secret, enables MFA, and bumps token_version.
+// Bumping token_version invalidates all existing JWT and API-key sessions, forcing the
+// user to re-authenticate with MFA from this point on.
 func (r *Repository) SetTOTPSecret(ctx context.Context, userID, encryptedSecret string) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE users SET totp_secret=$1, mfa_required=true, updated_at=now() WHERE id=$2`,
+		`UPDATE users
+		 SET totp_secret=$1, mfa_required=true,
+		     token_version = token_version + 1,
+		     updated_at=now()
+		 WHERE id=$2`,
 		encryptedSecret, userID)
 	return err
 }

@@ -60,8 +60,9 @@ type Claims struct {
 }
 
 type Service struct {
-	repo      *Repository
-	jwtSecret []byte
+	repo             *Repository
+	jwtSecret        []byte
+	adminMFARequired bool // PR-E1.1: if true, all admin sessions must have MFAVerified=true
 }
 
 func NormalizeRole(raw string) (string, error) {
@@ -75,8 +76,22 @@ func NormalizeRole(raw string) (string, error) {
 	return role, nil
 }
 
-func NewService(repo *Repository, jwtSecret string) *Service {
-	return &Service{repo: repo, jwtSecret: []byte(jwtSecret)}
+// ServiceOption configures a Service.
+type ServiceOption func(*Service)
+
+// WithAdminMFARequired enforces MFA for all admin sessions regardless of
+// per-user mfa_required flag. Admin API-key and JWT sessions without
+// MFAVerified=true are rejected with 401 when this is set.
+func WithAdminMFARequired() ServiceOption {
+	return func(s *Service) { s.adminMFARequired = true }
+}
+
+func NewService(repo *Repository, jwtSecret string, opts ...ServiceOption) *Service {
+	s := &Service{repo: repo, jwtSecret: []byte(jwtSecret)}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func (s *Service) Register(ctx context.Context, email, password, role string) (*domain.User, error) {

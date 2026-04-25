@@ -4,6 +4,8 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,68 @@ func TestBreakGlass_RateLimiter_BlocksAfterMaxAttempts(t *testing.T) {
 	}
 	if rl.Allow() {
 		t.Error("attempt after max should be denied")
+	}
+}
+
+// TestBreakGlass_TokenPassesAuthMiddleware — break-glass JWT must pass AuthMiddleware
+// and RequireRole(admin) without a DB user record.
+// Regression for High finding: UserID="break-glass" has no DB row.
+func TestBreakGlass_TokenPassesAuthMiddleware(t *testing.T) {
+	svc := &Service{jwtSecret: []byte("test-secret-for-break-glass!!!!")}
+
+	// Issue a break-glass token.
+	hash := hashSecret(t, "bg-password-123")
+	bgToken, err := svc.BreakGlassLogin(context.Background(), "bg-password-123", hash, time.Hour)
+	if err != nil {
+		t.Fatalf("BreakGlassLogin: %v", err)
+	}
+
+	// AuthMiddleware with a nil repository (break-glass must NOT call GetByID).
+	svcNilRepo := &Service{jwtSecret: svc.jwtSecret, repo: nil}
+	var capturedClaims *Claims
+	handler := svcNilRepo.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedClaims = GetClaims(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req.Header.Set("Authorization", "Bearer "+bgToken)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("break-glass: AuthMiddleware returned %d, want 200 (must not call GetByID)", rr.Code)
+	}
+	if capturedClaims == nil {
+		t.Fatal("capturedClaims is nil — middleware did not set claims")
+	}
+	if !capturedClaims.BreakGlass {
+		t.Error("BreakGlass claim must be true")
+	}
+	if capturedClaims.Role != RoleAdmin {
+		t.Errorf("Role = %q, want admin", capturedClaims.Role)
+	}
+}
+
+// TestBreakGlass_TokenPassesRequireRole — break-glass JWT must satisfy RequireRole(admin).
+func TestBreakGlass_TokenPassesRequireRole(t *testing.T) {
+	svc := &Service{jwtSecret: []byte("test-secret-for-break-glass!!!!")}
+	hash := hashSecret(t, "bg-password-456")
+	bgToken, _ := svc.BreakGlassLogin(context.Background(), "bg-password-456", hash, time.Hour)
+
+	svcNilRepo := &Service{jwtSecret: svc.jwtSecret, repo: nil}
+	adminHandler := RequireRole(RoleAdmin)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	handler := svcNilRepo.AuthMiddleware(adminHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/test", nil)
+	req.Header.Set("Authorization", "Bearer "+bgToken)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("break-glass + RequireRole(admin): got %d, want 200", rr.Code)
 	}
 }
 

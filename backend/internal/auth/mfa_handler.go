@@ -109,7 +109,10 @@ func (h *MFAHandler) MFAVerify(w http.ResponseWriter, r *http.Request) {
 // POST /api/auth/mfa/setup  (requires admin auth)
 // ---------------------------------------------------------------------------
 
-// MFASetup generates a new TOTP provisioning URI for the authenticated admin.
+// MFASetup generates a TOTP provisioning URI and returns a setup_token.
+// The secret is NOT saved to DB yet — it's embedded in the setup_token JWT.
+// The user must scan the QR code and call /mfa/confirm with a valid code
+// to activate MFA. This prevents lockout if the user loses the URI.
 func (h *MFAHandler) MFASetup(w http.ResponseWriter, r *http.Request) {
 	claims := GetClaims(r.Context())
 	if claims == nil {
@@ -125,22 +128,27 @@ func (h *MFAHandler) MFASetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store the pending secret (not yet confirmed). We store it already so
-	// MFAConfirm can validate the code without a second round-trip.
-	if err := h.service.GetRepo().SetTOTPSecret(r.Context(), claims.UserID, encSecret); err != nil {
+	// Return setup_token containing the pending secret (not yet in DB).
+	setupToken, err := h.service.IssueSetupToken(claims.UserID, encSecret)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
 		return
 	}
 
 	h.recordAudit(r, &claims.UserID, "mfa_challenge_required", http.StatusOK, true, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"uri": uri})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uri":         uri,
+		"setup_token": setupToken,
+	})
 }
 
 // ---------------------------------------------------------------------------
 // POST /api/auth/mfa/confirm  (requires admin auth)
 // ---------------------------------------------------------------------------
 
-// MFAConfirm verifies the first TOTP code from the authenticator app and finalises MFA setup.
+// MFAConfirm validates the first TOTP code using the pending setup_token,
+// then saves the secret to DB (enabling MFA). Only succeeds after a valid code
+// is provided — prevents lockout from saving a secret the user can't access.
 func (h *MFAHandler) MFAConfirm(w http.ResponseWriter, r *http.Request) {
 	claims := GetClaims(r.Context())
 	if claims == nil {
@@ -149,18 +157,39 @@ func (h *MFAHandler) MFAConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Code string `json:"code"`
+		SetupToken string `json:"setup_token"`
+		Code       string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "code required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" || req.SetupToken == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "setup_token and code are required"})
 		return
 	}
 
-	if err := h.service.ValidateTOTPCode(r.Context(), claims.UserID, req.Code); err != nil {
+	// Verify setup_token belongs to the calling user.
+	tokenUserID, encSecret, err := h.service.VerifySetupToken(req.SetupToken)
+	if err != nil || tokenUserID != claims.UserID {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid or expired setup_token"})
+		return
+	}
+
+	// Decrypt and validate the TOTP code against the pending secret.
+	plainSecret, err := decryptTOTPSecret(h.service.jwtSecret, encSecret)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
+		return
+	}
+	if !validateTOTPCode(plainSecret, req.Code) {
 		h.recordAudit(r, &claims.UserID, "mfa_failed", http.StatusUnauthorized, false, map[string]any{
 			"reason": "invalid_setup_code",
 		})
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid MFA code"})
+		return
+	}
+
+	// Code is valid — now save the secret to DB and enable MFA.
+	// SetTOTPSecret also bumps token_version to invalidate existing sessions.
+	if err := h.service.GetRepo().SetTOTPSecret(r.Context(), claims.UserID, encSecret); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
 		return
 	}
 

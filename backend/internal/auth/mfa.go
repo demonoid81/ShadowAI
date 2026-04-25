@@ -29,8 +29,9 @@ import (
 )
 
 const (
-	mfaTokenExpiry = 5 * time.Minute
-	totpDigits     = 6
+	mfaTokenExpiry   = 5 * time.Minute
+	setupTokenExpiry = 10 * time.Minute // longer — user needs time to scan QR
+	totpDigits       = 6
 )
 
 // MFAToken is a short-lived JWT issued after password verification when MFA is required.
@@ -73,6 +74,50 @@ func (s *Service) VerifyMFAChallenge(tokenStr string) (string, error) {
 	return claims.UserID, nil
 }
 
+// SetupToken is a short-lived JWT carrying an encrypted pending TOTP secret.
+// It is returned from /mfa/setup and must be presented to /mfa/confirm.
+// The secret is NOT saved to the DB until confirm succeeds, preventing lockout
+// if the user fails to scan the QR code.
+type SetupToken struct {
+	UserID          string `json:"uid"`
+	TokenType       string `json:"type"` // "mfa_setup"
+	EncryptedSecret string `json:"enc"`  // encryptTOTPSecret output
+	jwt.RegisteredClaims
+}
+
+// IssueSetupToken creates a setup_token containing the pending encrypted secret.
+func (s *Service) IssueSetupToken(userID, encryptedSecret string) (string, error) {
+	claims := &SetupToken{
+		UserID:          userID,
+		TokenType:       "mfa_setup",
+		EncryptedSecret: encryptedSecret,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(setupTokenExpiry)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(s.jwtSecret)
+}
+
+// VerifySetupToken validates a setup_token and returns the encrypted secret + userID.
+func (s *Service) VerifySetupToken(tokenStr string) (userID, encryptedSecret string, err error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &SetupToken{}, func(t *jwt.Token) (any, error) {
+		if t.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return s.jwtSecret, nil
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("invalid setup_token")
+	}
+	claims, ok := token.Claims.(*SetupToken)
+	if !ok || !token.Valid || claims.TokenType != "mfa_setup" {
+		return "", "", fmt.Errorf("invalid setup_token type")
+	}
+	return claims.UserID, claims.EncryptedSecret, nil
+}
+
 // GenerateTOTPSecret creates a new TOTP secret for the user and returns the OTP URI.
 // The secret is returned as base32 for the user to enter manually if QR fails.
 // The encrypted secret for DB storage is returned as encryptedSecret.
@@ -91,7 +136,12 @@ func (s *Service) GenerateTOTPSecret(issuer, accountName string) (uri, plainSecr
 	return key.URL(), plain, enc, nil
 }
 
-// ValidateTOTPCode checks a TOTP code against the user's stored secret.
+// validateTOTPCode checks a code against a plain TOTP secret string.
+func validateTOTPCode(plainSecret, code string) bool {
+	return totp.Validate(code, plainSecret)
+}
+
+// ValidateTOTPCode checks a TOTP code against the user's stored encrypted secret.
 func (s *Service) ValidateTOTPCode(ctx context.Context, userID, code string) error {
 	u, err := s.repo.GetByID(ctx, userID)
 	if err != nil || u.TOTPSecret == nil || *u.TOTPSecret == "" {
@@ -101,7 +151,7 @@ func (s *Service) ValidateTOTPCode(ctx context.Context, userID, code string) err
 	if err != nil {
 		return fmt.Errorf("mfa: decrypt secret: %w", err)
 	}
-	if !totp.Validate(code, plain) {
+	if !validateTOTPCode(plain, code) {
 		return fmt.Errorf("invalid totp code")
 	}
 	return nil

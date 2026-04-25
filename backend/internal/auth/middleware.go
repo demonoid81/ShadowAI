@@ -31,6 +31,10 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		}
+		mfaRequired := func() {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"mfa_required"}`, http.StatusUnauthorized)
+		}
 
 		// Try JWT from Authorization header
 		authHeader := r.Header.Get("Authorization")
@@ -41,20 +45,33 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 				unauthorized()
 				return
 			}
-			user, err := s.repo.GetByID(r.Context(), c.UserID)
-			if err != nil || !user.IsActive {
-				unauthorized()
-				return
+
+			// PR-E1.1 Fix 1: break-glass tokens have no DB row.
+			// Trust the JWT signature alone; no GetByID needed.
+			if c.BreakGlass {
+				claims = c
+			} else {
+				user, err := s.repo.GetByID(r.Context(), c.UserID)
+				if err != nil || !user.IsActive {
+					unauthorized()
+					return
+				}
+				if c.TokenVersion != user.TokenVersion {
+					unauthorized()
+					return
+				}
+				c.Role = user.Role
+				c.Email = user.Email
+				c.TokenVersion = user.TokenVersion
+				c.Department = ptrStr(user.Department)
+
+				// PR-E1.1 Fix 2: enforce MFA for users where mfa_required=true.
+				if user.MFARequired && !c.MFAVerified {
+					mfaRequired()
+					return
+				}
+				claims = c
 			}
-			if c.TokenVersion != user.TokenVersion {
-				unauthorized()
-				return
-			}
-			c.Role = user.Role
-			c.Email = user.Email
-			c.TokenVersion = user.TokenVersion
-			c.Department = ptrStr(user.Department) // refresh from DB — not from stale JWT
-			claims = c
 		}
 
 		// Try API key
@@ -65,6 +82,12 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 				if err == nil {
 					if !u.IsActive {
 						unauthorized()
+						return
+					}
+					// PR-E1.1 Fix 2: API-key sessions don't carry MFAVerified.
+					// If the user requires MFA, API-key access is blocked.
+					if u.MFARequired {
+						mfaRequired()
 						return
 					}
 					claims = &Claims{
@@ -80,6 +103,14 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 
 		if claims == nil {
 			unauthorized()
+			return
+		}
+
+		// PR-E1.1 Fix 3: ADMIN_MFA_REQUIRED enforces MFA for all admin sessions
+		// regardless of per-user mfa_required flag.
+		// Break-glass sessions are exempt (they're emergency access by definition).
+		if s.adminMFARequired && claims.Role == RoleAdmin && !claims.MFAVerified && !claims.BreakGlass {
+			mfaRequired()
 			return
 		}
 

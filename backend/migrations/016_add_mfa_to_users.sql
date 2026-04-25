@@ -1,7 +1,9 @@
 -- PR-E1.1: Admin MFA / break-glass policy.
 --
--- totp_secret   — AES-encrypted TOTP seed (32 bytes base32-encoded).
---                 NULL = MFA not configured. Never store plain-text.
+-- totp_secret   — XOR-obfuscated TOTP secret (HMAC-derived key stream, hex-encoded).
+--                 This is obfuscation, not AES encryption. For stronger at-rest
+--                 protection, add pgcrypto column encryption or KMS envelope encryption.
+--                 NULL = MFA not configured.
 -- mfa_required  — if true, login requires TOTP code after password check.
 --                 Defaults to false; set to true for all admin accounts in prod.
 ALTER TABLE users
