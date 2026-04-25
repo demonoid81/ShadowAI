@@ -236,7 +236,11 @@ func (s *UserSyncer) ApplyPatch(ctx context.Context, userID string, req PatchReq
 func (s *UserSyncer) updateExisting(ctx context.Context, u *domain.User, scimUser User, email string) (SyncResult, error) {
 	wasActive := u.IsActive
 	u.Email = email
-	// PUT is a full replace: Active nil defaults to true; Active=false = deactivate.
+	// PUT is a full replace per SCIM RFC 7644 §3.5.1.
+	// Active omitted (nil) defaults to true — an omitted field in a full replace
+	// means "reset to default", not "no change". This intentionally reactivates
+	// a previously deprovisioned user if the IdP sends a full PUT without active=false.
+	// Operators who only want to change specific fields should use PATCH instead.
 	u.IsActive = boolVal(scimUser.Active, true)
 	if len(scimUser.Roles) > 0 {
 		u.Role = s.cfg.mapRole(scimUser.Roles)

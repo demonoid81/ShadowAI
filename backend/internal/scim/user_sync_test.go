@@ -344,6 +344,33 @@ func TestParseSyncConfig_InvalidRoleMapValue_Rejected(t *testing.T) {
 	}
 }
 
+// TestPUT_ActiveOmitted_ReactivatesInactiveUser documents the SCIM full-replace
+// contract: PUT without active field defaults to active=true (reset to default),
+// intentionally reactivating a deprovisioned user. NOT a bug — RFC 7644 §3.5.1.
+// Use PATCH active=false to keep a user deactivated during partial updates.
+func TestPUT_ActiveOmitted_ReactivatesInactiveUser(t *testing.T) {
+	existing := &domain.User{ID: "u-inactive", Email: "inactive@example.com", IsActive: false}
+	repo := &mockSCIMRepo{
+		byExternalID: map[string]*domain.User{},
+		byEmail:      map[string]*domain.User{},
+		byID:         map[string]*domain.User{"u-inactive": existing},
+	}
+	s := newSyncer(repo)
+	result, err := s.updateExisting(context.Background(), existing, User{
+		UserName: "inactive@example.com",
+		Active:   nil, // omitted in PUT → full-replace default = true
+	}, "inactive@example.com")
+	if err != nil {
+		t.Fatalf("updateExisting: %v", err)
+	}
+	if !result.User.IsActive {
+		t.Error("PUT without active must reactivate (full-replace: active omitted → default true)")
+	}
+	if result.Action != "reactivated" {
+		t.Errorf("action = %q, want reactivated", result.Action)
+	}
+}
+
 // TestApplyFilter_UnsupportedFilter_EmptyResult — Medium fix.
 // Malformed/unknown filter must return empty, not full list.
 func TestApplyFilter_UnsupportedFilter_EmptyResult(t *testing.T) {
