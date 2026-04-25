@@ -1,0 +1,60 @@
+# golangci-lint configuration for ShadowAI backend.
+# Docs: https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  # Build tags for the analysis. Include enterprise so enterprise-only files are checked.
+  build-tags:
+    - enterprise
+
+linters:
+  # Start with a minimal, high-signal set.
+  # Add linters incrementally as the codebase stabilises.
+  enable:
+    - errcheck         # unchecked errors
+    - gosimple         # simplify code
+    - govet            # go vet issues
+    - ineffassign      # ineffectual assignments
+    - staticcheck      # comprehensive static analysis
+    - unused           # unused code
+    - gofmt            # formatting
+    - misspell         # spelling errors in comments/strings
+    - exportloopref    # loop variable capture (pre-Go 1.22)
+    - bodyclose        # unclosed HTTP response bodies
+    - sqlclosecheck    # unclosed sql.Rows / sql.Stmt
+
+  disable:
+    - depguard
+    - godox            # TODO/FIXME comments (intentional in our codebase)
+
+linters-settings:
+  errcheck:
+    # Don't flag deferred Close() errors — common pattern with io.Closer.
+    exclude-functions:
+      - (io.Closer).Close
+      - (*os.File).Close
+      - (net/http.ResponseWriter).Write
+
+  staticcheck:
+    # SA4006: unused variables in tests can be intentional for readability.
+    checks: ["all", "-SA4006"]
+
+  misspell:
+    locale: US
+
+issues:
+  # Exclude generated files and vendor.
+  exclude-dirs:
+    - vendor
+    - frontend/node_modules
+
+  # Exclude test files from some linters.
+  exclude-rules:
+    - path: "_test.go"
+      linters:
+        - errcheck
+        - bodyclose
+    # Enterprise-only files may import packages not in core build.
+    - path: ".*enterprise.*"
+      linters:
+        - unused

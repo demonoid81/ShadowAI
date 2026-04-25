@@ -1,0 +1,312 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# Cancel in-progress runs for the same ref on new pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Go version from go.mod to keep CI in sync.
+  GO_VERSION_FILE: backend/go.mod
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Core tests (Apache 2.0 build — no enterprise tag)
+  # ─────────────────────────────────────────────────────────────────────────
+  test-core:
+    name: Test (core)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      - name: go test ./...
+        run: go test ./... -count=1 -timeout 5m
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. Enterprise tests (all features enabled)
+  # ─────────────────────────────────────────────────────────────────────────
+  test-enterprise:
+    name: Test (enterprise)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      - name: go test -tags enterprise ./...
+        run: go test -tags enterprise ./... -count=1 -timeout 5m
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. Integration tests (require Docker / testcontainers)
+  # ─────────────────────────────────────────────────────────────────────────
+  test-integration:
+    name: Test (integration)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      # Testcontainers needs Docker — available on ubuntu-latest.
+      - name: go test -tags 'enterprise integration' ./integration/...
+        run: |
+          go test -tags 'enterprise integration' ./integration/... \
+            -count=1 -timeout 10m -v 2>&1 | tail -50
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 4. Build matrix — core + enterprise binaries
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        variant:
+          - core
+          - enterprise
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Build shadowai (${{ matrix.variant }})
+        run: |
+          TAGS=""
+          [ "${{ matrix.variant }}" = "enterprise" ] && TAGS="-tags enterprise"
+          CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/shadowai
+
+      - name: Build all CLIs (${{ matrix.variant }})
+        run: |
+          TAGS=""
+          [ "${{ matrix.variant }}" = "enterprise" ] && TAGS="-tags enterprise"
+          for cmd in audit-verify audit-export-evidence migrate audit-purge; do
+            echo "Building $cmd..."
+            CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/$cmd 2>/dev/null || true
+          done
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 5. Docker build (core + enterprise)
+  # ─────────────────────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker build (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant:
+          - core
+          - enterprise
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker build ${{ matrix.variant }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false          # validate only; push on release workflow
+          tags: shadowai:${{ matrix.variant }}-${{ github.sha }}
+          build-args: |
+            BUILD_TAGS=${{ matrix.variant == 'enterprise' && 'enterprise' || '' }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.variant }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 6. Helm chart validation
+  # ─────────────────────────────────────────────────────────────────────────
+  helm-validate:
+    name: Helm validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.17.0"
+
+      - name: helm lint (base values)
+        run: |
+          helm lint ./deploy/helm/shadowai \
+            --set "existingSecret=shadowai-secrets"
+
+      - name: helm template (base values)
+        run: |
+          helm template shadowai ./deploy/helm/shadowai \
+            --set "existingSecret=shadowai-secrets" \
+            --set "image.tag=ci-test" \
+            > /tmp/rendered-base.yaml
+          echo "✓ base template rendered ($(wc -l < /tmp/rendered-base.yaml) lines)"
+
+      - name: helm template (prod values)
+        run: |
+          helm template shadowai ./deploy/helm/shadowai \
+            -f ./deploy/helm/shadowai/values-prod.yaml \
+            --set "existingSecret=shadowai-secrets" \
+            --set "image.tag=ci-test" \
+            > /tmp/rendered-prod.yaml
+          echo "✓ prod template rendered ($(wc -l < /tmp/rendered-prod.yaml) lines)"
+
+      - name: helm template (enterprise with SCIM CronJob)
+        run: |
+          helm template shadowai ./deploy/helm/shadowai \
+            -f ./deploy/helm/shadowai/values-prod.yaml \
+            --set "existingSecret=shadowai-secrets" \
+            --set "image.tag=ci-test" \
+            --set "auditVerifyCron.enabled=true" \
+            --set "auditVerifyCron.chainSecret=true" \
+            > /tmp/rendered-enterprise.yaml
+          echo "✓ enterprise template rendered ($(wc -l < /tmp/rendered-enterprise.yaml) lines)"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 7. Migration smoke test on fresh Postgres
+  # ─────────────────────────────────────────────────────────────────────────
+  migration-smoke:
+    name: Migration smoke (core)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: shadowai_ci
+          POSTGRES_USER: shadowai
+          POSTGRES_PASSWORD: shadowai_ci_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowai"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgres://shadowai:shadowai_ci_secret@localhost:5432/shadowai_ci?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Build migrate binary
+        run: CGO_ENABLED=0 go build -o /tmp/migrate ./cmd/migrate
+
+      - name: Run core migrations
+        run: /tmp/migrate --dir ./migrations
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Verify migrations are idempotent (run again)
+        run: /tmp/migrate --dir ./migrations
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Verify schema_migrations table populated
+        run: |
+          COUNT=$(psql "$DATABASE_URL" -t -c "SELECT COUNT(*) FROM schema_migrations;" | tr -d ' ')
+          echo "Applied migrations: $COUNT"
+          [ "$COUNT" -gt 0 ] || (echo "ERROR: no migrations recorded" && exit 1)
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 8. Migration smoke test — enterprise migrations on top of core
+  # ─────────────────────────────────────────────────────────────────────────
+  migration-smoke-enterprise:
+    name: Migration smoke (enterprise)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: shadowai_ent_ci
+          POSTGRES_USER: shadowai
+          POSTGRES_PASSWORD: shadowai_ci_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowai"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: postgres://shadowai:shadowai_ci_secret@localhost:5432/shadowai_ent_ci?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Build migrate binary
+        run: CGO_ENABLED=0 go build -o /tmp/migrate ./cmd/migrate
+
+      - name: Run core + enterprise migrations
+        run: |
+          /tmp/migrate \
+            --dir ./migrations \
+            --enterprise-dir ./migrations-enterprise
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Verify idempotent
+        run: |
+          /tmp/migrate \
+            --dir ./migrations \
+            --enterprise-dir ./migrations-enterprise
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Verify migration count (core + enterprise)
+        run: |
+          CORE=$(ls migrations/*.sql | wc -l)
+          ENT=$(ls migrations-enterprise/*.sql | wc -l)
+          EXPECTED=$((CORE + ENT))
+          COUNT=$(psql "$DATABASE_URL" -t -c "SELECT COUNT(*) FROM schema_migrations;" | tr -d ' ')
+          echo "Expected: $EXPECTED (core=$CORE enterprise=$ENT), Applied: $COUNT"
+          [ "$COUNT" -eq "$EXPECTED" ] || (echo "ERROR: migration count mismatch" && exit 1)
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}

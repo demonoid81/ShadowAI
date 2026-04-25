@@ -1,4 +1,14 @@
-.PHONY: dev up down migrate seed test lint
+.PHONY: dev up down migrate migrate-enterprise seed \
+        test test-enterprise test-integration test-all \
+        build build-enterprise build-all \
+        lint vet \
+        docker docker-enterprise \
+        helm-validate migration-smoke \
+        frontend-dev frontend-build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Development
+# ─────────────────────────────────────────────────────────────────────────────
 
 up:
 	docker compose up -d
@@ -10,8 +20,18 @@ dev:
 	docker compose up -d postgres redis
 	cd backend && go run ./cmd/shadowai
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Migrations
+# ─────────────────────────────────────────────────────────────────────────────
+
 migrate:
 	@for f in backend/migrations/*.sql; do \
+		echo "Running $$f..."; \
+		docker compose exec -T postgres psql -U shadowai -d shadowai < "$$f"; \
+	done
+
+migrate-enterprise: migrate
+	@for f in backend/migrations-enterprise/*.sql; do \
 		echo "Running $$f..."; \
 		docker compose exec -T postgres psql -U shadowai -d shadowai < "$$f"; \
 	done
@@ -19,11 +39,81 @@ migrate:
 seed:
 	docker compose exec -T postgres psql -U shadowai -d shadowai < scripts/seed.sql
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Testing
+# ─────────────────────────────────────────────────────────────────────────────
+
 test:
-	cd backend && go test ./...
+	cd backend && go test ./... -count=1
+
+test-enterprise:
+	cd backend && go test -tags enterprise ./... -count=1
+
+test-integration:
+	cd backend && go test -tags 'enterprise integration' ./integration/... -count=1 -v -timeout 10m
+
+test-all: test test-enterprise
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Building
+# ─────────────────────────────────────────────────────────────────────────────
+
+build:
+	cd backend && CGO_ENABLED=0 go build -ldflags="-w -s" ./...
+
+build-enterprise:
+	cd backend && CGO_ENABLED=0 go build -tags enterprise -ldflags="-w -s" ./...
+
+build-all: build build-enterprise
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Code quality
+# ─────────────────────────────────────────────────────────────────────────────
 
 lint:
 	cd backend && golangci-lint run ./...
+
+vet:
+	cd backend && go vet ./... && go vet -tags enterprise ./...
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Docker
+# ─────────────────────────────────────────────────────────────────────────────
+
+docker:
+	docker build -t shadowai:core ./backend
+
+docker-enterprise:
+	docker build --build-arg BUILD_TAGS=enterprise -t shadowai:enterprise ./backend
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helm
+# ─────────────────────────────────────────────────────────────────────────────
+
+helm-validate:
+	helm lint ./deploy/helm/shadowai --set "existingSecret=shadowai-secrets"
+	helm template shadowai ./deploy/helm/shadowai \
+		--set "existingSecret=shadowai-secrets" --set "image.tag=ci" > /dev/null \
+		&& echo "✓ base values"
+	helm template shadowai ./deploy/helm/shadowai \
+		-f ./deploy/helm/shadowai/values-prod.yaml \
+		--set "existingSecret=shadowai-secrets" --set "image.tag=ci" > /dev/null \
+		&& echo "✓ prod values"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Migration smoke (requires DATABASE_URL)
+# Usage: DATABASE_URL=postgres://... make migration-smoke
+# ─────────────────────────────────────────────────────────────────────────────
+
+migration-smoke:
+	@[ -n "$(DATABASE_URL)" ] || (echo "ERROR: DATABASE_URL not set" && exit 1)
+	cd backend && go run ./cmd/migrate --dir ./migrations
+	cd backend && go run ./cmd/migrate --dir ./migrations --enterprise-dir ./migrations-enterprise
+	@echo "✓ migration smoke passed"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frontend
+# ─────────────────────────────────────────────────────────────────────────────
 
 frontend-dev:
 	cd frontend && npm run dev

@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel an in-progress release
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Run full CI gate before release (same as ci.yml but as a required pre-step).
+  ci-gate:
+    uses: ./.github/workflows/ci.yml
+
+  # Build and push Docker images to GitHub Container Registry.
+  publish-images:
+    name: Publish images
+    runs-on: ubuntu-latest
+    needs: ci-gate
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        variant:
+          - core
+          - enterprise
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-${{ matrix.variant }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.variant }}
+            type=raw,value=latest-${{ matrix.variant }},enable={{is_default_branch}}
+
+      - name: Build and push ${{ matrix.variant }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_TAGS=${{ matrix.variant == 'enterprise' && 'enterprise' || '' }}
+          cache-from: type=gha,scope=docker-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.variant }}
+          platforms: linux/amd64,linux/arm64
+
+  # Create GitHub Release with checksums.
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    needs: publish-images
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog (commits since last tag)
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            COMMITS=$(git log --oneline HEAD | head -30)
+          else
+            COMMITS=$(git log --oneline "${PREV_TAG}..HEAD")
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ## Docker images
+
+            ```
+            # Core (Apache 2.0)
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}-core
+
+            # Enterprise
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}-enterprise
+            ```
+
+            ## Commits
+
+            ${{ steps.changelog.outputs.changelog }}
+          generate_release_notes: false
