@@ -56,6 +56,12 @@ func NewUserSyncer(repo *auth.Repository, cfg *Config, authSvc *auth.Service) *U
 	return &UserSyncer{repo: repo, cfg: cfg, authSvc: authSvc}
 }
 
+// GetBySubject looks up an existing user by (issuer, subject). Used by the
+// handler for the pre-sync admin MFA gate to avoid dirty writes on denial.
+func (s *UserSyncer) GetBySubject(ctx context.Context, issuer, subject string) (*domain.User, error) {
+	return s.repo.GetByOIDCSubject(ctx, issuer, subject)
+}
+
 // SyncResult carries the outcome of an OIDC sync.
 type SyncResult struct {
 	User          *domain.User

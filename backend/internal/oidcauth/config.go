@@ -112,15 +112,23 @@ func FromAppConfig(cfg *config.Config) (*Config, error) {
 
 // CheckMFAClaims returns true if the ID token claims confirm MFA was performed.
 //
-// Priority:
-//  1. AMR: if any value in claims.AMR is in c.MFAAMRValues → MFA confirmed.
-//  2. ACR: if claims.ACR is in c.MFAACRValues → MFA confirmed.
-//  3. Otherwise: not confirmed.
+// AMR is authoritative when present in the token:
+//  - if claims.AMR is non-empty, check AMR only; ACR is NOT consulted.
+//    Rationale: an IdP that sends amr=["pwd"] and acr="mfa" should NOT be
+//    treated as MFA-confirmed — the AMR is the authoritative list of methods used.
+//  - if claims.AMR is absent/empty, fall back to ACR.
 //
-// An empty MFAAMRValues/MFAACRValues means "no AMR/ACR requirement" — only the
-// non-empty set is checked. If both are empty, MFA is never confirmed via claims.
+// ACR fallback:
+//  - if claims.ACR is in MFAACRValues → MFA confirmed.
+//
+// Empty MFAAMRValues/MFAACRValues: the corresponding check is skipped.
+// If both are empty, MFA is never confirmed.
 func (c *Config) CheckMFAClaims(claims IDTokenClaims) bool {
-	if len(c.MFAAMRValues) > 0 {
+	if len(claims.AMR) > 0 {
+		// AMR present → authoritative; do NOT fall back to ACR.
+		if len(c.MFAAMRValues) == 0 {
+			return false // no AMR requirements configured
+		}
 		for _, tokenAMR := range claims.AMR {
 			for _, want := range c.MFAAMRValues {
 				if strings.EqualFold(tokenAMR, want) {
@@ -128,7 +136,9 @@ func (c *Config) CheckMFAClaims(claims IDTokenClaims) bool {
 				}
 			}
 		}
+		return false // AMR present but no match — ACR not consulted
 	}
+	// AMR absent — fall back to ACR.
 	if len(c.MFAACRValues) > 0 && claims.ACR != "" {
 		for _, want := range c.MFAACRValues {
 			if strings.EqualFold(claims.ACR, want) {

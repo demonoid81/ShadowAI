@@ -78,6 +78,31 @@ func TestCheckMFAClaims_ACR_NoMatch(t *testing.T) {
 	}
 }
 
+// TestCheckMFAClaims_AMR_Present_NoACRFallback — when AMR is present but
+// non-matching, ACR must NOT be consulted even if ACR matches.
+// Scenario: IdP sends amr=["pwd"] (password-only) and acr="mfa" (stale/weak).
+// Fix: AMR is authoritative when present; ACR is only fallback for AMR-absent tokens.
+func TestCheckMFAClaims_AMR_Present_NoACRFallback(t *testing.T) {
+	cfg := &Config{
+		MFAAMRValues: []string{"mfa", "otp", "hwk"},
+		MFAACRValues: []string{"mfa"}, // matches the ACR value below
+	}
+	// AMR is present (pwd only) but doesn't match; ACR="mfa" looks like MFA but must not win.
+	claims := IDTokenClaims{AMR: []string{"pwd"}, ACR: "mfa"}
+	if cfg.CheckMFAClaims(claims) {
+		t.Error("AMR present but non-matching: must NOT fall back to ACR (ACR='mfa' must not confirm MFA)")
+	}
+}
+
+// TestCheckMFAClaims_AMR_Absent_UsesACR — AMR absent → ACR fallback is correct.
+func TestCheckMFAClaims_AMR_Absent_UsesACR(t *testing.T) {
+	cfg := &Config{MFAACRValues: []string{"urn:mace:incommon:iap:silver", "mfa"}}
+	claims := IDTokenClaims{AMR: nil, ACR: "mfa"} // no AMR, ACR confirms MFA
+	if !cfg.CheckMFAClaims(claims) {
+		t.Error("AMR absent + ACR matches: should confirm MFA via ACR fallback")
+	}
+}
+
 // TestCheckMFAClaims_AMR_Takes_Priority_Over_ACR — AMR match even if ACR empty.
 func TestCheckMFAClaims_AMR_Takes_Priority_Over_ACR(t *testing.T) {
 	cfg := &Config{

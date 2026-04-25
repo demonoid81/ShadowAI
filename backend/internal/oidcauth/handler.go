@@ -170,26 +170,38 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	claims := extractClaims(claimMap, h.cfg.DepartmentClaim)
 	claims.Subject = idToken.Subject
 
-	// 5a. PR-E3: check IdP MFA claims.
+	// 5a. PR-E3: check IdP MFA claims BEFORE sync.
 	claims.MFAVerifiedByIdP = h.cfg.CheckMFAClaims(claims)
 
-	// 6. Sync user.
+	// 5b. PR-E3: pre-sync admin MFA gate.
+	//
+	// We must enforce MFA BEFORE calling syncer.Sync() because Sync() persists
+	// changes (role upgrade from groups, email, dept, timestamps). Scenario:
+	//   - existing non-admin user logs in with admins group and no MFA
+	//   - if Sync() ran first, DB role would be upgraded to admin
+	//   - then MFA denial would come too late
+	//
+	// We determine "would this become admin?" using wouldBeAdmin, which checks:
+	//   1. What role the groups claim maps to (via cfg.MapRole)
+	//   2. What role the existing user already has in DB (via subject lookup)
+	//
+	// This pre-flight check adds one DB lookup but prevents dirty writes on denial.
+	if h.cfg.RequireMFAForAdmin && !claims.MFAVerifiedByIdP {
+		if admin, reason := h.wouldBeAdmin(ctx, idToken.Issuer, claims); admin {
+			log.Printf("oidc: admin MFA not confirmed (amr=%v acr=%q reason=%s)",
+				claims.AMR, claims.ACR, reason)
+			h.recordMFADenied(r, "preflight:"+claims.Subject, claims)
+			writeOIDCError(w, http.StatusForbidden, "admin_mfa_required")
+			return
+		}
+	}
+
+	// 6. Sync user — safe to write now that MFA is either confirmed or not required.
 	result, err := h.syncer.Sync(ctx, idToken.Issuer, claims)
 	if err != nil {
 		log.Printf("oidc: user sync: %v", err)
 		h.recordFail(r, "user_sync_failed", claims.Email)
 		writeOIDCError(w, http.StatusForbidden, "access_denied")
-		return
-	}
-
-	// 6a. PR-E3: enforce MFA for admin role when OIDC_REQUIRE_MFA_FOR_ADMIN=true.
-	// This runs AFTER sync so we know the resolved role (which may have been
-	// mapped from OIDC groups).
-	if h.cfg.RequireMFAForAdmin && result.User.Role == auth.RoleAdmin && !claims.MFAVerifiedByIdP {
-		log.Printf("oidc: admin MFA not confirmed (amr=%v acr=%q user=%s)",
-			claims.AMR, claims.ACR, result.User.ID)
-		h.recordMFADenied(r, result.User.ID, claims)
-		writeOIDCError(w, http.StatusForbidden, "admin_mfa_required")
 		return
 	}
 
@@ -313,6 +325,27 @@ func writeOIDCError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": code})
+}
+
+// wouldBeAdmin returns (true, reason) if processing this callback would result
+// in an admin session — either because the user is already admin in the DB, or
+// because the OIDC groups claim maps to the admin role.
+//
+// Called BEFORE Sync() to prevent dirty writes (role upgrade, email update, etc.)
+// when admin MFA enforcement is triggered.
+func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDTokenClaims) (bool, string) {
+	// Check if groups claim would map to admin.
+	if mappedRole := h.cfg.MapRole(claims.Groups); mappedRole == auth.RoleAdmin {
+		return true, "groups_map_to_admin"
+	}
+	// Check if existing user (by subject) already has admin role in DB.
+	if claims.Subject != "" {
+		existing, err := h.syncer.GetBySubject(ctx, issuer, claims.Subject)
+		if err == nil && existing != nil && existing.Role == auth.RoleAdmin {
+			return true, "existing_admin_role"
+		}
+	}
+	return false, ""
 }
 
 // recordMFADenied emits an admin event when an OIDC admin login is denied
