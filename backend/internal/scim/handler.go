@@ -91,10 +91,16 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Simple filter support: filter=userName eq "x" or externalId eq "x"
+	// Simple filter support: attr eq "value"
+	// Unsupported/malformed filters return empty results (not full list).
 	filter := r.URL.Query().Get("filter")
 	if filter != "" {
-		users = applyFilter(users, filter)
+		filtered, ok := applyFilter(users, filter)
+		if !ok {
+			users = nil // unsupported filter → empty result (not full directory)
+		} else {
+			users = filtered
+		}
 	}
 
 	resources := make([]User, 0, len(users))
@@ -226,11 +232,12 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) domainToSCIM(u domain.User) User {
 	email := u.Email
+	active := u.IsActive
 	scimUser := User{
 		Schemas:  []string{SchemaUser, SchemaEntUser},
 		ID:       u.ID,
 		UserName: email,
-		Active:   u.IsActive,
+		Active:   &active,
 		Emails:   []Email{{Value: email, Primary: true, Type: "work"}},
 		Meta: &Meta{
 			ResourceType: "User",
@@ -310,36 +317,51 @@ func (h *Handler) recordAudit(r *http.Request, result SyncResult) {
 	})
 }
 
-func applyFilter(users []domain.User, filter string) []domain.User {
-	// Support: userName eq "x", externalId eq "x", id eq "x"
+func applyFilter(users []domain.User, filter string) ([]domain.User, bool) {
 	filter = strings.TrimSpace(filter)
+	// Probe the first user to check if the filter is supported.
+	// If not supported, return (nil, false) — caller returns empty Resources.
+	if len(users) == 0 {
+		_, ok := matchFilter(domain.User{}, filter)
+		return nil, ok
+	}
 	var result []domain.User
 	for _, u := range users {
-		if matchFilter(u, filter) {
+		matches, ok := matchFilter(u, filter)
+		if !ok {
+			return nil, false // unsupported filter → empty result
+		}
+		if matches {
 			result = append(result, u)
 		}
 	}
-	return result
+	return result, true
 }
 
-func matchFilter(u domain.User, filter string) bool {
+// matchFilter returns (matches bool, ok bool).
+// ok=false means the filter is malformed or uses an unsupported attribute;
+// the caller should return empty results rather than the full list.
+func matchFilter(u domain.User, filter string) (matches bool, ok bool) {
 	parts := strings.Fields(filter)
+	// Only support: <attr> eq "<value>" (3-token form).
+	// Compound filters (AND/OR), other operators, and unknown formats → not supported.
 	if len(parts) != 3 || !strings.EqualFold(parts[1], "eq") {
-		return true // unknown filter → return all
+		return false, false // unsupported → empty result
 	}
 	attr := strings.ToLower(parts[0])
 	val := strings.Trim(parts[2], `"'`)
 	switch attr {
 	case "username":
-		return strings.EqualFold(u.Email, val)
+		return strings.EqualFold(u.Email, val), true
 	case "externalid":
-		return u.SCIMExternalID != nil && *u.SCIMExternalID == val
+		return u.SCIMExternalID != nil && *u.SCIMExternalID == val, true
 	case "id":
-		return u.ID == val
+		return u.ID == val, true
 	case "active":
-		return fmt.Sprintf("%v", u.IsActive) == val
+		return fmt.Sprintf("%v", u.IsActive) == val, true
+	default:
+		return false, false // unknown attribute → empty result
 	}
-	return true
 }
 
 func primaryEmailOrName(u User) string {

@@ -70,7 +70,7 @@ func TestProvision_NewUser_Created(t *testing.T) {
 	result, err := s.Provision(context.Background(), User{
 		ExternalID: "ext-001",
 		UserName:   "user@example.com",
-		Active:     true,
+		Active:     boolPtr(true),
 		Roles:      []RoleValue{{Value: "user"}},
 	})
 	if err != nil {
@@ -97,7 +97,7 @@ func TestProvision_ExistingExternalID_Updated(t *testing.T) {
 	result, err := s.Provision(context.Background(), User{
 		ExternalID: "ext-002",
 		UserName:   "new@example.com",
-		Active:     true,
+		Active:     boolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -118,7 +118,7 @@ func TestProvision_RoleMapping_FromRoles(t *testing.T) {
 	s := newSyncer(repo)
 	result, err := s.Provision(context.Background(), User{
 		UserName: "admin@example.com",
-		Active:   true,
+		Active:   boolPtr(true),
 		Roles:    []RoleValue{{Value: "admins"}}, // mapped to "admin" via roleMap
 	})
 	if err != nil {
@@ -137,7 +137,7 @@ func TestProvision_DepartmentFromEnterpriseExtension(t *testing.T) {
 	s := newSyncer(repo)
 	result, err := s.Provision(context.Background(), User{
 		UserName: "emp@example.com",
-		Active:   true,
+		Active:   boolPtr(true),
 		EnterpriseUser: &EnterpriseUser{Department: "Finance"},
 	})
 	if err != nil {
@@ -151,7 +151,7 @@ func TestProvision_DepartmentFromEnterpriseExtension(t *testing.T) {
 func TestProvision_MissingEmail_SCIMError(t *testing.T) {
 	repo := &mockSCIMRepo{byExternalID: map[string]*domain.User{}, byEmail: map[string]*domain.User{}}
 	s := newSyncer(repo)
-	_, err := s.Provision(context.Background(), User{Active: true})
+	_, err := s.Provision(context.Background(), User{Active: boolPtr(true)})
 	if err == nil {
 		t.Error("expected error for missing email/userName, got nil")
 	}
@@ -255,7 +255,7 @@ func TestApplyFilter_UserName(t *testing.T) {
 		{ID: "1", Email: "alice@example.com"},
 		{ID: "2", Email: "bob@example.com"},
 	}
-	got := applyFilter(users, `userName eq "alice@example.com"`)
+	got, _ := applyFilter(users, `userName eq "alice@example.com"`)
 	if len(got) != 1 || got[0].ID != "1" {
 		t.Errorf("filter userName: got %v", got)
 	}
@@ -267,7 +267,7 @@ func TestApplyFilter_ExternalID(t *testing.T) {
 		{ID: "1", SCIMExternalID: &extID},
 		{ID: "2"},
 	}
-	got := applyFilter(users, `externalId eq "ext-xyz"`)
+	got, _ := applyFilter(users, `externalId eq "ext-xyz"`)
 	if len(got) != 1 || got[0].ID != "1" {
 		t.Errorf("filter externalId: got %v", got)
 	}
@@ -280,4 +280,85 @@ func isSCIMError(err error, target **SCIMError) bool {
 		return true
 	}
 	return false
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// ---------------------------------------------------------------------------
+// Fix tests: identity conflict, optional active, role map validation, filter
+// ---------------------------------------------------------------------------
+
+// TestProvision_LinkByEmail_IdentityConflict_Rejected — High fix.
+// email matches existing user that already has a DIFFERENT scim_external_id
+// → 409 uniqueness, not silent merge.
+func TestProvision_LinkByEmail_IdentityConflict_Rejected(t *testing.T) {
+	extA := "ext-A"
+	existing := &domain.User{ID: "u-victim", Email: "shared@example.com", IsActive: true, SCIMExternalID: &extA}
+	cfg, _ := ParseSyncConfig("user", "", "", true) // LinkByEmail=true
+	repo := &mockSCIMRepo{
+		byExternalID: map[string]*domain.User{},
+		byEmail:      map[string]*domain.User{"shared@example.com": existing},
+		byID:         map[string]*domain.User{"u-victim": existing},
+	}
+	s := NewUserSyncer(repo, cfg)
+	_, err := s.Provision(context.Background(), User{
+		ExternalID: "ext-B", // different from ext-A
+		UserName:   "shared@example.com",
+		Active:     boolPtr(true),
+	})
+	if err == nil {
+		t.Fatal("expected 409 for identity conflict, got nil")
+	}
+	var scimErr *SCIMError
+	if !isSCIMError(err, &scimErr) || scimErr.Status != 409 {
+		t.Errorf("expected SCIM 409, got: %v", err)
+	}
+}
+
+// TestProvision_ActiveNil_DefaultsToTrue — Medium fix.
+// Active=nil on create → user is active (not inactive).
+func TestProvision_ActiveNil_DefaultsToTrue(t *testing.T) {
+	repo := &mockSCIMRepo{
+		byExternalID: map[string]*domain.User{},
+		byEmail:      map[string]*domain.User{},
+	}
+	s := newSyncer(repo)
+	result, err := s.Provision(context.Background(), User{
+		UserName: "noactive@example.com",
+		Active:   nil, // field absent
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if !result.User.IsActive {
+		t.Error("Active=nil on create must default to IsActive=true")
+	}
+}
+
+// TestParseSyncConfig_InvalidRoleMapValue — Low fix.
+// Typo in role map value must fail fast at config parse time.
+func TestParseSyncConfig_InvalidRoleMapValue_Rejected(t *testing.T) {
+	_, err := ParseSyncConfig("user", `{"admins":"superuser"}`, "", false) // "superuser" not valid
+	if err == nil {
+		t.Error("expected error for invalid role map value, got nil")
+	}
+}
+
+// TestApplyFilter_UnsupportedFilter_EmptyResult — Medium fix.
+// Malformed/unknown filter must return empty, not full list.
+func TestApplyFilter_UnsupportedFilter_EmptyResult(t *testing.T) {
+	users := []domain.User{
+		{ID: "1", Email: "alice@example.com"},
+		{ID: "2", Email: "bob@example.com"},
+	}
+	// Compound filter unsupported.
+	got, ok := applyFilter(users, `userName eq "alice" and active eq true`)
+	if ok || len(got) > 0 {
+		t.Errorf("unsupported compound filter: expected empty+ok=false, got ok=%v len=%d", ok, len(got))
+	}
+	// Unknown attribute unsupported.
+	got2, ok2 := applyFilter(users, `displayName eq "Alice"`)
+	if ok2 || len(got2) > 0 {
+		t.Errorf("unknown attr filter: expected empty+ok=false, got ok=%v len=%d", ok2, len(got2))
+	}
 }

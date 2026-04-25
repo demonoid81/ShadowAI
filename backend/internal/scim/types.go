@@ -15,17 +15,33 @@ const (
 )
 
 // User is the SCIM 2.0 User resource (RFC 7643 §4.1).
+//
+// Active is *bool to distinguish "not provided" (nil) from "explicitly false".
+// SCIM clients may omit the field:
+//   - nil on create → default true (users are active by default)
+//   - nil on full replace (PUT) → default true (same)
+//   - nil on partial update (PATCH) → no change
+//
+// Explicitly false means deactivate.
 type User struct {
 	Schemas    []string    `json:"schemas"`
 	ID         string      `json:"id,omitempty"`
 	ExternalID string      `json:"externalId,omitempty"`
 	UserName   string      `json:"userName"`
-	Active     bool        `json:"active"`
+	Active     *bool       `json:"active,omitempty"`
 	Emails     []Email     `json:"emails,omitempty"`
 	Roles      []RoleValue `json:"roles,omitempty"`
 	// Enterprise extension for department.
 	EnterpriseUser *EnterpriseUser `json:"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User,omitempty"`
 	Meta           *Meta           `json:"meta,omitempty"`
+}
+
+// boolVal dereferences Active with a fallback default.
+func boolVal(b *bool, def bool) bool {
+	if b == nil {
+		return def
+	}
+	return *b
 }
 
 type Email struct {

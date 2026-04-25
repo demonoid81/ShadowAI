@@ -37,6 +37,12 @@ func ParseSyncConfig(defaultRole, roleMapJSON, deptAttr string, linkByEmail bool
 		if err := json.Unmarshal([]byte(roleMapJSON), &roleMap); err != nil {
 			return nil, fmt.Errorf("scim: invalid SCIM_ROLE_MAP_JSON: %w", err)
 		}
+		// Validate all target roles eagerly — a typo in env should fail startup.
+		for scimGroup, targetRole := range roleMap {
+			if _, err := auth.NormalizeRole(targetRole); err != nil {
+				return nil, fmt.Errorf("scim: SCIM_ROLE_MAP_JSON value %q for key %q is not a valid ShadowAI role", targetRole, scimGroup)
+			}
+		}
 	}
 	return &SyncConfig{
 		DefaultRole:         defaultRole,
@@ -122,6 +128,17 @@ func (s *UserSyncer) Provision(ctx context.Context, scimUser User) (SyncResult, 
 			return SyncResult{}, err
 		}
 		if byEmail != nil {
+			// Identity conflict: email matches but the existing user is already
+			// linked to a DIFFERENT SCIM external ID. Silently updating would
+			// merge two separate IdP identities into one account — reject.
+			if byEmail.SCIMExternalID != nil && *byEmail.SCIMExternalID != "" &&
+				scimUser.ExternalID != "" && *byEmail.SCIMExternalID != scimUser.ExternalID {
+				return SyncResult{}, &SCIMError{
+					Status:   409,
+					Detail:   fmt.Sprintf("email %q is already linked to a different SCIM identity (externalId conflict)", email),
+					ScimType: "uniqueness",
+				}
+			}
 			action := "linked"
 			if byEmail.SCIMExternalID == nil && scimUser.ExternalID != "" {
 				extID := scimUser.ExternalID
@@ -145,7 +162,7 @@ func (s *UserSyncer) Provision(ctx context.Context, scimUser User) (SyncResult, 
 		ID:       uuid.NewString(),
 		Email:    email,
 		Role:     role,
-		IsActive: scimUser.Active,
+		IsActive: boolVal(scimUser.Active, true), // default true for new users
 	}
 	if dept != "" {
 		u.Department = &dept
@@ -219,7 +236,8 @@ func (s *UserSyncer) ApplyPatch(ctx context.Context, userID string, req PatchReq
 func (s *UserSyncer) updateExisting(ctx context.Context, u *domain.User, scimUser User, email string) (SyncResult, error) {
 	wasActive := u.IsActive
 	u.Email = email
-	u.IsActive = scimUser.Active
+	// PUT is a full replace: Active nil defaults to true; Active=false = deactivate.
+	u.IsActive = boolVal(scimUser.Active, true)
 	if len(scimUser.Roles) > 0 {
 		u.Role = s.cfg.mapRole(scimUser.Roles)
 	}
