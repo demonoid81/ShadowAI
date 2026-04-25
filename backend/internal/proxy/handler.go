@@ -455,9 +455,17 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6b. PR-G4: Org-level aggregate budget check (enforce mode blocks).
+	// 6b. PR-G4: Org-level aggregate budget check (atomic reserve via advisory lock).
+	// orgBudgetReserved stores the amount atomically added to usage by CheckBefore.
+	// All post-call paths MUST call orgBudgetAdjust(actual) to finalize or refund.
+	var orgBudgetReserved int64
+	orgBudgetAdjust := func(actualCents int64) {
+		if h.orgBudget != nil && orgBudgetReserved > 0 {
+			_ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, actualCents)
+		}
+	}
 	if h.orgBudget != nil {
-		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002) // rough estimate
+		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002)
 		if dec, _ := h.orgBudget.CheckBefore(r.Context(), claims.OrgID, estimatedCents); !dec.Allowed {
 			h.auditLog(r.Context(), &domain.AuditLog{
 				ID: uuid.New().String(), UserID: claims.UserID,
@@ -469,6 +477,8 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			metrics.RecordBudgetBlock(false)
 			http.Error(w, `{"error":"org budget exceeded"}`, http.StatusPaymentRequired)
 			return
+		} else {
+			orgBudgetReserved = dec.ReservedCents
 		}
 	}
 
@@ -537,7 +547,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			cost := streamUsage.CostUSD
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
+				orgBudgetAdjust(costUSDToCents(cost))
 			}
 			// PR-F7.3: structured audit fields (RFC §11).
 			//   policy_action — policy/security verdict (block over
@@ -703,7 +713,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
+				orgBudgetAdjust(costUSDToCents(cost))
 			}
 		}
 
@@ -817,7 +827,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 	recordUsage := func() {
 		if cost > 0 {
 			_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
+				orgBudgetAdjust(costUSDToCents(cost))
 		}
 	}
 
@@ -1542,7 +1552,13 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6b. PR-G4: Org-level aggregate budget check.
+	// 6b. PR-G4: Org-level aggregate budget check (atomic reserve).
+	var orgBudgetReserved2 int64
+	orgBudgetAdjust2 := func(actualCents int64) {
+		if h.orgBudget != nil && orgBudgetReserved2 > 0 {
+			_ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, actualCents)
+		}
+	}
 	if h.orgBudget != nil {
 		estimatedCents := costUSDToCents(float64(estimatedTotalTokens) * 0.000002)
 		if dec, _ := h.orgBudget.CheckBefore(r.Context(), claims.OrgID, estimatedCents); !dec.Allowed {
@@ -1555,6 +1571,8 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			metrics.RecordBudgetBlock(false)
 			http.Error(w, `{"error":"org budget exceeded"}`, http.StatusPaymentRequired)
 			return
+		} else {
+			orgBudgetReserved2 = dec.ReservedCents
 		}
 	}
 
@@ -1702,7 +1720,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				cost := streamUsage.CostUSD
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
+				orgBudgetAdjust2(costUSDToCents(cost))
 				}
 				// PR-F7.3: structured audit fields — симметрично
 				// ProxyChat incremental ветке.
@@ -1840,7 +1858,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			recordStreamUsage := func() {
 				if cost > 0 {
 					_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
+				orgBudgetAdjust2(costUSDToCents(cost))
 				}
 			}
 			allowedAfter, err := h.budgetSvc.CheckBudgetAfterUsage(r.Context(), claims.UserID, totalTokens, cost)
@@ -1913,7 +1931,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 		recordUsage := func() {
 			if cost > 0 {
 				_ = h.budgetSvc.RecordUsage(r.Context(), claims.UserID, cost, totalTokens)
-				if h.orgBudget != nil { _ = h.orgBudget.RecordActual(r.Context(), claims.OrgID, costUSDToCents(cost)) }
+				orgBudgetAdjust2(costUSDToCents(cost))
 			}
 		}
 

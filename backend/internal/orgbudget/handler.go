@@ -45,6 +45,15 @@ func (h *Handler) PutBudget(w http.ResponseWriter, r *http.Request) {
 	orgID := mux.Vars(r)["org_id"]
 	claims := auth.GetClaims(r.Context())
 
+	// Verify org exists before attempting upsert — FK error would return 500 otherwise.
+	if exists, err := h.svc.OrgExists(r.Context(), orgID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errResp{"internal"})
+		return
+	} else if !exists {
+		writeJSON(w, http.StatusNotFound, errResp{"org not found"})
+		return
+	}
+
 	var req struct {
 		MonthlyLimitCents int64  `json:"monthly_limit_cents"`
 		Mode              string `json:"mode"`

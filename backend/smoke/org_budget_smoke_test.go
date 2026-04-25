@@ -109,10 +109,11 @@ func TestSmoke_OrgBudget_TwoOrgs(t *testing.T) {
 		t.Fatalf("RecordActual orgB: %v", err)
 	}
 	statusAAfter, _ := svc.GetStatus(ctx, smokeBudgetOrgA)
-	if statusAAfter.Usage.SpentCents != 450 {
-		t.Errorf("org A spent after org B record = %d, want 450", statusAAfter.Usage.SpentCents)
+	// After AtomicCheckAndAdd reserved 10 cents (second CheckBefore), usage = 450+10 = 460.
+	if statusAAfter.Usage.SpentCents != 460 {
+		t.Errorf("org A spent after org B record = %d, want 460 (450 initial + 10 reserved by CheckBefore)", statusAAfter.Usage.SpentCents)
 	}
-	t.Logf("smoke/org-budget: org A spent still %d after org B record ✓", statusAAfter.Usage.SpentCents)
+	t.Logf("smoke/org-budget: org A spent %d after org B record (reservation visible in usage) ✓", statusAAfter.Usage.SpentCents)
 
 	// Verify period rollover: new month = zero usage.
 	lastMonth := time.Now().UTC().AddDate(0, -1, 0)

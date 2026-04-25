@@ -24,6 +24,11 @@ type Repo interface {
 	UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy) error
 	GetCurrentUsage(ctx context.Context, orgID string) (*domain.OrgBudgetUsage, error)
 	AddSpend(ctx context.Context, orgID string, deltaCents int64) error
+	// AtomicCheckAndAdd serializes concurrent budget checks for this org via advisory lock.
+	// Returns (spentAfter, allowed, err). When allowed=true the estimatedCents is added to usage.
+	AtomicCheckAndAdd(ctx context.Context, orgID string, estimatedCents, limitCents int64, enforce bool) (int64, bool, error)
+	// OrgExists returns true when the organizations table has a row with this id.
+	OrgExists(ctx context.Context, orgID string) (bool, error)
 }
 
 // Service implements proxy.OrgBudgetChecker and provides the full budget management API.
@@ -63,6 +68,11 @@ func (s *Service) GetStatus(ctx context.Context, orgID string) (*domain.OrgBudge
 	}, nil
 }
 
+// OrgExists delegates to the repo for the org existence pre-check in handler.
+func (s *Service) OrgExists(ctx context.Context, orgID string) (bool, error) {
+	return s.repo.OrgExists(ctx, orgID)
+}
+
 // UpsertPolicy saves a new or updated org budget policy.
 func (s *Service) UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy, actorUserID string) error {
 	p.UpdatedBy = &actorUserID
@@ -70,15 +80,22 @@ func (s *Service) UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy, a
 		return err
 	}
 	if s.adminAudit != nil {
+		var actorPtr *string
+		if actorUserID != "" {
+			actorPtr = &actorUserID
+		}
 		s.adminAudit.Record(ctx, adminaudit.Event{
-			OrgID:      p.OrgID,
-			Action:     "upsert",
-			Resource:   "org_budget_policy",
-			TargetID:   p.OrgID,
-			Path:       "api",
-			Method:     "PUT",
-			StatusCode: 200,
-			Success:    true,
+			ActorUserID: actorPtr,
+			OrgID:       p.OrgID,
+			SourceOrgID: p.OrgID, // actor operates within the same org (or global_admin)
+			TargetOrgID: p.OrgID,
+			Action:      "upsert",
+			Resource:    "org_budget_policy",
+			TargetID:    p.OrgID,
+			Path:        "api",
+			Method:      "PUT",
+			StatusCode:  200,
+			Success:     true,
 			Metadata: map[string]any{
 				"monthly_limit_cents": p.MonthlyLimitCents,
 				"mode":                string(p.Mode),
@@ -88,8 +105,14 @@ func (s *Service) UpsertPolicy(ctx context.Context, p *domain.OrgBudgetPolicy, a
 	return nil
 }
 
-// CheckBefore checks org budget before a provider call.
-// Returns domain.OrgBudgetDecision (core-compatible with proxy.OrgBudgetChecker).
+// CheckBefore atomically checks the org cap and — if allowed — reserves the
+// estimated spend via a PostgreSQL advisory lock. Concurrent requests for the
+// same org are serialized so the cap can never be exceeded by racing calls.
+//
+// Decision.ReservedCents contains the amount added to DB usage. Callers MUST
+// call Adjust(orgID, dec.ReservedCents, actualCents) after the provider call:
+//   - On success:  Adjust(orgID, reserved, actual) adjusts to real cost.
+//   - On failure:  Adjust(orgID, reserved, 0) refunds the full reservation.
 func (s *Service) CheckBefore(ctx context.Context, orgID string, estimatedCents int64) (domain.OrgBudgetDecision, error) {
 	if orgID == "" {
 		return domain.OrgBudgetDecision{Allowed: true, Mode: domain.OrgBudgetDisabled}, nil
@@ -104,51 +127,81 @@ func (s *Service) CheckBefore(ctx context.Context, orgID string, estimatedCents 
 		return domain.OrgBudgetDecision{Allowed: true, Mode: domain.OrgBudgetDisabled, OrgID: orgID}, nil
 	}
 
-	usage, err := s.repo.GetCurrentUsage(ctx, orgID)
-	if err != nil {
-		log.Printf("orgbudget: GetCurrentUsage err (fail-open): %v", err)
-		return domain.OrgBudgetDecision{Allowed: true, Mode: policy.Mode, OrgID: orgID}, nil
-	}
+	enforce := policy.Mode == domain.OrgBudgetEnforce
 
-	projected := usage.SpentCents + estimatedCents
-	remaining := int64(math.MaxInt64)
-	if policy.MonthlyLimitCents > 0 {
-		remaining = policy.MonthlyLimitCents - projected
-	}
-
-	// observe always allows; enforce blocks when cap is reached.
 	if policy.Mode == domain.OrgBudgetObserve {
+		// Observe mode: read-only check (no reservation needed — never blocks).
+		usage, err := s.repo.GetCurrentUsage(ctx, orgID)
+		if err != nil {
+			log.Printf("orgbudget: GetCurrentUsage err (fail-open, observe): %v", err)
+			return domain.OrgBudgetDecision{Allowed: true, Mode: policy.Mode, OrgID: orgID}, nil
+		}
+		projected := usage.SpentCents + estimatedCents
+		remaining := int64(math.MaxInt64)
+		if policy.MonthlyLimitCents > 0 {
+			remaining = policy.MonthlyLimitCents - projected
+		}
 		if policy.MonthlyLimitCents > 0 && projected >= policy.MonthlyLimitCents {
 			metricDecision.WithLabelValues("soft_exceeded", string(policy.Mode)).Inc()
 			s.recordBudgetEvent(ctx, orgID, "org_budget_exceeded_observe", usage.SpentCents, policy.MonthlyLimitCents)
 		} else {
 			metricDecision.WithLabelValues("allowed", string(policy.Mode)).Inc()
 		}
+		// ReservedCents=0 for observe: proxy calls RecordActual directly after provider call.
 		return domain.OrgBudgetDecision{Allowed: true, Mode: policy.Mode, Remaining: remaining, OrgID: orgID}, nil
 	}
 
-	// enforce
-	if policy.MonthlyLimitCents > 0 && projected >= policy.MonthlyLimitCents {
+	// Enforce mode: AtomicCheckAndAdd serializes concurrent checks and reserves estimatedCents.
+	spentAfter, allowed, err := s.repo.AtomicCheckAndAdd(ctx, orgID, estimatedCents, policy.MonthlyLimitCents, enforce)
+	if err != nil {
+		// Fix (Medium): usage read/lock failure in enforce mode → fail-closed.
+		metricDecision.WithLabelValues("error_blocked", string(policy.Mode)).Inc()
+		s.recordBudgetEvent(ctx, orgID, "org_budget_enforce_read_failure", 0, policy.MonthlyLimitCents)
+		return domain.OrgBudgetDecision{Allowed: false, Mode: policy.Mode, OrgID: orgID}, nil
+	}
+
+	remaining := int64(math.MaxInt64)
+	if policy.MonthlyLimitCents > 0 {
+		remaining = policy.MonthlyLimitCents - spentAfter
+	}
+
+	if !allowed {
 		metricDecision.WithLabelValues("blocked", string(policy.Mode)).Inc()
-		s.recordBudgetEvent(ctx, orgID, "org_budget_blocked", usage.SpentCents, policy.MonthlyLimitCents)
+		s.recordBudgetEvent(ctx, orgID, "org_budget_blocked", spentAfter, policy.MonthlyLimitCents)
 		return domain.OrgBudgetDecision{Allowed: false, Mode: policy.Mode, Remaining: remaining, OrgID: orgID}, nil
 	}
 
 	metricDecision.WithLabelValues("allowed", string(policy.Mode)).Inc()
-	return domain.OrgBudgetDecision{Allowed: true, Mode: policy.Mode, Remaining: remaining, OrgID: orgID}, nil
+	return domain.OrgBudgetDecision{
+		Allowed: true, Mode: policy.Mode, Remaining: remaining,
+		OrgID: orgID, ReservedCents: estimatedCents, // reserved in DB; caller must Adjust after call
+	}, nil
 }
 
-// RecordActual adds actual post-call spend.
-func (s *Service) RecordActual(ctx context.Context, orgID string, actualCents int64) error {
-	if orgID == "" || actualCents <= 0 {
+// Adjust finalizes or refunds a reservation made by CheckBefore.
+// It adds (actualCents - reservedCents) to org_budget_usage atomically.
+// Call with actualCents=0 to fully refund a reservation (provider call failed).
+func (s *Service) Adjust(ctx context.Context, orgID string, reservedCents, actualCents int64) error {
+	delta := actualCents - reservedCents
+	if delta == 0 || orgID == "" {
+		if actualCents > 0 {
+			metricSpentCents.Add(float64(actualCents))
+		}
 		return nil
 	}
-	if err := s.repo.AddSpend(ctx, orgID, actualCents); err != nil {
-		log.Printf("orgbudget: AddSpend err: %v", err)
-		return fmt.Errorf("orgbudget record actual: %w", err)
+	if err := s.repo.AddSpend(ctx, orgID, delta); err != nil {
+		log.Printf("orgbudget: Adjust err: %v", err)
+		return fmt.Errorf("orgbudget adjust: %w", err)
 	}
-	metricSpentCents.Add(float64(actualCents))
+	if actualCents > 0 {
+		metricSpentCents.Add(float64(actualCents))
+	}
 	return nil
+}
+
+// RecordActual is kept for backward compat but delegates to Adjust(0, actualCents).
+func (s *Service) RecordActual(ctx context.Context, orgID string, actualCents int64) error {
+	return s.Adjust(ctx, orgID, 0, actualCents)
 }
 
 func (s *Service) recordBudgetEvent(ctx context.Context, orgID, action string, spent, limit int64) {

@@ -93,6 +93,65 @@ func (r *Repository) AddSpend(ctx context.Context, orgID string, deltaCents int6
 	return err
 }
 
+// OrgExists returns true when the organizations table has a row with this id.
+func (r *Repository) OrgExists(ctx context.Context, orgID string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM organizations WHERE id = $1)`, orgID).Scan(&exists)
+	return exists, err
+}
+
+// AtomicCheckAndAdd serializes concurrent budget checks for the same org via
+// a session-level PostgreSQL advisory lock (hashtext of orgID). In a single
+// transaction it:
+//   1. Acquires the advisory lock for this org.
+//   2. Reads the current usage for the current period.
+//   3. Evaluates the cap (limitCents=0 = unlimited; enforce=false = observe/allow).
+//   4. If allowed: UPSERTs usage += estimatedCents and returns (spentAfter, true, nil).
+//   5. If blocked: returns (currentSpent, false, nil) without modifying usage.
+//
+// Callers must call AddSpend(orgID, actualCents-estimatedCents) afterwards to
+// adjust the reservation to the real cost (negative delta refunds the unused reserve).
+func (r *Repository) AtomicCheckAndAdd(ctx context.Context, orgID string, estimatedCents, limitCents int64, enforce bool) (spentAfter int64, allowed bool, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("orgbudget: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Advisory lock serializes concurrent CheckBefore calls for this org.
+	// hashtext() maps the UUID string to int32 safely.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(abs(hashtext($1)))`, orgID); err != nil {
+		return 0, false, fmt.Errorf("orgbudget: advisory lock: %w", err)
+	}
+
+	period := currentPeriod()
+	var currentSpent int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(spent_cents, 0) FROM org_budget_usage
+		 WHERE org_id = $1 AND period_start = $2`, orgID, period).Scan(&currentSpent)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("orgbudget: read usage: %w", err)
+	}
+	// sql.ErrNoRows means no usage yet this month → currentSpent = 0 (already set).
+
+	projected := currentSpent + estimatedCents
+	if enforce && limitCents > 0 && projected >= limitCents {
+		return currentSpent, false, tx.Commit()
+	}
+
+	// Reserve estimated spend.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO org_budget_usage (org_id, period_start, spent_cents)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (org_id, period_start)
+		 DO UPDATE SET spent_cents = org_budget_usage.spent_cents + EXCLUDED.spent_cents`,
+		orgID, period, estimatedCents); err != nil {
+		return 0, false, fmt.Errorf("orgbudget: reserve: %w", err)
+	}
+	return projected, true, tx.Commit()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -34,11 +34,14 @@ type OrgBudgetStatus struct {
 	Remaining int64           `json:"remaining_cents"` // negative = over cap
 }
 
-// OrgBudgetDecision is the result of a pre-call org budget check.
+// OrgBudgetDecision is the result of an atomic pre-call org budget check.
 // Defined in domain so both proxy (core) and orgbudget (enterprise) share the type.
 type OrgBudgetDecision struct {
-	Allowed   bool
-	Mode      OrgBudgetPolicyMode
-	Remaining int64  // remaining cents (negative = over cap)
-	OrgID     string
+	Allowed       bool
+	Mode          OrgBudgetPolicyMode
+	Remaining     int64  // remaining cents after reservation (negative = over cap)
+	OrgID         string
+	// ReservedCents is the amount atomically added to org_budget_usage by AtomicCheckAndAdd.
+	// Pass to Adjust() after the provider call to finalize (or refund if actual=0).
+	ReservedCents int64
 }

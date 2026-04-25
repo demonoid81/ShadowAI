@@ -35,6 +35,23 @@ func (m *memRepo) GetCurrentUsage(_ context.Context, orgID string) (*domain.OrgB
 	return &domain.OrgBudgetUsage{OrgID: orgID}, nil
 }
 func (m *memRepo) AddSpend(_ context.Context, _ string, _ int64) error { return m.addErr }
+func (m *memRepo) OrgExists(_ context.Context, _ string) (bool, error) { return true, nil }
+func (m *memRepo) AtomicCheckAndAdd(_ context.Context, orgID string, estimatedCents, limitCents int64, enforce bool) (int64, bool, error) {
+	current := int64(0)
+	if m.usage != nil {
+		current = m.usage.SpentCents
+	}
+	projected := current + estimatedCents
+	if enforce && limitCents > 0 && projected >= limitCents {
+		return current, false, nil
+	}
+	// Simulate reserve: update in-memory usage.
+	if m.usage == nil {
+		m.usage = &domain.OrgBudgetUsage{OrgID: orgID}
+	}
+	m.usage.SpentCents = projected
+	return projected, true, nil
+}
 
 func newSvc(r *memRepo) *Service {
 	return NewService(r, nil)
@@ -158,3 +175,7 @@ func (e *errRepo) GetCurrentUsage(_ context.Context, orgID string) (*domain.OrgB
 	return nil, sql.ErrNoRows
 }
 func (e *errRepo) AddSpend(_ context.Context, _ string, _ int64) error { return nil }
+func (e *errRepo) OrgExists(_ context.Context, _ string) (bool, error)  { return true, nil }
+func (e *errRepo) AtomicCheckAndAdd(_ context.Context, _ string, _, _ int64, _ bool) (int64, bool, error) {
+	return 0, false, errors.New("db error")
+}
