@@ -219,10 +219,14 @@ func TestOrgBudget_Adjust_NoOpOnEmptyOrg(t *testing.T) {
 	}
 }
 
-// TestOrgBudget_Disabled_NoAccounting verifies that disabled mode returns
-// Mode=disabled and ReservedCents=0 so the proxy skips finalization entirely.
-// This ensures "disabled = fully off" — no accounting, no blocking.
-func TestOrgBudget_Disabled_NoAccountingFlag(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Tests: mode semantics — disabled / observe / enforce
+// ---------------------------------------------------------------------------
+
+// TestOrgBudget_Disabled_AllowsNoReservation: disabled never blocks and does
+// not reserve (ReservedCents=0). Actual spend IS still collected via
+// Adjust(0, actual) — safe rollout baseline collection.
+func TestOrgBudget_Disabled_AllowsNoReservation(t *testing.T) {
 	svc := newSvc(&memRepo{policy: nil}) // nil policy = disabled
 	dec, err := svc.CheckBefore(context.Background(), "org-1", 5000)
 	if err != nil || !dec.Allowed {
@@ -233,6 +237,75 @@ func TestOrgBudget_Disabled_NoAccountingFlag(t *testing.T) {
 	}
 	if dec.ReservedCents != 0 {
 		t.Errorf("disabled should not reserve: ReservedCents=%d, want 0", dec.ReservedCents)
+	}
+}
+
+// TestOrgBudget_Disabled_ActualSpendRecorded: Adjust(0, actual) writes spend
+// for disabled mode — enables operators to collect baseline before enforcing.
+func TestOrgBudget_Disabled_ActualSpendRecorded(t *testing.T) {
+	repo := &memRepo{
+		policy: &domain.OrgBudgetPolicy{OrgID: "org-1", Mode: domain.OrgBudgetDisabled},
+		usage:  &domain.OrgBudgetUsage{OrgID: "org-1", SpentCents: 0},
+	}
+	svc := newSvc(repo)
+	dec, _ := svc.CheckBefore(context.Background(), "org-1", 100)
+	if !dec.Allowed || dec.ReservedCents != 0 {
+		t.Fatalf("disabled pre-check: %+v", dec)
+	}
+	// Proxy calls Adjust(0, actual) after successful provider response.
+	if err := svc.Adjust(context.Background(), "org-1", dec.ReservedCents, 80); err != nil {
+		t.Fatalf("Adjust disabled: %v", err)
+	}
+	if repo.usage.SpentCents != 80 {
+		t.Errorf("disabled: actual spend=%d, want 80", repo.usage.SpentCents)
+	}
+}
+
+// TestOrgBudget_Observe_RecordsSpend: observe never blocks; Adjust(0, actual)
+// writes actual spend (same mechanism as disabled, but emits soft-exceeded signal).
+func TestOrgBudget_Observe_RecordsSpend(t *testing.T) {
+	repo := &memRepo{
+		policy: &domain.OrgBudgetPolicy{OrgID: "org-1", Mode: domain.OrgBudgetObserve, MonthlyLimitCents: 100},
+		usage:  &domain.OrgBudgetUsage{OrgID: "org-1", SpentCents: 0},
+	}
+	svc := newSvc(repo)
+	dec, _ := svc.CheckBefore(context.Background(), "org-1", 200) // over cap but observe
+	if !dec.Allowed || dec.ReservedCents != 0 {
+		t.Fatalf("observe: should be allowed and no reservation: %+v", dec)
+	}
+	if err := svc.Adjust(context.Background(), "org-1", 0, 150); err != nil {
+		t.Fatalf("Adjust observe: %v", err)
+	}
+	if repo.usage.SpentCents != 150 {
+		t.Errorf("observe: actual spend=%d, want 150", repo.usage.SpentCents)
+	}
+}
+
+// TestOrgBudget_Enforce_FinalizeAndRefund: full enforce contract.
+func TestOrgBudget_Enforce_FinalizeAndRefund(t *testing.T) {
+	repo := &memRepo{
+		policy: &domain.OrgBudgetPolicy{OrgID: "org-1", Mode: domain.OrgBudgetEnforce, MonthlyLimitCents: 1000},
+		usage:  &domain.OrgBudgetUsage{OrgID: "org-1", SpentCents: 0},
+	}
+	svc := newSvc(repo)
+
+	dec, _ := svc.CheckBefore(context.Background(), "org-1", 200)
+	if !dec.Allowed || dec.ReservedCents != 200 {
+		t.Fatalf("enforce: want reserved=200, got %+v", dec)
+	}
+	if repo.usage.SpentCents != 200 {
+		t.Errorf("post-CheckBefore usage=%d, want 200 (reserved)", repo.usage.SpentCents)
+	}
+	// Provider succeeds: finalize actual=150 → delta=-50 → usage=150.
+	svc.Adjust(context.Background(), "org-1", dec.ReservedCents, 150)
+	if repo.usage.SpentCents != 150 {
+		t.Errorf("post-finalize usage=%d, want 150", repo.usage.SpentCents)
+	}
+	// Second request: reserve 200 again, then provider fails → refund → usage=150.
+	dec2, _ := svc.CheckBefore(context.Background(), "org-1", 200)
+	svc.Adjust(context.Background(), "org-1", dec2.ReservedCents, 0)
+	if repo.usage.SpentCents != 150 {
+		t.Errorf("post-refund usage=%d, want 150", repo.usage.SpentCents)
 	}
 }
 

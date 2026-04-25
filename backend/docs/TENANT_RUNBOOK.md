@@ -189,7 +189,61 @@ filtering, admin event filtering, tenant purge + export.
 
 ---
 
-## 9. T2.x Roadmap Status (2026-04-25)
+---
+
+## 9. Org-Level Budget Caps (G4)
+
+Each org can have a monthly spend cap configured via the API.
+
+### Mode semantics
+
+| Mode | Blocks requests? | Records actual spend? | Use case |
+|------|-----------------|-----------------------|----------|
+| `disabled` | ✗ | ✓ | Safe rollout: collect baseline data without risk |
+| `observe` | ✗ | ✓ + soft-exceeded event | Visibility: alert on over-cap without enforcing |
+| `enforce` | ✓ at cap | ✓ | Hard enforcement: block when projected spend ≥ cap |
+
+**Rollout path:** `disabled → observe → enforce`
+
+1. Start with `disabled` to collect baseline spend data for 1–2 billing cycles.
+2. Switch to `observe` to see soft-exceeded alerts without blocking production traffic.
+3. Switch to `enforce` once you have confidence in the limit value.
+
+### Set org budget via API
+
+```bash
+# Step 1: collect baseline (no blocking)
+curl -X PUT "$API_URL/api/orgs/$ORG_ID/budget" \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  -d '{"mode":"disabled","monthly_limit_cents":500000}'
+
+# Step 2: observe mode (soft alerts only)
+curl -X PUT "$API_URL/api/orgs/$ORG_ID/budget" \
+  -d '{"mode":"observe","monthly_limit_cents":500000}'
+
+# Step 3: enforce hard cap
+curl -X PUT "$API_URL/api/orgs/$ORG_ID/budget" \
+  -d '{"mode":"enforce","monthly_limit_cents":500000}'
+```
+
+`monthly_limit_cents = 0` means unlimited (cap disabled regardless of mode).
+
+### Prometheus spend baseline
+
+```promql
+# Total spend across all orgs (all modes)
+rate(shadowai_org_budget_spent_cents_total[30d])
+
+# Budget decisions by outcome
+sum by (decision, mode) (shadowai_org_budget_decisions_total)
+
+# Soft-exceeded events (observe mode over cap)
+increase(shadowai_org_budget_decisions_total{decision="soft_exceeded"}[1d])
+```
+
+---
+
+## 10. Roadmap Status (2026-04-26)
 
 | PR | Component | Status |
 |----|-----------|--------|
@@ -198,8 +252,10 @@ filtering, admin event filtering, tenant purge + export.
 | T2.3 Repo Filters | users/audit/governance/internaldb/SCIM org filters | ✅ Complete |
 | T2.4 CLI Tenant | audit-purge --org-id, audit-export --org-id, canonical v2 | ✅ Complete |
 | T2.5 E2E Smoke | 6-scenario tenant isolation smoke suite | ✅ Complete |
+| T2.6 Control Plane | global_admin org/SCIM management API | ✅ Complete |
+| G4 Org Budget | disabled/observe/enforce + atomic reserve | ✅ Complete |
 
-**Deferred (next PRs):**
+**Next:**
 - T3/W6: Merkle subset proof (no cross-tenant hashes in tenant bundle)
-- G4: org-level aggregate budget caps
+- G4.3: Budget alerts + webhook notifications
 - T2.6: global_admin role enforcement + cross-org admin UI

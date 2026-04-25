@@ -120,3 +120,60 @@ func TestSmoke_OrgBudget_TwoOrgs(t *testing.T) {
 	_ = lastMonth // The test just verifies current month; rollover happens at period_start boundary.
 	t.Logf("smoke/org-budget: all assertions passed")
 }
+
+// TestSmoke_OrgBudget_Disabled verifies that disabled mode:
+//   - never blocks requests
+//   - actual spend IS recorded (operator collects baseline before enforcing)
+func TestSmoke_OrgBudget_Disabled(t *testing.T) {
+	infra := startInfra(t)
+	defer infra.teardown()
+
+	ctx := context.Background()
+	db := infra.DB
+
+	orgID := "cc000003-0000-4000-8000-000000000001"
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+		orgID, "Disabled Org", "disabled-org"); err != nil {
+		t.Fatalf("seed org: %v", err)
+	}
+
+	repo := orgbudget.NewRepository(db)
+	svc := orgbudget.NewService(repo, nil)
+
+	// Set disabled policy with a notional cap (should be irrelevant for blocking).
+	if err := svc.UpsertPolicy(ctx, &domain.OrgBudgetPolicy{
+		OrgID:             orgID,
+		Mode:              domain.OrgBudgetDisabled,
+		MonthlyLimitCents: 1000,
+	}, "", ""); err != nil {
+		t.Fatalf("UpsertPolicy disabled: %v", err)
+	}
+
+	// 1. CheckBefore should always allow — even with huge estimated spend.
+	dec, err := svc.CheckBefore(ctx, orgID, 999999)
+	if err != nil || !dec.Allowed {
+		t.Fatalf("disabled: should allow, got %+v err=%v", dec, err)
+	}
+	if dec.ReservedCents != 0 {
+		t.Errorf("disabled should not reserve, got ReservedCents=%d", dec.ReservedCents)
+	}
+	t.Logf("smoke/org-budget-disabled: CheckBefore allowed (mode=%s reserved=%d)", dec.Mode, dec.ReservedCents)
+
+	// 2. Simulate successful provider call: Adjust(0, actual) records spend.
+	if err := svc.Adjust(ctx, orgID, dec.ReservedCents, 250); err != nil {
+		t.Fatalf("Adjust disabled: %v", err)
+	}
+	status, _ := svc.GetStatus(ctx, orgID)
+	if status.Usage.SpentCents != 250 {
+		t.Errorf("disabled: actual spend=%d, want 250 (accounting on for rollout baseline)", status.Usage.SpentCents)
+	}
+	t.Logf("smoke/org-budget-disabled: actual spend recorded=%d ✓ (rollout baseline collection works)", status.Usage.SpentCents)
+
+	// 3. Even at 10× the cap, still no block.
+	dec2, _ := svc.CheckBefore(ctx, orgID, 10000)
+	if !dec2.Allowed {
+		t.Error("disabled: should never block regardless of spend")
+	}
+	t.Logf("smoke/org-budget-disabled: still no block at 10x cap ✓")
+}
