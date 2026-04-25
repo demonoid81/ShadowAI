@@ -494,7 +494,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			orgBudgetReserved = dec.ReservedCents
-			orgBudgetActive = true // observe: reserved=0 but Adjust(0,actual) writes spend
+			orgBudgetActive = dec.Mode != domain.OrgBudgetDisabled // disabled=fully off (no accounting); observe+enforce activate finalization
 		}
 	}
 
@@ -1597,7 +1597,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			orgBudgetReserved2 = dec.ReservedCents
-			orgBudgetActive2 = true
+			orgBudgetActive2 = dec.Mode != domain.OrgBudgetDisabled
 		}
 	}
 

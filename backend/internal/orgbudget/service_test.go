@@ -219,6 +219,23 @@ func TestOrgBudget_Adjust_NoOpOnEmptyOrg(t *testing.T) {
 	}
 }
 
+// TestOrgBudget_Disabled_NoAccounting verifies that disabled mode returns
+// Mode=disabled and ReservedCents=0 so the proxy skips finalization entirely.
+// This ensures "disabled = fully off" — no accounting, no blocking.
+func TestOrgBudget_Disabled_NoAccountingFlag(t *testing.T) {
+	svc := newSvc(&memRepo{policy: nil}) // nil policy = disabled
+	dec, err := svc.CheckBefore(context.Background(), "org-1", 5000)
+	if err != nil || !dec.Allowed {
+		t.Fatalf("disabled: want Allowed=true, got %+v err=%v", dec, err)
+	}
+	if dec.Mode != domain.OrgBudgetDisabled {
+		t.Errorf("mode = %q, want disabled", dec.Mode)
+	}
+	if dec.ReservedCents != 0 {
+		t.Errorf("disabled should not reserve: ReservedCents=%d, want 0", dec.ReservedCents)
+	}
+}
+
 func TestOrgBudget_FailOpen_OnPolicyError(t *testing.T) {
 	// If GetPolicy returns an error, CheckBefore must allow (fail-open).
 	svc := &Service{repo: &errRepo{}, adminAudit: nil}
