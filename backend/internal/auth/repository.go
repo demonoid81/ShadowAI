@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/shadowai/backend/internal/domain"
 )
@@ -120,23 +121,45 @@ func (r *Repository) CountUsers(ctx context.Context) (int, error) {
 // SetTOTPSecret stores the encrypted TOTP secret, enables MFA, and bumps token_version.
 // Bumping token_version invalidates all existing JWT and API-key sessions, forcing the
 // user to re-authenticate with MFA from this point on.
+// Returns an error if no row was updated (e.g. caller's UserID doesn't exist in DB).
 func (r *Repository) SetTOTPSecret(ctx context.Context, userID, encryptedSecret string) error {
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE users
 		 SET totp_secret=$1, mfa_required=true,
 		     token_version = token_version + 1,
 		     updated_at=now()
 		 WHERE id=$2`,
 		encryptedSecret, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("set_totp: user %q not found", userID)
+	}
+	return nil
 }
 
 // ClearTOTPSecret removes the TOTP secret and disables MFA for the user.
+// Returns an error if no row was updated.
 func (r *Repository) ClearTOTPSecret(ctx context.Context, userID string) error {
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE users SET totp_secret=NULL, mfa_required=false, updated_at=now() WHERE id=$1`,
 		userID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("clear_totp: user %q not found", userID)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

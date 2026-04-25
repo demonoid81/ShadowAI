@@ -108,15 +108,30 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 
 		// PR-E1.1 Fix 3: ADMIN_MFA_REQUIRED enforces MFA for all admin sessions
 		// regardless of per-user mfa_required flag.
-		// Break-glass sessions are exempt (they're emergency access by definition).
+		// Break-glass sessions are exempt (emergency access by definition).
+		//
+		// Enrollment exception: if the admin hasn't enrolled yet (mfa_required=false),
+		// allow access to /auth/mfa/setup and /auth/mfa/confirm only, so they can
+		// enroll without being permanently locked out. All other routes are blocked
+		// until enrollment is complete.
 		if s.adminMFARequired && claims.Role == RoleAdmin && !claims.MFAVerified && !claims.BreakGlass {
-			mfaRequired()
-			return
+			if !isMFAEnrollmentPath(r.URL.Path) {
+				mfaRequired()
+				return
+			}
 		}
 
 		ctx := context.WithValue(r.Context(), claimsKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// isMFAEnrollmentPath returns true for the two MFA enrollment routes.
+// These are the only routes a non-enrolled admin can access when
+// ADMIN_MFA_REQUIRED=true and the admin hasn't completed MFA yet.
+func isMFAEnrollmentPath(path string) bool {
+	return strings.HasSuffix(path, "/auth/mfa/setup") ||
+		strings.HasSuffix(path, "/auth/mfa/confirm")
 }
 
 // ptrStr dereferences a nullable string pointer for use in Claims.

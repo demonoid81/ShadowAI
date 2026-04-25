@@ -3,16 +3,20 @@
 // Enterprise Component (see ENTERPRISE.md / LICENSE.enterprise).
 // PR-E1.1: TOTP-based MFA for admin accounts.
 //
-// Flow:
-//   1. Admin calls POST /api/auth/login → password correct, mfa_required=true
-//      Response: {"mfa_required":true, "mfa_token":"<short-lived-token>"}
-//   2. Admin calls POST /api/auth/mfa/verify {"mfa_token":"...", "code":"123456"}
+// Login flow (two-step):
+//   1. POST /api/auth/login — password correct, mfa_required=true
+//      Response: {"mfa_required":true, "mfa_token":"<5min-challenge-token>"}
+//   2. POST /api/auth/mfa/verify {"mfa_token":"...", "code":"123456"}
 //      Response: {"token":"<full-jwt>"} or 401
 //
-// Setup flow (authenticated admin):
-//   1. POST /api/auth/mfa/setup → {"uri":"otpauth://...", "secret":"..."}
-//   2. Admin scans QR code in authenticator app
-//   3. POST /api/auth/mfa/confirm {"code":"123456"} → 200 OK (MFA enabled)
+// Enrollment flow (authenticated admin, no break-glass):
+//   1. POST /api/auth/mfa/setup
+//      Response: {"uri":"otpauth://...", "setup_token":"<10min-pending-token>"}
+//      — secret is NOT saved to DB yet (prevents lockout if URI is lost)
+//   2. Admin scans URI in authenticator app, gets first code
+//   3. POST /api/auth/mfa/confirm {"setup_token":"...", "code":"123456"}
+//      — validates code against pending secret in setup_token
+//      — on success: saves secret to DB, enables mfa_required, bumps token_version
 package auth
 
 import (

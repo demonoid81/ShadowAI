@@ -119,6 +119,11 @@ func (h *MFAHandler) MFASetup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
+	// Break-glass sessions have no DB user; MFA management is not meaningful.
+	if claims.BreakGlass {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "mfa_setup_not_available_for_break_glass_sessions"})
+		return
+	}
 
 	issuer := h.cfg.MFATOTPIssuer
 	uri, _, encSecret, err := h.service.GenerateTOTPSecret(issuer, claims.Email)
@@ -153,6 +158,10 @@ func (h *MFAHandler) MFAConfirm(w http.ResponseWriter, r *http.Request) {
 	claims := GetClaims(r.Context())
 	if claims == nil {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.BreakGlass {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "mfa_setup_not_available_for_break_glass_sessions"})
 		return
 	}
 
@@ -208,6 +217,10 @@ func (h *MFAHandler) MFADisable(w http.ResponseWriter, r *http.Request) {
 	claims := GetClaims(r.Context())
 	if claims == nil {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.BreakGlass {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "mfa_management_not_available_for_break_glass_sessions"})
 		return
 	}
 	if err := h.service.GetRepo().ClearTOTPSecret(r.Context(), claims.UserID); err != nil {

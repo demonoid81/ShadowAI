@@ -163,6 +163,32 @@ func TestBreakGlass_TokenPassesRequireRole(t *testing.T) {
 	}
 }
 
+// TestIsMFAEnrollmentPath — enrollment exception path matching.
+// Ensures that only setup/confirm bypass adminMFARequired block.
+func TestIsMFAEnrollmentPath(t *testing.T) {
+	allowed := []string{
+		"/api/auth/mfa/setup",
+		"/api/auth/mfa/confirm",
+	}
+	blocked := []string{
+		"/api/users",
+		"/api/admin-events",
+		"/api/auth/mfa/verify",  // verify is a public route, not enrollment
+		"/api/auth/mfa",         // disable — not enrollment
+		"/api/governance/policy",
+	}
+	for _, p := range allowed {
+		if !isMFAEnrollmentPath(p) {
+			t.Errorf("isMFAEnrollmentPath(%q) = false, want true (enrollment exception)", p)
+		}
+	}
+	for _, p := range blocked {
+		if isMFAEnrollmentPath(p) {
+			t.Errorf("isMFAEnrollmentPath(%q) = true, want false (should be blocked)", p)
+		}
+	}
+}
+
 // TestBreakGlass_RateLimiter_ResetsAfterWindow.
 func TestBreakGlass_RateLimiter_ResetsAfterWindow(t *testing.T) {
 	rl := &BreakGlassRateLimiter{}
