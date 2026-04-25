@@ -26,12 +26,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -40,6 +42,7 @@ import (
 
 	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/governance"
+	"github.com/shadowai/backend/internal/health"
 )
 
 // ---------------------------------------------------------------------------
@@ -358,26 +361,58 @@ func TestSmoke_Governance_ContextScoped(t *testing.T) {
 // O3.1.D — Health probes
 // ---------------------------------------------------------------------------
 
-// TestSmoke_Health_Probes verifies the DB/Redis dependencies used by readiness.
+// TestSmoke_Health_Probes verifies the liveness and readiness probes against
+// real DB and Redis dependencies, mirroring the actual Kubernetes probe behavior.
 func TestSmoke_Health_Probes(t *testing.T) {
 	infra := startInfra(t)
 	defer infra.teardown()
 
 	ctx := context.Background()
 
-	// Liveness: DB accessible.
-	if err := infra.DB.PingContext(ctx); err != nil {
-		t.Fatalf("liveness/db: ping failed: %v", err)
+	// Build a real Redis client from the URL the infra stack provides.
+	redisOpts, err := redis.ParseURL(infra.RedisURL)
+	if err != nil {
+		t.Fatalf("redis.ParseURL: %v", err)
 	}
-	t.Logf("smoke/health: liveness probe (db ping) OK")
+	redisClient := redis.NewClient(redisOpts)
+	defer redisClient.Close()
 
-	// Readiness: DB has schema.
-	var tableCount int
-	_ = infra.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'`).
-		Scan(&tableCount)
-	if tableCount == 0 {
-		t.Error("readiness: no tables in public schema — migrations may have failed")
+	// Liveness handler — always returns 200.
+	livenessReq := httptest.NewRequest("GET", "/api/health", nil)
+	livenessRec := httptest.NewRecorder()
+	health.LivenessHandler(livenessRec, livenessReq)
+	if livenessRec.Code != 200 {
+		t.Errorf("liveness: expected 200, got %d", livenessRec.Code)
 	}
-	t.Logf("smoke/health: readiness probe (schema=%d tables) OK", tableCount)
+	t.Logf("smoke/health: liveness probe OK (%d)", livenessRec.Code)
+
+	// Readiness checker — must return 200 with both DB and Redis healthy.
+	checker := &health.ReadinessChecker{DB: infra.DB, Redis: redisClient}
+	readinessReq := httptest.NewRequest("GET", "/api/ready", nil)
+	readinessRec := httptest.NewRecorder()
+	checker.Ready(readinessRec, readinessReq)
+	if readinessRec.Code != 200 {
+		t.Errorf("readiness: expected 200, got %d; body=%s",
+			readinessRec.Code, readinessRec.Body.String())
+	}
+	if body := readinessRec.Body.String(); !contains(body, `"ready":true`) {
+		t.Errorf("readiness: expected ready=true in body, got: %s", body)
+	}
+	t.Logf("smoke/health: readiness probe OK (db+redis both healthy)")
+
+	// Verify Redis responds independently.
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		t.Errorf("redis ping: %v", err)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && func() bool {
+		for i := 0; i <= len(s)-len(sub); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	}()
 }
