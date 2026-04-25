@@ -96,7 +96,9 @@ func VerifyAuditLogs(ctx context.Context, db *sql.DB, secret []byte) (VerifyResu
 		        coalesce(pii_detected,false), coalesce(pii_types,'{}'),
 		        coalesce(policy_action,''), coalesce(outcome,''),
 		        coalesce(fallback_reason,''), coalesce(usage_source,''),
-		        created_at, seq_no, row_hash
+		        created_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001')
 		 FROM audit_logs
 		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
 		 ORDER BY seq_no`)
@@ -111,12 +113,14 @@ func VerifyAuditLogs(ctx context.Context, db *sql.DB, secret []byte) (VerifyResu
 	for rows.Next() {
 		var r AuditRow
 		var piiTypes []string
+		var canonVer, orgID string
 		if err := rows.Scan(
 			&r.ID, &r.UserID, &r.Model, &r.Provider, &r.Endpoint,
 			&r.StatusCode, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens,
 			&r.CostUSD, &r.PIIDetected, pqArrayScan(&piiTypes),
 			&r.PolicyAction, &r.Outcome, &r.FallbackReason, &r.UsageSource,
 			&r.CreatedAt, &r.SeqNo, &r.RowHash,
+			&canonVer, &orgID,
 		); err != nil {
 			return res, fmt.Errorf("verify audit_logs: scan: %w", err)
 		}
@@ -130,15 +134,27 @@ func VerifyAuditLogs(ctx context.Context, db *sql.DB, secret []byte) (VerifyResu
 			}
 		}
 
-		// Chain break detection.
-		canonical := CanonicalAuditLog(
-			r.ID, r.UserID, r.Model, r.Provider, r.Endpoint,
-			r.StatusCode, r.PromptTokens, r.CompletionTokens, r.TotalTokens,
-			CostMicrocents(r.CostUSD),
-			r.PIIDetected, r.PIITypes,
-			r.PolicyAction, r.Outcome, r.FallbackReason, r.UsageSource,
-			r.CreatedAt.UTC().Unix(),
-		)
+		// Chain break detection — use v1 or v2 canonical based on stored version.
+		var canonical string
+		if canonVer == "v2" {
+			canonical = CanonicalAuditLogV2(
+				r.ID, r.UserID, r.Model, r.Provider, r.Endpoint,
+				r.StatusCode, r.PromptTokens, r.CompletionTokens, r.TotalTokens,
+				CostMicrocents(r.CostUSD),
+				r.PIIDetected, r.PIITypes,
+				r.PolicyAction, r.Outcome, r.FallbackReason, r.UsageSource,
+				r.CreatedAt.UTC().Unix(), orgID,
+			)
+		} else {
+			canonical = CanonicalAuditLog(
+				r.ID, r.UserID, r.Model, r.Provider, r.Endpoint,
+				r.StatusCode, r.PromptTokens, r.CompletionTokens, r.TotalTokens,
+				CostMicrocents(r.CostUSD),
+				r.PIIDetected, r.PIITypes,
+				r.PolicyAction, r.Outcome, r.FallbackReason, r.UsageSource,
+				r.CreatedAt.UTC().Unix(),
+			)
+		}
 		if !Verify(prevHash, canonical, secret, r.RowHash) {
 			res.Breaks = append(res.Breaks, ChainBreak{
 				SeqNo: r.SeqNo, RowID: r.ID,
@@ -166,7 +182,11 @@ func VerifyAdminEventLogs(ctx context.Context, db *sql.DB, secret []byte) (Verif
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, coalesce(actor_user_id::text,''), action, resource,
 		        coalesce(target_id,''), path, method, status_code, success,
-		        created_at, seq_no, row_hash
+		        created_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001'),
+		        coalesce(source_org_id::text,''),
+		        coalesce(target_org_id::text,'')
 		 FROM admin_event_logs
 		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
 		 ORDER BY seq_no`)
@@ -180,10 +200,12 @@ func VerifyAdminEventLogs(ctx context.Context, db *sql.DB, secret []byte) (Verif
 
 	for rows.Next() {
 		var r AdminEventRow
+		var canonVer, orgID, sourceOrgID, targetOrgID string
 		if err := rows.Scan(
 			&r.ID, &r.ActorUserID, &r.Action, &r.Resource,
 			&r.TargetID, &r.Path, &r.Method, &r.StatusCode, &r.Success,
 			&r.CreatedAt, &r.SeqNo, &r.RowHash,
+			&canonVer, &orgID, &sourceOrgID, &targetOrgID,
 		); err != nil {
 			return res, fmt.Errorf("verify admin_event_logs: scan: %w", err)
 		}
@@ -195,11 +217,21 @@ func VerifyAdminEventLogs(ctx context.Context, db *sql.DB, secret []byte) (Verif
 			}
 		}
 
-		canonical := CanonicalAdminEventLog(
-			r.ID, r.ActorUserID, r.Action, r.Resource, r.TargetID,
-			r.Path, r.Method, r.StatusCode, r.Success,
-			r.CreatedAt.UTC().Unix(),
-		)
+		var canonical string
+		if canonVer == "v2" {
+			canonical = CanonicalAdminEventLogV2(
+				r.ID, r.ActorUserID, r.Action, r.Resource, r.TargetID,
+				r.Path, r.Method, r.StatusCode, r.Success,
+				r.CreatedAt.UTC().Unix(),
+				orgID, sourceOrgID, targetOrgID,
+			)
+		} else {
+			canonical = CanonicalAdminEventLog(
+				r.ID, r.ActorUserID, r.Action, r.Resource, r.TargetID,
+				r.Path, r.Method, r.StatusCode, r.Success,
+				r.CreatedAt.UTC().Unix(),
+			)
+		}
 		if !Verify(prevHash, canonical, secret, r.RowHash) {
 			res.Breaks = append(res.Breaks, ChainBreak{
 				SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash,

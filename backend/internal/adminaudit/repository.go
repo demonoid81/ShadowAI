@@ -183,10 +183,16 @@ func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, 
 	if e.ActorUserID != nil {
 		actorStr = *e.ActorUserID
 	}
-	canonical := chain.CanonicalAdminEventLog(
+	// PR-T2.3: canonical v2 covers org_id/source_org_id/target_org_id.
+	orgIDForCanon := e.OrgID
+	if orgIDForCanon == "" {
+		orgIDForCanon = domain.DefaultOrgID
+	}
+	canonical := chain.CanonicalAdminEventLogV2(
 		e.ID, actorStr, e.Action, e.Resource, e.TargetID,
 		e.Path, e.Method, e.StatusCode, e.Success,
 		createdAt.Unix(),
+		orgIDForCanon, e.SourceOrgID, e.TargetOrgID,
 	)
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableAdminEventLogs, "admin_event_logs", chain.SeqAdminEventLogs,
@@ -214,11 +220,11 @@ func (r *Repository) insertWithChain(ctx context.Context, e *domain.AdminEvent, 
 	if e.TargetOrgID != "" {
 		targetOrg = e.TargetOrgID
 	}
-	// INSERT с явными id и created_at ($12, $13) — совпадают с canonical.
+	// INSERT с явными id и created_at — совпадают с canonical v2.
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO admin_event_logs
-		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash, id, created_at, org_id, source_org_id, target_org_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+		 (actor_user_id, action, resource, target_id, path, method, status_code, success, metadata_json, seq_no, row_hash, id, created_at, org_id, source_org_id, target_org_id, canonical_version)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'v2')`,
 		actor, e.Action, e.Resource, target, e.Path, e.Method, e.StatusCode, e.Success, meta,
 		seqArg, hashArg, e.ID, createdAt, orgID, sourceOrg, targetOrg); err != nil {
 		return fmt.Errorf("adminaudit chain: insert: %w", err)

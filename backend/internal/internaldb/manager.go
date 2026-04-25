@@ -78,6 +78,18 @@ func (m *Manager) ListSources() []string {
 	return names
 }
 
+// IsEnvSource returns true if the source with the given name was loaded from
+// env-var config (INTERNAL_DB_SOURCES). Env sources are global/default-org
+// and accessible to all tenants regardless of the per-org DB filter.
+func (m *Manager) IsEnvSource(name string) bool {
+	if m == nil {
+		return false
+	}
+	envSources, _ := parseSourceMap(m.envSourceSpec)
+	_, ok := envSources[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
 func (m *Manager) RefreshSources(ctx context.Context) error {
 	if m == nil {
 		return nil

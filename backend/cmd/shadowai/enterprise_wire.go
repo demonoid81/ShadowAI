@@ -115,8 +115,10 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 		}
 		scimBaseURL += "/scim/v2"
 		baseHandler := scim.NewHandler(syncer, deps.Cfg.SCIMBearerToken, scimBaseURL, adminAuditRecorder)
-		// PR-T2.3.1: resolve org from scim_tokens by bearer token hash.
-		// Falls back to default org if token not found (single-tenant / legacy path).
+		// PR-T2.3.2: per-request token → org resolution via scim_tokens table.
+		tokenRepo := scim.NewSCIMTokensRepository(deps.DB)
+		baseHandler = baseHandler.WithTokenResolver(tokenRepo)
+		// Also resolve the static bearer token for the legacy single-token path.
 		scimOrgID := resolveSCIMTokenOrg(context.Background(), deps.DB, deps.Cfg.SCIMBearerToken)
 		scimHandler = baseHandler.WithOrgID(scimOrgID)
 		log.Printf("scim: provisioning enabled (default_role=%s link_by_email=%v org=%s)",

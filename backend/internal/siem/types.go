@@ -38,6 +38,10 @@ type Event struct {
 	StatusCode  int     `json:"status_code"`
 	Success     bool    `json:"success"`
 	Metadata    any     `json:"metadata,omitempty"`
+	// PR-T2.3.2: tenant isolation fields mirrored from admin_event_logs.
+	OrgID       string  `json:"org_id,omitempty"`
+	SourceOrgID string  `json:"source_org_id,omitempty"`
+	TargetOrgID string  `json:"target_org_id,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 }
 
@@ -60,6 +64,9 @@ func FromAdminEvent(ev adminaudit.Event) Event {
 		StatusCode:  ev.StatusCode,
 		Success:     ev.Success,
 		Metadata:    ev.Metadata,
+		OrgID:       ev.OrgID,
+		SourceOrgID: ev.SourceOrgID,
+		TargetOrgID: ev.TargetOrgID,
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }

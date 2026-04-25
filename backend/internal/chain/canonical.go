@@ -48,6 +48,25 @@ func CanonicalAuditLog(
 	)
 }
 
+// CanonicalAuditLogV2 returns v2 canonical including org_id (PR-T2.3).
+// A DBA changing org_id on a v2 row will break the chain; v1 rows remain valid.
+func CanonicalAuditLogV2(
+	id, userID, model, provider, endpoint string,
+	statusCode, promptTokens, completionTokens, totalTokens int,
+	costMicrocents int64,
+	piiDetected bool,
+	piiTypes []string,
+	policyAction, outcome, fallbackReason, usageSource string,
+	createdAtUnix int64,
+	orgID string,
+) string {
+	return CanonicalAuditLog(id, userID, model, provider, endpoint,
+		statusCode, promptTokens, completionTokens, totalTokens,
+		costMicrocents, piiDetected, piiTypes,
+		policyAction, outcome, fallbackReason, usageSource,
+		createdAtUnix) + "|" + orgID
+}
+
 // CanonicalAdminEventLog возвращает v1 canonical для admin_event_logs row.
 func CanonicalAdminEventLog(
 	id, actorUserID, action, resource, targetID, path, method string,
@@ -63,6 +82,20 @@ func CanonicalAdminEventLog(
 		id, actorUserID, action, resource, targetID, path, method,
 		statusCode, succ, createdAtUnix,
 	)
+}
+
+// CanonicalAdminEventLogV2 returns v2 canonical including tenant columns (PR-T2.3).
+// orgID is the actor's org; sourceOrgID/targetOrgID are for cross-tenant events.
+func CanonicalAdminEventLogV2(
+	id, actorUserID, action, resource, targetID, path, method string,
+	statusCode int,
+	success bool,
+	createdAtUnix int64,
+	orgID, sourceOrgID, targetOrgID string,
+) string {
+	return CanonicalAdminEventLog(id, actorUserID, action, resource, targetID,
+		path, method, statusCode, success, createdAtUnix) +
+		fmt.Sprintf("|%s|%s|%s", orgID, sourceOrgID, targetOrgID)
 }
 
 // CanonicalLegalHoldEvent возвращает v1 canonical для legal_hold_events row.

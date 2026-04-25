@@ -26,17 +26,22 @@ import (
 // orgCtxKey is the context key for per-request org_id set by auth middleware.
 type orgCtxKey struct{}
 
+// orgValue is a typed marker to distinguish "not set" from "explicitly empty" (break-glass).
+type orgValue struct{ org string }
+
 // SetOrgContext injects orgID into context. Called by auth.AuthMiddleware after
 // claims are resolved — avoids an import cycle (adminaudit ↔ auth).
+// Break-glass sessions pass orgID="" which is preserved (means global, no org filter).
 func SetOrgContext(ctx context.Context, orgID string) context.Context {
-	return context.WithValue(ctx, orgCtxKey{}, orgID)
+	return context.WithValue(ctx, orgCtxKey{}, orgValue{org: orgID})
 }
 
 // GetOrgFromContext returns orgID previously set by SetOrgContext.
-// Falls back to domain.DefaultOrgID when not set.
+// Returns empty string for break-glass / global_admin sessions (OrgID="" was explicitly set).
+// Falls back to domain.DefaultOrgID only when SetOrgContext was never called (unprotected path).
 func GetOrgFromContext(ctx context.Context) string {
-	if s, ok := ctx.Value(orgCtxKey{}).(string); ok && s != "" {
-		return s
+	if m, ok := ctx.Value(orgCtxKey{}).(orgValue); ok {
+		return m.org // "" = break-glass/global; non-empty = tenant org
 	}
 	return domain.DefaultOrgID
 }

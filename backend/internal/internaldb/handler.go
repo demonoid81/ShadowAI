@@ -123,21 +123,30 @@ func (h *Handler) ListSources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var sources []string
+	seen := make(map[string]bool)
+	// DB-backed org-filtered sources.
 	if h.repo != nil {
-		// PR-T2.3.1: org-filtered list of source names.
 		orgID, global, _ := auth.RequireOrg(claims)
 		if global {
 			orgID = ""
 		}
 		if dbSources, err := h.repo.ListSources(r.Context(), orgID, true); err == nil {
 			for _, s := range dbSources {
-				if s.IsActive {
+				if s.IsActive && !seen[s.Name] {
 					sources = append(sources, s.Name)
+					seen[s.Name] = true
 				}
 			}
 		}
-	} else if h.manager != nil {
-		sources = h.manager.ListSources() // fallback: manager not yet org-aware
+	}
+	// Env-configured sources are global (default-org / legacy) — always visible.
+	if h.manager != nil {
+		for _, name := range h.manager.ListSources() {
+			if h.manager.IsEnvSource(name) && !seen[name] {
+				sources = append(sources, name)
+				seen[name] = true
+			}
+		}
 	}
 	if sources == nil {
 		sources = []string{}
@@ -593,13 +602,15 @@ func (h *Handler) Query(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// PR-T2.3.1: verify source belongs to requesting org before querying.
+	// Env-configured sources (INTERNAL_DB_SOURCES) are global — always accessible.
 	if h.repo != nil {
 		queryOrgID, queryGlobal, _ := auth.RequireOrg(claims)
 		if !queryGlobal && queryOrgID != "" {
-			if _, srcErr := h.repo.GetByIDScoped(r.Context(), req.Source, queryOrgID); srcErr != nil {
-				// Source not found in this org — also try by name.
-				// (Manager uses name for routing; source ID may differ from name.)
-				if srcByName, nameErr := h.repo.GetByName(r.Context(), req.Source); nameErr != nil || srcByName.OrgID != queryOrgID {
+			// Allow if: (a) env source, (b) DB source in this org by name.
+			isEnv := h.manager != nil && h.manager.IsEnvSource(req.Source)
+			if !isEnv {
+				srcByName, nameErr := h.repo.GetByName(r.Context(), req.Source)
+				if nameErr != nil || srcByName.OrgID != queryOrgID {
 					h.auditRequest(r.Context(), claims, req.Source, req.Query, "/api/internal-dbs/query", http.StatusNotFound, ErrSourceNotFound, start)
 					h.writeError(w, http.StatusNotFound, ErrSourceNotFound.Error())
 					return
@@ -674,6 +685,7 @@ func (h *Handler) auditRequest(ctx context.Context, claims *auth.Claims, source,
 	h.writeAudit(&domain.AuditLog{
 		ID:           uuid.New().String(),
 		UserID:       claims.UserID,
+		OrgID:        claims.OrgID,
 		RequestBody:  req,
 		Model:        "internal-db",
 		Provider:     source,

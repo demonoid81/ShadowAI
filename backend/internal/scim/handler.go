@@ -15,7 +15,10 @@
 package scim
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,16 +30,20 @@ import (
 	"github.com/shadowai/backend/internal/domain"
 )
 
-// scimOrgKey is the context key for the org resolved from the SCIM bearer token.
-type scimOrgKey struct{}
+// TokenOrgResolver resolves a bearer token hash → org_id per request.
+// Implemented by scim_tokens DB lookup; allows multiple org-scoped tokens.
+type TokenOrgResolver interface {
+	GetOrgByTokenHash(ctx context.Context, tokenHash string) (string, error)
+}
 
 // Handler serves SCIM 2.0 endpoints.
 type Handler struct {
 	syncer      *UserSyncer
-	bearer      string // plaintext SCIM token
-	orgID       string // org this handler is authorized to manage (from config / scim_tokens)
+	bearer      string            // plaintext SCIM token (legacy / fallback)
+	orgID       string            // org resolved at startup (legacy single-token path)
+	tokenRepo   TokenOrgResolver  // per-request token → org lookup (scim_tokens table)
 	adminAudit  adminaudit.Recorder
-	baseURL     string // e.g. https://api.example.com/scim/v2
+	baseURL     string
 }
 
 // NewHandler creates a SCIM handler.
@@ -44,7 +51,7 @@ func NewHandler(syncer *UserSyncer, bearerToken, baseURL string, adminAudit admi
 	return &Handler{syncer: syncer, bearer: bearerToken, adminAudit: adminAudit, baseURL: baseURL}
 }
 
-// WithOrgID returns a Handler copy scoped to the given org (from scim_tokens lookup or static config).
+// WithOrgID returns a Handler copy scoped to the given org (legacy single-token path).
 func (h *Handler) WithOrgID(orgID string) *Handler {
 	c := *h
 	c.orgID = orgID
@@ -52,26 +59,67 @@ func (h *Handler) WithOrgID(orgID string) *Handler {
 	return &c
 }
 
+// WithTokenResolver attaches a per-request token resolver (scim_tokens lookup).
+func (h *Handler) WithTokenResolver(r TokenOrgResolver) *Handler {
+	c := *h
+	c.tokenRepo = r
+	return &c
+}
+
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
 
-// BearerAuth verifies the SCIM bearer token using constant-time comparison.
+// BearerAuth verifies the SCIM bearer token.
+// When a TokenOrgResolver is configured, it looks up the token hash in scim_tokens
+// per request to support multiple org-scoped tokens.
+// Falls back to constant-time compare against the configured SCIM_BEARER_TOKEN.
 func (h *Handler) BearerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == "" {
+			h.scimError(w, http.StatusUnauthorized, "invalid or missing Bearer token", "")
+			return
+		}
+
+		// Per-request scim_tokens lookup (multi-token / multi-org path).
+		if h.tokenRepo != nil {
+			orgID, err := h.tokenRepo.GetOrgByTokenHash(r.Context(), sha256sum(token))
+			if err == nil && orgID != "" {
+				// Pass orgID via context; SCIM handlers read it from syncer.WithOrgID.
+				next.ServeHTTP(w, r.WithContext(withSCIMOrg(r.Context(), orgID)))
+				return
+			}
+		}
+
+		// Legacy fallback: single static bearer token.
 		if h.bearer == "" {
-			// SCIM_BEARER_TOKEN not configured → reject all (should be caught by prod validation).
 			h.scimError(w, http.StatusServiceUnavailable, "SCIM not configured", "")
 			return
 		}
-		authHeader := r.Header.Get("Authorization")
-		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(h.bearer)) != 1 {
 			h.scimError(w, http.StatusUnauthorized, "invalid or missing Bearer token", "")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type scimOrgCtxKey struct{}
+
+func withSCIMOrg(ctx context.Context, orgID string) context.Context {
+	return context.WithValue(ctx, scimOrgCtxKey{}, orgID)
+}
+
+func getSCIMOrg(ctx context.Context) string {
+	s, _ := ctx.Value(scimOrgCtxKey{}).(string)
+	return s
+}
+
+func sha256sum(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
 }
 
 // ---------------------------------------------------------------------------
