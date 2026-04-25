@@ -144,9 +144,11 @@ spec:
     # -------------------------------------------------------------------------
     - name: shadowai.audit
       rules:
-        # Fires when the scheduled audit-verify CronJob fails (exit 1 = chain/anchor anomaly).
+        # Fires when the scheduled audit-verify CronJob fails (exit 1 = anomaly detected).
         # Requires .Values.auditVerifyCron.enabled=true in the Helm chart.
-        # The CronJob runs audit-verify --anchor-only; exit 1 means anchor/chain failure.
+        # Verification scope depends on auditVerifyCron.chainSecret:
+        #   false (default): --anchor-only (W3 Merkle anchor verification only)
+        #   true:            --include-anchors (W2 HMAC chain + W3 anchor verification)
         - alert: AuditVerifyJobFailed
           expr: |
             kube_job_status_failed{job_name=~".*audit-verify.*", namespace="shadowai"} > 0

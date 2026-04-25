@@ -1,7 +1,9 @@
 {{- if .Values.auditVerifyCron.enabled }}
 # PR-O1: Scheduled audit-verify job for tamper-evidence chain and anchor verification.
-# Runs audit-verify --anchor-only --table all and records the result.
-# Alert fires via kube_job_failed when this job fails (chain/anchor anomaly detected).
+# Mode depends on auditVerifyCron.chainSecret:
+#   chainSecret=false (default) → audit-verify --anchor-only  (W3 Merkle anchor verification only)
+#   chainSecret=true            → audit-verify --include-anchors (W2 HMAC chain + W3 anchor verification)
+# Alert fires via kube_job_failed when the job exits 1 (anomaly detected).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
