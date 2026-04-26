@@ -1,326 +1,246 @@
 # ShadowAI Enterprise Readiness Roadmap
 
-Дата: 2026-04-17
+Дата: 2026-04-26
+Статус: актуализировано после E1/E2/E3, T2/T3, G4, W5.2/W6, O4.4 и SIEM v1.1.
 
 ## Цель
 
-Зафиксировать, чего не хватает ShadowAI до состояния:
+Документ фиксирует фактический enterprise-readiness status ShadowAI и текущий порядок следующих работ:
 
-1. `enterprise pilot ready`
-2. `signed production ready`
-3. `broader GA / hardened default`
-
-Документ отражает текущее состояние после:
-
-- `semantic_v2` benchmark и baseline
-- `PR-A` audit privacy hardening
-- inspector modes / shadow rollout support
-- benchmark harness / observability
+1. **enterprise pilot ready** — self-hosted или dedicated-tenant deployment с защищаемым identity, governance и compliance story.
+2. **signed production ready** — production deploy с operational runbooks, audit evidence, alerting и восстановимой chain-of-custody.
+3. **broader GA / hardened default** — high-traffic, multi-tenant/SaaS posture, performance/caching, key rotation и formal compliance mapping.
 
 ---
 
-## Текущий статус
+## Текущее состояние
 
-### Уже сделано
+### Закрыто
 
-- Firewall pipeline покрывает proxy endpoints.
-- Есть `semantic_v2` и baseline на реальном прогоне.
-- Есть `shadow/enforce/disabled` режимы инспекторов.
-- Есть Prometheus metrics и audit privacy hardening.
-- Есть `AUDIT_PAYLOAD_MODE`, retention, purge CLI и purge scheduler.
-- Admin-only access для audit/firewall status уже включён.
+| Трек | Статус | Что теперь есть |
+|------|--------|-----------------|
+| Admin audit / user-admin trail | ✅ | admin events, org/source/target org context, SIEM-visible forensic trail |
+| DSAR / erasure | ✅ | user erasure/anonymization flow, idempotent path, audit trail |
+| Legal hold L1-L4 | ✅ | 4-eyes apply workflow, active hold blocks DSAR, retention-aware purge, advisory-lock coordination, live PG tests |
+| SIEM S1/S1.1 | ✅ | HTTP mirror, prod guards, async queue, batching, retry, backpressure, graceful drain |
+| Governance G1-G4 | ✅ | provider/model allowlist, role-based rules, department/sensitivity routing, org-level aggregate budget caps |
+| Streaming firewall F7 | ✅ | provider adapters, incremental inspection, structured audit outcomes, shadow compare, partial usage semantics |
+| Firewall hardening F8 | ✅ | semantic_v2 shadow_only rollout, would_block metric, prod fail-fast, accurate streaming prod gate wording |
+| Identity E1/E3 | ✅ | OIDC login, group/role mapping, IdP MFA claim enforcement, local MFA, break-glass, admin MFA policy |
+| SCIM E2 | ✅ | SCIM 2.0 lifecycle, per-org bearer tokens, role/department sync, deprovision token invalidation |
+| Tenant isolation T1/T2 | ✅ | org schema, org-scoped repositories/APIs, global_admin org control plane, tenant purge/export boundaries |
+| Tenant evidence T3/W6 | ✅ | tenant Merkle subset proofs; tenant bundles do not expose cross-tenant row hashes |
+| WORM / evidence W1-W5.2 | ✅ | HMAC chain, Merkle anchors, Ed25519 manifests, file/immudb sinks, live immudb v2 integration, portable offline bundle |
+| Evidence ops O4.1-O4.4.1 | ✅ | scheduled export, S3 backend, Object Lock, retention audit report; EvidenceAuditReportJobFailed/Missing alerts; all violation codes documented |
+| Production ops O1/O3 | ✅ | Docker/Helm, migrations init, health/readiness, Prometheus alerts, smoke harness, deploy runbooks |
+| CI / release gates | ✅ | core/enterprise/integration/smoke tests, Docker build, Helm validate, migration smoke, security jobs |
+| Prod config hardening | ✅ | startup fail-fast for unsafe production config across auth/SIEM/legalhold/WORM/SA_v2/OIDC/SCIM |
 
-### Уже не блокирует prod в одиночку
+### Что это означает
 
-- Prompt injection / jailbreak detection baseline.
-- Basic audit durability.
-- Secure-by-default audit payload handling.
-- Shadow rollout mechanics.
-
-### Что всё ещё блокирует “enterprise/business-ready”
-
-- Нет DSAR / erasure workflow.
-- Нет tenant isolation.
-- Нет enterprise auth (`OIDC/SAML/MFA`).
-- Нет admin access audit.
-- Нет provider governance по residency / approved subprocessors.
-- Нет prod fail-fast на небезопасный config.
-- Нет Stage 2 streaming passthrough для hardened default.
-
----
-
-## Roadmap 0-30 дней
-
-### Must-Have for Enterprise Pilot
-
-#### 1. PR-B: DSAR / Erasure Workflow
-
-Цель: уметь удалить или необратимо анонимизировать данные пользователя.
-
-Почему это первое:
-
-- После `PR-A` это самый заметный privacy/compliance gap.
-- Это частый blocker в enterprise questionnaire.
-- Это сильнее влияет на бизнес-риск, чем ещё один detector upgrade.
-
-Скоуп:
-
-- admin-only command/API для `erase user data`
-- anonymize или delete user profile
-- anonymize audit rows по `user_id`
-- policy для `shadow_decisions_json`
-- идемпотентное повторное выполнение
-- admin event log на сам факт erasure
-
-Acceptance criteria:
-
-- по `user_id` можно убрать связь audit trail ↔ конкретный человек
-- повторный вызов не ломает систему
-- операция документирована для ops/legal
-
-#### 2. PR-C: Prod Config Hardening
-
-Цель: fail-fast на небезопасной prod-конфигурации.
-
-Скоуп:
-
-- запрет placeholder `JWT_SECRET` в prod
-- запрет localhost DB/Redis в prod
-- loud warning или hard-fail на `AUDIT_RETENTION_DAYS=0`
-- warning или fail на `AUDIT_PAYLOAD_MODE=full` в prod
-
-Acceptance criteria:
-
-- процесс не стартует в заведомо небезопасной конфигурации
-- ошибки конфигурации понятны оператору
-
-#### 3. PR-D: Admin Access Audit
-
-Цель: логировать чтение и изменение чувствительных admin-данных.
-
-Скоуп:
-
-- кто открывал `/audit/logs`
-- кто открывал `/dashboard/*`
-- кто запускал purge/erase/admin-only internal-db actions
-
-Acceptance criteria:
-
-- sensitive admin reads/actions попадают в отдельный admin event log
-- есть минимальный search/filter path для расследования
-
-#### 4. semantic_v2 shadow rollout
-
-Цель: подтвердить benchmark на реальном трафике до enforce.
-
-Скоуп:
-
-- `FIREWALL_SA_V2_ENABLED=true`
-- `FIREWALL_MODE_SEMANTIC_V2=shadow`
-- same provider/model/corpus as benchmark baseline
-- сбор FP/FN из real shadow hits
-
-Gate:
-
-- embedding fail/timeout rate ≈ 0
-- FP на shadow hits приемлем
-- alerts и runbooks реально проверены
+- **Enterprise pilot ready:** да, для controlled self-hosted или dedicated-tenant deployment, если operator выполняет production checklist и secrets/bootstrap корректны.
+- **Signed production ready:** близко к да. Остались в основном documentation/control-mapping и performance hardening, а не фундаментальные security gaps.
+- **Compliance evidence story:** сильная. Есть tamper-evident DB chain, external anchors, signed manifests, S3 Object Lock и portable auditor bundles.
+- **Multi-tenant posture:** базовый product-complete. Есть org boundary в runtime, SCIM, audit, governance, purge/export и tenant proofs.
+- **LLM firewall runtime:** защищаемый. Остаётся Stage 2 sanitize/promotion work, но streaming больше не является blocker для enterprise pilot.
 
 ---
 
-## Roadmap 30-60 дней
+## Требует доработки
 
-### Must-Have for Signed Production
+### ~~Immediate Cleanup~~ (закрыто)
 
-#### 5. Epic-1: Enterprise Auth
+~~1. **O4.4.1 docs cleanup** — закрыто в сессии 2026-04-26:~~
+- ~~`EvidenceExportJobFailed` → `EvidenceAuditReportJobFailed` в CronJob template и runbook.~~
+- ~~`missing_retention`, `manifest_read_error` добавлены в violation table runbook.~~
 
-Цель: пройти enterprise security review по identity.
+~~2. **Roadmap sync** — этот документ.~~
 
-Скоуп:
+### Production Hardening
 
-- `OIDC` first
-- `SAML` if target customers require it
-- MFA для admin accounts
-- migration path от локального auth к federated auth
+3. **G2.2: governance policy cache**
+   - Сейчас policy evaluation корректна, но high-traffic proxy не должен зависеть от DB read на hot path.
+   - Нужен immutable in-memory snapshot, refresh на policy update, TTL fallback, cache-staleness metrics, fail-closed on corrupt policy.
 
-Acceptance criteria:
+4. **F7.5: streaming Stage 2**
+   - Incremental sanitize semantics.
+   - Promotion criteria для снятия prod opt-in gate: fallback/error budget, shadow mismatch rate, provider-specific confidence.
+   - Решение по legacy buffered path только после production proof window.
 
-- admin login можно вынести на enterprise IdP
-- локальные admin аккаунты ограничены или контролируемы
+5. **Legal hold v3**
+   - Hold scope шире whole-user: date-range / query-scope holds.
+   - Release 4-eyes.
+   - SLA escalation, bulk approvals, pending queue operations.
 
-#### 6. Epic-2: Tenant Isolation
+6. **W7: evidence operations hardening**
+   - Key rotation для `AUDIT_CHAIN_SECRET` и Ed25519 anchor signing.
+   - Automated restore verification drill.
+   - Optional second independent anchor sink.
+   - Evidence audit reports as archived artifacts, если аудиторам нужен scheduled report bundle, а не только Job logs/manual output.
 
-Цель: сделать SaaS story защищаемой.
+### Compliance / Enterprise Review
 
-Скоуп:
+7. **SOC 2 / ISO readiness mapping**
+   - Controls inventory.
+   - Control owner, evidence artifact, cadence, retention, alert.
+   - Mapping реализованных technical controls к SOC 2 / ISO 27001 evidence.
 
-- `tenant_id` в users, audit, policy, budget
-- list/query/filter только в границах tenant
-- retention и purge по tenant
-- groundwork для per-tenant firewall/provider policy
+8. **BYOK / KMS / encryption controls**
+   - Customer-managed key story.
+   - KMS integration points.
+   - Field-level encryption hooks for audit-sensitive fields.
 
-Acceptance criteria:
-
-- audit и dashboard не смешивают данные разных tenants
-- purge/erasure можно запускать per-tenant
-
-#### 7. Epic-3: Provider Governance
-
-Цель: уметь отвечать на вопрос “куда уходят данные клиента и почему”.
-
-Скоуп:
-
-- approved provider set per tenant
-- sensitivity-aware routing
-- optional EU-only / region-pinned policy
-- documented subprocessors and transfer mechanism
-
-Acceptance criteria:
-
-- tenant policy может запретить конкретные providers
-- sensitive traffic можно ограничить approved provider subset
-
-#### 8. Runbooks + Alerting
-
-Цель: не только собирать метрики, но и реально отрабатывать инциденты.
-
-Скоуп:
-
-- alert → owner → action runbook
-- incident severity mapping
-- provider outage / embedding outage / audit queue growth runbooks
-- breach/containment checklist
-
-Acceptance criteria:
-
-- на каждый критичный alert есть понятный action path
-- можно провести dry-run tabletop
+9. **Alert coverage refinement**
+   - Legal hold pending/SLA alerts.
+   - SIEM queue/drop/retry dashboards.
+   - semantic_v2 `fail_open` / `would_block` promotion dashboards.
+   - Evidence audit report alerts are implemented, but operator docs still need final cleanup.
 
 ---
 
-## Roadmap 60-90 дней
+## Next 0-30 Days
 
-### Hardening for Broader GA
+### PR-G2.2: Governance Policy Cache
 
-#### 9. PR-7: Stage 2 Streaming Passthrough
+**Цель:** убрать DB dependency из proxy hot path для high-traffic deployments.
 
-Цель: снять главный архитектурный blocker для “general hardened default”.
+Scope:
 
-Скоуп:
-
-- real streaming passthrough
-- incremental enforcement
-- bounded buffering only when needed
-- no regression in budget/accounting path
-
-Acceptance criteria:
-
-- streaming не буферизуется целиком в обычном happy path
-- enforcement остаётся корректным
-
-#### 10. BYOK / KMS / Field-Level Encryption Hooks
-
-Цель: подготовиться к требованиям regulated/enterprise клиентов.
-
-Скоуп:
-
-- design или optional implementation для шифрования audit-sensitive fields
-- hooks под managed KMS
-- optional BYOK roadmap
+- Immutable active policy snapshot per org.
+- Refresh/invalidate on policy upsert.
+- TTL fallback reload.
+- Metrics: cache hit, miss, stale, reload error.
+- Fail-closed если policy snapshot corrupted или missing в enforce mode.
 
 Acceptance criteria:
 
-- есть технически понятный ответ на вопрос “как шифруются чувствительные данные?”
+- `Evaluate` не требует DB read на каждый запрос.
+- Policy update становится видимым в bounded time.
+- Tests покрывают stale policy, reload error, per-org isolation.
 
-#### 11. Backup / Legal Hold / Restore Policy
+### PR-SOC1: Controls Mapping v1
 
-Цель: согласовать retention, purge и backup reality.
+**Цель:** превратить технический readiness в audit-ready material для sales/security review.
 
-Скоуп:
+Scope:
 
-- documented backup retention
-- restore testing
-- legal hold policy
-- interaction with DSAR / purge
-
-Acceptance criteria:
-
-- ops/legal понимают, что именно удаляется и что остаётся в backup cycle
-
-#### 12. SOC 2 / ISO Readiness Track
-
-Цель: подготовить evidence и control mapping.
-
-Скоуп:
-
-- controls inventory
-- evidence collection process
-- ownership
-- mapping на текущие technical controls
+- Таблица controls: access control, audit logging, retention, WORM evidence, incident response, tenant isolation.
+- Для каждого control: owner, implementation, evidence artifact, cadence, alert/runbook.
+- Gap table: что не покрыто и почему.
 
 Acceptance criteria:
 
-- можно войти в formal readiness assessment без срочного переписывания продукта
+- Security questionnaire можно отвечать ссылками на конкретные controls/evidence.
+- Compliance gaps отделены от product gaps.
 
 ---
 
-## Что не делать прямо сейчас
+## Next 30-60 Days
 
-- Не начинать `PR-7` до результатов `semantic_v2 shadow`.
-- Не тюнить thresholds без real shadow data.
-- Не тащить UI analytics раньше, чем появится operational pain.
-- Не усложнять privacy model отдельными shadow-retention policy до явной бизнес-потребности.
+### PR-F7.5: Streaming Stage 2
+
+Scope:
+
+- Incremental sanitize для response streaming.
+- Provider-specific promotion criteria.
+- Shadow mismatch budget и fallback budget.
+- Decision по `STREAMING_ALLOW_INCREMENTAL_IN_PROD` после proof window.
+
+Acceptance criteria:
+
+- Streaming sanitize не требует full-buffer fallback для базовых text deltas.
+- Operators видят rollout safety через metrics/audit outcomes.
+
+### PR-W7: Key Rotation and Restore Automation
+
+Scope:
+
+- Chain/signing key rotation policy.
+- Verifier support for key epochs.
+- Scheduled restore verification job or documented automation.
+- Optional second sink support if required by target customers.
+
+Acceptance criteria:
+
+- Rotation не ломает старую evidence verification.
+- Restore drill можно запускать воспроизводимо без ручного runbook-heavy процесса.
+
+### PR-L5: Legal Hold Advanced Workflow
+
+Scope:
+
+- Release 4-eyes.
+- SLA escalation.
+- Bulk approve/reject.
+- Scope beyond whole-user.
+
+Acceptance criteria:
+
+- Legal team может управлять большим backlog holds без ручных SQL/scripts.
+- Release path имеет тот же control strength, что apply path.
 
 ---
 
-## Что берём первым в работу
+## Next 60-90 Days
 
-### Первый work item: PR-B — DSAR / Erasure Workflow
+### PR-BYOK1: KMS / BYOK Design
 
-Причина выбора:
+Scope:
 
-- это самый сильный remaining privacy/business blocker после `PR-A`
-- он нужен раньше, чем tenant isolation и enterprise auth, если речь о реальных данных пользователей
-- он даёт прямой ответ на вопрос бизнеса и legal: “как вы удаляете данные?”
+- RFC: key ownership, envelope encryption, rotation, audit fields.
+- Decide managed KMS vs customer-provided keys vs self-hosted Vault.
+- Define fields eligible for encryption without breaking search/audit.
 
-### Предварительный scope PR-B
+Acceptance criteria:
 
-- admin-only `erase user data`
-- удаление или необратимая анонимизация user profile
-- анонимизация `audit_logs.user_id`
-- policy для связанных audit fields и `shadow_decisions_json`
-- admin event log на факт erasure
-- docs/runbook для ops
+- Есть defendable answer на вопрос "как клиент контролирует ключи".
+- Implementation path не ломает WORM canonical/hash chain assumptions.
 
-### Предварительный DoD
+### PR-GA1: Hardened Default / Scale Pass
 
-- операция идемпотентна
-- пользователь больше не восстанавливается из audit trail
-- dashboard/audit не ломаются после erasure
-- есть тесты на repeat execution и на отсутствие утечки связи с user
+Scope:
+
+- Load profile for proxy hot path after governance cache.
+- Streaming latency/memory budget validation.
+- SIEM queue sizing recommendations.
+- Helm production defaults review.
+
+Acceptance criteria:
+
+- Документированный supported throughput profile.
+- Defaults безопасны для medium enterprise install.
 
 ---
 
-## Порядок исполнения
+## Deferred / Explicitly Not Now
 
-1. `PR-B` — DSAR / Erasure Workflow
-2. `PR-C` — Prod Config Hardening
-3. `PR-D` — Admin Access Audit
-4. `semantic_v2` shadow rollout and observation
-5. `Epic-1` — Enterprise Auth
-6. `Epic-2` — Tenant Isolation
-7. `Epic-3` — Provider Governance
-8. `Runbooks + Alerting`
-9. `PR-7` — Stage 2 Streaming Passthrough
+- Удаление buffered streaming path до production proof window.
+- Большой analytics UI до завершения SOC/control mapping.
+- Full BYOK implementation до RFC и customer requirement.
+- Multi-region active-active до key rotation / evidence restore automation.
+- Поддержка SAML, если OIDC покрывает целевые IdP.
+
+---
+
+## Current Priority Order
+
+1. ~~**O4.4.1 — Evidence audit report docs cleanup**~~ ✅
+2. **G2.2 — Governance policy cache**
+3. **SOC1 — SOC 2 / ISO control mapping**
+4. **F7.5 — Streaming Stage 2**
+5. **W7 — Key rotation + restore automation**
+6. **L5 — Legal hold advanced workflow**
+7. **BYOK1 — KMS / BYOK design**
+8. **GA1 — Hardened default / scale pass**
 
 ---
 
 ## Decision Point
 
-Текущий главный принцип:
+Главный принцип теперь:
 
-- **до enterprise pilot:** privacy/governance first
-- **до signed production:** identity + tenant isolation + provider governance
-- **до broader GA:** Stage 2 streaming architecture
+- **До enterprise pilot:** фундаментальные blockers закрыты; нужен только deployment-specific checklist и clean docs.
+- **До signed production:** governance cache, evidence/docs polish, controls mapping.
+- **До broader GA:** key rotation, streaming Stage 2, BYOK/KMS, scale validation.
 
-На сегодня первое, что берём в работу: **`PR-B: DSAR / Erasure Workflow`**.
+Следующий recommended work item: **G2.2 governance policy cache**.

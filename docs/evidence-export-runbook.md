@@ -405,16 +405,18 @@ audit-evidence-report \
 | Code | Meaning |
 |------|---------|
 | 0 | All bundles compliant (or no policy flags set) |
-| 1 | One or more violations — `EvidenceExportJobFailed` alert fires when running as CronJob |
-| 2 | S3 access / configuration error |
+| 1 | One or more violations — `EvidenceAuditReportJobFailed` alert fires when running as CronJob |
+| 2 | S3 access / configuration error — same alert |
 
 ### Violation types
 
 | Violation | Cause |
 |-----------|-------|
 | `missing_object_lock` | Bundle has no Object Lock mode (fired when `--require-lock`) |
+| `missing_retention` | `retain_until` is absent and `--min-retention-days > 0` — no WORM protection |
 | `lock_expired(since=YYYY-MM-DD)` | `retain_until` is in the past |
 | `retention_too_short(retain_until=...,need_days=N)` | `retain_until < now + N days` |
+| `manifest_read_error(...)` | Bundle zip is corrupt, truncated, or missing `bundle_manifest.json` (only with `--read-manifest`) |
 
 ### Providing retention coverage to an auditor
 

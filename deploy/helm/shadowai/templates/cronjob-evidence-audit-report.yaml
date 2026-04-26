@@ -8,7 +8,8 @@
 # PR-O4.4: Weekly S3 retention audit report.
 # Runs audit-evidence-report against the evidence bucket and exits non-zero
 # if any bundle violates the configured Object Lock policy.
-# exit 1 → kube_job_status_failed → EvidenceExportJobFailed alert.
+# exit 1 → kube_job_status_failed → EvidenceAuditReportJobFailed alert.
+# exit 2 → same alert (S3 access / config error).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
