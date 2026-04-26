@@ -6,7 +6,8 @@
 
 ## Overview
 
-The automated evidence pipeline (O4.1: PVC, O4.2: S3-compatible):
+The automated evidence pipeline covers O4.1 PVC storage, O4.2 S3-compatible
+storage, and O4.3 optional S3 Object Lock retention:
 
 ```
 CronJob (nightly)
@@ -19,7 +20,8 @@ CronJob (nightly)
 
 Storage backends:
 - **`storage: pvc`** (O4.1 default) — bundles stored on a PVC at `/exports`.
-- **`storage: s3`** (O4.2) — bundles staged locally, verified, uploaded to S3/MinIO, then deleted from local disk.
+- **`storage: s3`** (O4.2/O4.3) — bundles staged on an explicit `emptyDir`, verified,
+  uploaded to S3/MinIO, optionally protected with Object Lock, then deleted from local disk.
 
 Evidence bundles are cryptographic compliance artifacts: signed Merkle anchors,
 chain inventory (or Merkle proofs for tenant bundles), and SHA256 file manifests.
@@ -52,8 +54,6 @@ ls -lt /exports/ | head -5
 # or for zipped bundles:
 ls -lt /exports/*.zip | head -5
 ```
-
----
 
 ---
 
@@ -109,13 +109,16 @@ evidenceExport:
   storage: s3
   s3:
     bucket: shadowai-compliance
-    sse: "AES256"
+    sse: "AES256"          # use "none" for MinIO/custom S3 targets that reject SSE-S3
     objectLock:
       enabled: true
       mode: "COMPLIANCE"     # or GOVERNANCE
       retentionDays: 90
       legalHold: ""          # "ON" | "OFF" | "" (omit header)
 ```
+
+Object Lock is valid only with `storage: s3`. If it is enabled with `storage: pvc`,
+Helm must fail render; PVC storage is not WORM-grade immutable storage.
 
 ### Verifying retention on a specific object
 
@@ -144,6 +147,15 @@ If `objectLock.enabled: true` but the bucket was created without `--object-lock-
 AWS returns HTTP 400 / `InvalidRequest`. `evidence-upload` exits 1, the CronJob fails, and the
 `EvidenceExportJobFailed` alert fires. **Do not disable Object Lock in Helm to work around this —
 fix the bucket instead.**
+
+AWS S3 requires a checksum on `PutObject` requests that set Object Lock retention.
+`evidence-upload` satisfies this by setting `ChecksumAlgorithm=CRC32` explicitly when
+`--object-lock-mode` is passed; the SDK computes and sends `x-amz-checksum-crc32` inline
+as the body streams (single read, no buffering). AWS SDK v2 also adds `x-amz-checksum-crc32`
+by default on all PutObject requests regardless of Object Lock — the explicit
+`x-amz-sdk-checksum-algorithm: CRC32` header signals the intentional election.
+A checksum-related upload rejection indicates an SDK version mismatch, not a reason to
+disable retention.
 
 ---
 
@@ -241,13 +253,13 @@ for Ed25519 anchor signature verification.
 A restore drill verifies that WORM evidence survives a DB restore and that
 anchors/bundles remain consistent with the restored data.
 
-### 4.1 Prerequisites
+### 6.1 Prerequisites
 
 - PG backup (pg_dump or managed snapshot)
 - Evidence bundle from same point in time
 - `AUDIT_CHAIN_SECRET` (stored separately, not in DB backup)
 
-### 4.2 Steps
+### 6.2 Steps
 
 ```bash
 # 1. Restore DB to a new instance
@@ -276,7 +288,7 @@ audit-verify --table admin_event_logs --verbose
 Expected: all verifications pass. Any discrepancy indicates tampering or an
 incomplete backup.
 
-### 4.3 Restore Drill Frequency
+### 6.3 Restore Drill Frequency
 
 Recommended: quarterly. Required before SOC2 audit windows.
 Document each drill in the incident log with timestamp, operator, and results.
@@ -296,6 +308,9 @@ kubectl -n <namespace> logs job/<failed-job-name>
 # - audit-verify --bundle exit 1 → Merkle verification failure (investigate tamper)
 # - Disk full on PVC → increase PVC size or reduce retentionDays
 # - AUDIT_CHAIN_SECRET missing → check K8s secret
+# - S3 upload failed → check S3 credentials, bucket policy, endpoint, path-style mode
+# - Object Lock upload failed → verify bucket was created with Object Lock enabled
+# - Object Lock checksum error → verify uploader sends Content-MD5 or checksum algorithm
 
 # 2. Re-run manually (does not affect CronJob schedule)
 kubectl -n <namespace> create job evidence-export-manual \
@@ -350,9 +365,25 @@ evidenceExport:
   mode: global               # or: tenants
   orgIDs: []                 # required when mode=tenants
   retentionDays: 90          # delete bundles older than 90 days
-  storage: pvc               # pvc only for O4.1; s3 in O4.2
+  storage: pvc               # pvc | s3
   pvc:
     size: 20Gi
+  s3:
+    bucket: ""               # required when storage=s3
+    prefix: "shadowai/evidence"
+    region: "us-east-1"
+    endpoint: ""             # custom endpoint for MinIO/GCS/etc.
+    forcePathStyle: false    # true for most MinIO installs
+    stagingSize: "2Gi"       # emptyDir limit for local staging
+    sse: "AES256"            # AES256 | none
+    secretName: ""           # defaults to existingSecret
+    accessKeyIDKey: s3AccessKeyID
+    secretAccessKeyKey: s3SecretAccessKey
+    objectLock:
+      enabled: false
+      mode: "COMPLIANCE"     # GOVERNANCE | COMPLIANCE
+      retentionDays: 90
+      legalHold: ""          # ON | OFF | "" (omit header)
   chainSecret: true          # include AUDIT_CHAIN_SECRET for W2 chain verify
   zip: true                  # archive bundles
   pubKeyFile: ""             # optional: path to Ed25519 public key

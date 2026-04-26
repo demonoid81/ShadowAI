@@ -37,6 +37,10 @@ type fakeS3 struct {
 
 // handler accepts any PUT request and returns the configured status.
 // It captures request metadata for test assertions.
+//
+// Trailing headers (used by AWS SDK v2 for streaming checksums) are merged
+// into lastHeaders after the body is read to EOF, so tests can use
+// lastHeaders.Get("x-amz-checksum-crc32") regardless of delivery mode.
 func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 	f.lastMethod = r.Method
 	f.lastPath = r.URL.Path
@@ -44,6 +48,11 @@ func (f *fakeS3) handler(w http.ResponseWriter, r *http.Request) {
 
 	body, _ := io.ReadAll(r.Body)
 	f.lastBody = body
+
+	// Merge trailing headers — populated by Go's HTTP server after Body read to EOF.
+	for key, vals := range r.Trailer {
+		f.lastHeaders[key] = vals
+	}
 
 	if f.statusCode == 0 {
 		f.statusCode = http.StatusOK
@@ -433,10 +442,13 @@ func TestIntegration_ObjectLock_LegalHold_ON(t *testing.T) {
 	t.Logf("integration/o4.3: legal-hold=%s", hold)
 }
 
-// TestIntegration_ObjectLock_ChecksumSHA256 verifies that an Object Lock upload
-// sends x-amz-checksum-sha256 and x-amz-sdk-checksum-algorithm: SHA256.
+// TestIntegration_ObjectLock_ChecksumCRC32 verifies that an Object Lock upload
+// sends x-amz-checksum-crc32 (or equivalent trailing header) and
+// x-amz-sdk-checksum-algorithm: CRC32.
 // AWS S3 requires a checksum for every PutObject that sets Object Lock retention.
-func TestIntegration_ObjectLock_ChecksumSHA256(t *testing.T) {
+// The CRC32 value may arrive as a regular header or a trailing header depending on
+// the SDK's streaming mode; fakeS3.handler merges both into lastHeaders.
+func TestIntegration_ObjectLock_ChecksumCRC32(t *testing.T) {
 	srv, state := setupTest(t, http.StatusOK)
 
 	bundlePath := writeTempBundle(t, "checksum-bundle-data")
@@ -455,23 +467,28 @@ func TestIntegration_ObjectLock_ChecksumSHA256(t *testing.T) {
 		t.Fatalf("expected exitOK, got %d", code)
 	}
 
-	checksum := state.lastHeaders.Get("x-amz-checksum-sha256")
-	if checksum == "" {
-		t.Error("x-amz-checksum-sha256 missing — AWS S3 will reject Object Lock uploads without it")
-	}
 	algo := state.lastHeaders.Get("x-amz-sdk-checksum-algorithm")
-	if algo != "SHA256" {
-		t.Errorf("x-amz-sdk-checksum-algorithm = %q, want SHA256", algo)
+	if algo != "CRC32" {
+		t.Errorf("x-amz-sdk-checksum-algorithm = %q, want CRC32", algo)
 	}
-	t.Logf("integration/o4.3: checksum sha256=%s (len=%d) algo=%s", checksum[:8]+"…", len(checksum), algo)
+	checksum := state.lastHeaders.Get("x-amz-checksum-crc32")
+	if checksum == "" {
+		t.Error("x-amz-checksum-crc32 missing — AWS S3 will reject Object Lock uploads without a checksum")
+	}
+	t.Logf("integration/o4.3: checksum crc32=%s algo=%s", checksum, algo)
 }
 
-// TestIntegration_ObjectLock_NoFlags_NoChecksumHeader — plain upload (no Object Lock)
-// must NOT send the checksum headers (overhead + MinIO compatibility concern).
-func TestIntegration_ObjectLock_NoChecksumOnPlainUpload(t *testing.T) {
+// TestIntegration_PlainUpload_NoExplicitChecksumAlgorithm is a regression guard:
+// plain uploads (no Object Lock) must NOT set x-amz-sdk-checksum-algorithm.
+//
+// AWS SDK v2 adds x-amz-checksum-crc32 by default for all PutObject requests
+// (SDK-level default, not controllable by the caller). The distinguishing signal
+// for Object Lock uploads is the explicit x-amz-sdk-checksum-algorithm: CRC32 header,
+// which the SDK emits only when ChecksumAlgorithm is set on PutObjectInput.
+func TestIntegration_PlainUpload_NoExplicitChecksumAlgorithm(t *testing.T) {
 	srv, state := setupTest(t, http.StatusOK)
 
-	bundlePath := writeTempBundle(t, "plain-no-checksum")
+	bundlePath := writeTempBundle(t, "plain-no-lock")
 	run([]string{
 		"--file", bundlePath,
 		"--bucket", "b",
@@ -483,13 +500,12 @@ func TestIntegration_ObjectLock_NoChecksumOnPlainUpload(t *testing.T) {
 		// No --object-lock-mode
 	}, os.Stdout, os.Stderr)
 
-	if v := state.lastHeaders.Get("x-amz-checksum-sha256"); v != "" {
-		t.Errorf("plain upload should not send x-amz-checksum-sha256, got %q", v)
-	}
+	// x-amz-checksum-crc32 is present (SDK default for all PutObject) — that is OK.
+	// What must be absent is the explicit algorithm declaration.
 	if v := state.lastHeaders.Get("x-amz-sdk-checksum-algorithm"); v != "" {
-		t.Errorf("plain upload should not send x-amz-sdk-checksum-algorithm, got %q", v)
+		t.Errorf("plain upload: x-amz-sdk-checksum-algorithm should be absent, got %q", v)
 	}
-	t.Logf("integration/o4.3: no checksum headers on plain upload ✓")
+	t.Logf("integration/o4.3: plain upload has no explicit checksum-algorithm header ✓")
 }
 
 // TestIntegration_ObjectLock_NoFlags_NoHeaders is a regression guard: without
