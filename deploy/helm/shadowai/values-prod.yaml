@@ -1,11 +1,24 @@
 # Production overrides for ShadowAI Helm chart.
 # Apply with: helm upgrade shadowai ./deploy/helm/shadowai -f values-prod.yaml
+#
+# See docs/production-hardening.md for:
+#   - Supported operating envelope and known limits
+#   - Mandatory secrets checklist
+#   - SIEM / evidence / streaming sizing guidance
+#   - Pre-launch checklist
+#
+# OPERATOR-SPECIFIC values (not set here — must be customized per deployment):
+#   config.OIDC_ISSUER_URL, config.OIDC_CLIENT_ID   — customer IdP
+#   config.SIEM_ENDPOINT                             — customer SIEM
+#   evidenceExport.s3.bucket                         — customer S3 bucket
+#   image.tag                                        — set at deploy time via --set
+#   ingress.hosts                                    — customer domain
 
 replicaCount: 3
 
 image:
   pullPolicy: Always
-  tag: "" # set at deploy time: --set image.tag=<git-sha>
+  tag: "" # REQUIRED: set at deploy time: --set image.tag=<git-sha>
 
 config:
   APP_ENV: "production"
@@ -13,9 +26,27 @@ config:
   AUDIT_RETENTION_DAYS: "90"
   AUDIT_PURGE_INTERVAL: "24h"
   AUDIT_PURGE_CHUNK_SIZE: "1000"
+
+  # Streaming: buffered is the safe production default.
+  # Do NOT enable incremental until F7.5 promotion criteria are met.
+  # See docs/production-hardening.md §6 for promotion criteria.
   STREAMING_MODE: "buffered"
+  # STREAMING_ALLOW_INCREMENTAL_IN_PROD: "true"  # explicit opt-in only; F7.6 required for Anthropic/Gemini/Ollama
+
   FIREWALL_ENABLED: "true"
-  # STREAMING_ALLOW_INCREMENTAL_IN_PROD: "true"  # explicit opt-in only
+  # Semantic V2 shadow mode: do not enforce until corpus baseline is established.
+  FIREWALL_SA_V2_ENABLED: "false"
+
+  # SIEM async delivery tuning (defaults shown; tune for your audit volume).
+  # See docs/production-hardening.md §4 for sizing guidance.
+  # SIEM_ENABLED: "true"                     # set when SIEM_ENDPOINT is configured
+  # SIEM_ENDPOINT: ""                        # REQUIRED when SIEM_ENABLED=true; customer-specific
+  SIEM_QUEUE_SIZE: "5000"                    # 1000 default → 5000 for prod burst
+  SIEM_BATCH_SIZE: "100"                     # 50 default → 100 for higher throughput
+  SIEM_FLUSH_INTERVAL: "5s"
+  SIEM_MAX_RETRIES: "5"                      # 3 default → 5 for more resilient delivery
+  SIEM_DROP_POLICY: "drop_oldest"
+  SIEM_TIMEOUT: "5s"                         # 3s default → 5s for high-latency SIEM
 
 resources:
   requests:
@@ -112,3 +143,19 @@ evidenceExport:
     missingAfterSeconds: 172800   # 48h = 2× daily schedule
     ruleLabels:
       prometheus: kube-prometheus  # adjust to match your Prometheus operator selector
+
+# PR-O4.4: Weekly retention posture audit report.
+# REQUIRES storage: s3 — the audit report reads S3 List+HeadObject.
+# Enable this when evidenceExport.storage is switched to s3 and bucket is configured.
+# EvidenceAuditReportJobFailed alert fires on exit 1 (violations) or exit 2 (S3 error).
+evidenceAuditReport:
+  enabled: false   # Enable when evidenceExport.storage: s3 is configured
+  schedule: "0 8 * * 1"   # Mondays 08:00 UTC — after nightly export has settled
+  # bucket: ""             # defaults to evidenceExport.s3.bucket when storage=s3
+  requireLock: true
+  minRetentionDays: 90
+  format: json
+  alerts:
+    enabled: true
+    severity: warning
+    missingAfterSeconds: 604800   # 7 days = 1× weekly schedule

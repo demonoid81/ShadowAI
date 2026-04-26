@@ -218,7 +218,7 @@ Acceptance criteria:
 5. ~~**W7 — Key rotation + restore automation**~~ ✅
 6. ~~**L5 — Legal hold advanced workflow**~~ ✅
 7. ~~**BYOK1 — KMS / BYOK design**~~ ✅ → `docs/rfcs/2026-04-pr-byok1-kms-byok-design.md`
-8. **GA1 — Hardened default / scale pass**
+8. ~~**GA1 — Hardened default / scale pass**~~ ✅ → `docs/production-hardening.md`
 
 ---
 
@@ -227,7 +227,7 @@ Acceptance criteria:
 Главный принцип теперь:
 
 - **До enterprise pilot:** фундаментальные blockers закрыты; нужен только deployment-specific checklist и clean docs.
-- **До signed production:** ✅ все закрыты: governance cache, evidence/docs, controls mapping, F7.5, W7, L5, BYOK1 RFC.
-- **До broader GA:** BYOK2 implementation (после customer demand), scale validation.
+- **До signed production:** ✅ все закрыты.
+- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; остаются BYOK2 (после customer demand) и L6 (scoped holds).
 
-Следующий recommended work item: **GA1 — Hardened default / scale pass**.
+Следующий recommended work item: **BYOK2** (после customer KMS requirement) или **L6** (scoped legal hold enforcement).

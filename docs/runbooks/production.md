@@ -3,18 +3,24 @@
 This document is the entry point for all production operational procedures.
 Each section links to the detailed runbook for that area.
 
+**New (GA1):** [`docs/production-hardening.md`](../production-hardening.md) — supported
+operating envelope, mandatory secrets/alerts, SIEM/evidence/streaming sizing, known limits,
+and pre-launch checklist.
+
 ---
 
 ## Quick Reference
 
 | Situation | Runbook |
 |-----------|---------|
+| Production hardening / defaults | [production-hardening.md](../production-hardening.md) |
 | Deploy / rollback | [deploy-rollback.md](deploy-rollback.md) |
 | Emergency admin access | [break-glass.md](break-glass.md) |
 | OIDC/IdP MFA not confirming | [oidc-idp-mfa.md](oidc-idp-mfa.md) |
 | Audit chain break detected | [deploy-rollback.md#chain-break](deploy-rollback.md#audit-chain-break) |
 | SIEM delivery failing | [deploy-rollback.md#siem-failure](deploy-rollback.md#siem-failure) |
 | SA_v2 embedder degraded | [deploy-rollback.md#semantic-v2-degraded](deploy-rollback.md#semantic-v2-degraded) |
+| Evidence export / WORM / Object Lock | [evidence-export-runbook.md](../evidence-export-runbook.md) |
 
 ---
 
@@ -127,10 +133,16 @@ audit-verify --bundle /path/to/evidence_bundle.zip --verbose
 ### Export evidence bundle
 
 ```bash
+# Global export. Tenant export uses --org-id <uuid> instead.
 audit-export-evidence \
   --output /tmp/evidence_$(date +%Y%m%d) \
+  --global \
   --pubkey-file /etc/shadowai/anchor-pubkey.b64
 ```
+
+Production deployments should normally use the scheduled `evidence-export`
+CronJob from the Helm chart. It verifies the bundle before retaining it on PVC
+or uploading it to S3/Object Lock storage.
 
 ### Chain break response
 
