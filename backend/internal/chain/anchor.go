@@ -115,6 +115,7 @@ func (r *AnchorRepository) FetchRowHashes(ctx context.Context, tableName string,
 
 // WriteAnchor вставляет новую anchor запись в audit_chain_anchors.
 // PR-W4.1: включает pubkey_id + signature если установлены.
+// PR-W8: sets a.ID via RETURNING so caller can write audit_chain_anchor_sinks.
 func (r *AnchorRepository) WriteAnchor(ctx context.Context, a *AnchorRecord) error {
 	var pubKeyID any
 	var sig any
@@ -124,15 +125,18 @@ func (r *AnchorRepository) WriteAnchor(ctx context.Context, a *AnchorRecord) err
 	if len(a.Signature) > 0 {
 		sig = a.Signature
 	}
-	_, err := r.db.ExecContext(ctx,
+	var id string
+	err := r.db.QueryRowContext(ctx,
 		`INSERT INTO audit_chain_anchors
 		 (table_name, anchor_seq_lo, anchor_seq_hi, row_count, merkle_root, created_at, sink_name, sink_ref, sink_ok, pubkey_id, signature)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 RETURNING id`,
 		a.TableName, a.SeqLo, a.SeqHi, a.RowCount, a.MerkleRoot,
-		a.CreatedAt, a.SinkName, a.SinkRef, a.SinkOK, pubKeyID, sig)
+		a.CreatedAt, a.SinkName, a.SinkRef, a.SinkOK, pubKeyID, sig).Scan(&id)
 	if err != nil {
 		return fmt.Errorf("anchor: write for %s: %w", a.TableName, err)
 	}
+	a.ID = id // W8: set ID so caller can write audit_chain_anchor_sinks
 	return nil
 }
 

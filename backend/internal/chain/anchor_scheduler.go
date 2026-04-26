@@ -29,6 +29,10 @@ type AnchorRepoReader interface {
 // sink_ok=false. Local chain integrity сохраняется; нет external witness.
 // Оператор видит это через sink_ok column и метрику.
 //
+// W8 Multi-sink: use WithAdditionalSinks to add a second independent witness.
+// The SAME signed manifest is written to all sinks. Partial failure is recorded
+// in audit_chain_anchor_sinks (if repo supports AnchorSinksWriter interface).
+//
 // Tables — чёткий список таблиц для anchor'ования. Scheduler не guesses.
 type AnchorScheduler struct {
 	repo     AnchorRepoReader
@@ -41,6 +45,8 @@ type AnchorScheduler struct {
 	// selfVerify: if true, re-verify after signing using selfVerifyKey.
 	selfVerify    bool
 	selfVerifyKey ed25519.PublicKey // explicit pubkey; derived from privKey if nil
+	// W8: optional additional sinks for independent witness publication.
+	additionalSinks []AnchorSink
 }
 
 // NewAnchorScheduler создаёт scheduler. Если interval == 0 — Run() немедленно
@@ -55,6 +61,15 @@ func NewAnchorScheduler(repo AnchorRepoReader, sink AnchorSink, interval time.Du
 		interval: interval,
 		tables:   tables,
 	}
+}
+
+// WithAdditionalSinks adds optional secondary witness sinks (W8).
+// The same signed manifest is written to each additional sink after the primary sink.
+// Partial failure is logged and recorded in audit_chain_anchor_sinks (if supported).
+// Call before Run/RunOnce; opts-in multi-sink mode.
+func (s *AnchorScheduler) WithAdditionalSinks(sinks ...AnchorSink) *AnchorScheduler {
+	s.additionalSinks = append(s.additionalSinks, sinks...)
+	return s
 }
 
 // WithSigning configures Ed25519 signing for each anchor manifest.
@@ -196,12 +211,35 @@ func (s *AnchorScheduler) anchorTable(ctx context.Context, tableName string) err
 			tableName, sinkErr)
 	}
 
-	// Write to audit_chain_anchors.
+	// Write to audit_chain_anchors. W8: also sets a.ID via RETURNING.
 	if err := s.repo.WriteAnchor(ctx, a); err != nil {
 		return fmt.Errorf("anchor %s: write record: %w", tableName, err)
 	}
 
-	log.Printf("anchor scheduler: table=%s seq=[%d,%d] rows=%d root=%x sink_ok=%v ref=%s",
-		tableName, a.SeqLo, a.SeqHi, a.RowCount, root[:8], a.SinkOK, a.SinkRef)
+	// W8: write same signed manifest to additional sinks and record results.
+	if len(s.additionalSinks) > 0 {
+		sinkResults := writeAdditionalSinks(ctx, s.additionalSinks, a, manifest)
+		// Persist per-sink results if repo supports it (optional interface check).
+		if sw, ok := s.repo.(AnchorSinksWriter); ok && a.ID != "" {
+			if err := sw.WriteAnchorSinks(ctx, a.ID, sinkResults); err != nil {
+				log.Printf("anchor scheduler: table=%s failed to record additional sink results: %v",
+					tableName, err)
+			}
+		}
+		// Tally failures for log.
+		var failedSinks []string
+		for _, r := range sinkResults {
+			if !r.SinkOK {
+				failedSinks = append(failedSinks, r.SinkName)
+			}
+		}
+		if len(failedSinks) > 0 {
+			log.Printf("anchor scheduler: table=%s seq=[%d,%d] DEGRADED EVIDENCE POSTURE: additional sink(s) failed: %v",
+				tableName, a.SeqLo, a.SeqHi, failedSinks)
+		}
+	}
+
+	log.Printf("anchor scheduler: table=%s seq=[%d,%d] rows=%d root=%x sink_ok=%v ref=%s additional_sinks=%d",
+		tableName, a.SeqLo, a.SeqHi, a.RowCount, root[:8], a.SinkOK, a.SinkRef, len(s.additionalSinks))
 	return nil
 }

@@ -331,7 +331,88 @@ Without `--chain-keyring`, `AUDIT_CHAIN_SECRET` env var is used as a single-epoc
 
 ---
 
-## 7. Restore Drill
+## 7. W8 Second Independent Anchor Sink
+
+### 7.1 Design
+
+W8 adds optional multi-sink anchor publication. The same Ed25519-signed manifest is
+written to ALL configured sinks — no re-signing with different content. The primary
+`audit_chain_anchors` row stores the primary sink info; a new table
+`audit_chain_anchor_sinks` records per-additional-sink results.
+
+Partial failure is explicit: if sink B fails, `sink_ok=false` with `error_msg` in
+`audit_chain_anchor_sinks`. No silent all-ok.
+
+### 7.2 Recommended independent sink pairs
+
+| Primary (default) | Secondary (W8) | Independence |
+|------------------|----------------|--------------|
+| `file://` (local PVC) | `immudb://` (external append-only) | DBA cannot forge without both |
+| `file://` | Second `file://` on separate PVC/host | Operational resilience |
+| `immudb://` | `file://` on S3-backed object store | Cross-environment witness |
+
+The point is that compromise of ONE storage backend does not destroy the audit trail.
+An auditor can detect tampering by cross-checking the two independently stored manifests.
+
+### 7.3 Configuration
+
+```go
+// In enterprise_wire.go, extend the anchor scheduler:
+scheduler := chain.NewAnchorScheduler(chainRepo, primaryFileSink, interval, tables).
+    WithSigning(privKey, pubKeyID, pubKey).
+    WithAdditionalSinks(
+        chain.NewFileSink("/exports/anchors-secondary.ndjson"),
+        // or immudb sink, or any AnchorSink implementation
+    )
+```
+
+The additional sinks receive the **same** manifest bytes as the primary sink.
+Write order does not affect the signed manifest.
+
+### 7.4 Monitoring partial failures
+
+```sql
+-- Find anchors with failed additional sinks:
+SELECT a.table_name, a.anchor_seq_lo, a.anchor_seq_hi, s.sink_name, s.error_msg
+FROM audit_chain_anchors a
+JOIN audit_chain_anchor_sinks s ON s.anchor_id = a.id
+WHERE s.sink_ok = false
+ORDER BY a.created_at DESC
+LIMIT 20;
+```
+
+Each failure is also logged:
+```
+anchor: PARTIAL SINK FAILURE table=audit_logs seq=[1,100] sink=file:// err=...
+anchor scheduler: DEGRADED EVIDENCE POSTURE: additional sink(s) failed: [file://]
+```
+
+Add a Prometheus alert on log pattern or query if SIEM has structured log search.
+
+### 7.5 Verification with additional sinks
+
+```bash
+# List recorded additional sinks for anchors:
+# (requires DB access — no CLI flag yet in W8; SQL query above)
+
+# Manually verify an additional file sink:
+audit-verify --anchor-sink-path /exports/anchors-secondary.ndjson \
+  --table audit_logs --include-anchors --verbose
+```
+
+The verifier cross-checks the additional sink against the primary DB anchor rows.
+A mismatch (different Merkle root in secondary vs DB) indicates tampering of either the
+DB row or the external sink file.
+
+### 7.6 Backward compatibility
+
+- Anchors written before W8 have no rows in `audit_chain_anchor_sinks`.
+- `audit-verify` treats empty additional sinks as single-sink (legacy) mode.
+- Existing verification commands work unchanged.
+
+---
+
+## 8. Restore Drill
 
 A restore drill verifies that WORM evidence survives a DB restore and that
 anchors/bundles remain consistent with the restored data.
@@ -414,7 +495,7 @@ Document each drill in the incident log with timestamp, operator, and results.
 
 ---
 
-## 8. Alert Response
+## 9. Alert Response
 
 ### EvidenceExportJobFailed
 
@@ -475,7 +556,7 @@ kubectl -n <namespace> logs job/<failed-job-name> | grep -E "FAIL|error|ERROR"
 
 ---
 
-## 9. Evidence Retention Audit Report (O4.4)
+## 10. Evidence Retention Audit Report (O4.4)
 
 `audit-evidence-report` gives operators and auditors a point-in-time view of the
 retention posture of every evidence bundle in S3 — without database access.
@@ -578,7 +659,7 @@ evidenceAuditReport:
 
 ---
 
-## 10. Helm Configuration Reference
+## 11. Helm Configuration Reference
 
 ```yaml
 evidenceExport:
@@ -617,7 +698,7 @@ evidenceExport:
 
 ---
 
-## 11. Prometheus Queries
+## 12. Prometheus Queries
 
 ```promql
 # Jobs that failed in the last 24h
