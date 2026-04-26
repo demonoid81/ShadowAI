@@ -203,7 +203,7 @@ Acceptance criteria:
 
 - Удаление buffered streaming path до production proof window.
 - Большой analytics UI до завершения SOC/control mapping.
-- Full BYOK implementation до RFC и customer requirement.
+- Full BYOK implementation — RFC завершён (BYOK1), реализация в BYOK2 после customer requirement и KMS provider decision.
 - Multi-region active-active до key rotation / evidence restore automation.
 - Поддержка SAML, если OIDC покрывает целевые IdP.
 
@@ -214,10 +214,10 @@ Acceptance criteria:
 1. ~~**O4.4.1 — Evidence audit report docs cleanup**~~ ✅
 2. ~~**G2.2 — Governance policy cache**~~ ✅
 3. ~~**SOC1 — SOC 2 / ISO control mapping**~~ ✅ → `docs/compliance/soc2-iso-control-mapping.md`
-4. **F7.5 — Streaming Stage 2**
-5. **W7 — Key rotation + restore automation**
-6. **L5 — Legal hold advanced workflow**
-7. **BYOK1 — KMS / BYOK design**
+4. ~~**F7.5 — Streaming Stage 2**~~ ✅
+5. ~~**W7 — Key rotation + restore automation**~~ ✅
+6. ~~**L5 — Legal hold advanced workflow**~~ ✅
+7. ~~**BYOK1 — KMS / BYOK design**~~ ✅ → `docs/rfcs/2026-04-pr-byok1-kms-byok-design.md`
 8. **GA1 — Hardened default / scale pass**
 
 ---
@@ -227,7 +227,7 @@ Acceptance criteria:
 Главный принцип теперь:
 
 - **До enterprise pilot:** фундаментальные blockers закрыты; нужен только deployment-specific checklist и clean docs.
-- **До signed production:** ✅ governance cache, evidence/docs polish, controls mapping — закрыты.
-- **До broader GA:** key rotation, streaming Stage 2, BYOK/KMS, scale validation.
+- **До signed production:** ✅ все закрыты: governance cache, evidence/docs, controls mapping, F7.5, W7, L5, BYOK1 RFC.
+- **До broader GA:** BYOK2 implementation (после customer demand), scale validation.
 
-Следующий recommended work item: **F7.5 — Streaming Stage 2** или **W7 — Key rotation**.
+Следующий recommended work item: **GA1 — Hardened default / scale pass**.
