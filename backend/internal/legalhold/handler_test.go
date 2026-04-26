@@ -128,8 +128,9 @@ func TestCreate_ValidationError(t *testing.T) {
 	}
 }
 
-// TestRelease_HappyPath — PR-L2.3: под новый workflow hold нужно
-// создать (pending) + approve (active) перед release.
+// TestRelease_HappyPath — PR-L5: под новый 4-eyes release workflow
+// создать (pending) + approve (active) + release (request_release →
+// release_pending) + approve_release (→ released).
 func TestRelease_HappyPath(t *testing.T) {
 	h, repo, rec := setupHandler(t)
 	ctx := context.Background()
@@ -138,25 +139,40 @@ func TestRelease_HappyPath(t *testing.T) {
 		t.Fatalf("approve: %v", err)
 	}
 
+	// Step 1: Release → active становится release_pending.
 	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
 	req = mux.SetURLVars(req, map[string]string{"id": seeded.ID})
 	w := httptest.NewRecorder()
 	h.Release(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		t.Fatalf("release status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if repo.holds[0].Status != StatusReleasePending {
+		t.Errorf("hold state after Release = %+v (expected release_pending)", repo.holds[0])
+	}
+
+	// Step 2: ApproveRelease другим admin → release_pending становится released.
+	req2 := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/approve-release", nil), "u-admin2")
+	req2 = mux.SetURLVars(req2, map[string]string{"id": seeded.ID})
+	w2 := httptest.NewRecorder()
+	h.ApproveRelease(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("approve-release status = %d, body=%s", w2.Code, w2.Body.String())
 	}
 	if repo.holds[0].IsActive || repo.holds[0].Status != StatusReleased {
-		t.Errorf("hold state after release = %+v", repo.holds[0])
+		t.Errorf("hold state after ApproveRelease = %+v (expected released)", repo.holds[0])
 	}
+
 	actions := actionsFromEvents(rec.events)
-	if len(actions) != 1 || actions[0] != "release_hold" {
-		t.Errorf("actions = %v, want [release_hold]", actions)
+	if len(actions) != 2 || actions[0] != "request_release" || actions[1] != "approve_release" {
+		t.Errorf("actions = %v, want [request_release, approve_release]", actions)
 	}
 }
 
-// TestRelease_Idempotent — second release возвращает 200 со
-// status=already_released.
+// TestRelease_Idempotent — PR-L5: после полного цикла release (request +
+// approve) второй Release возвращает 200 со status=already_released.
 func TestRelease_Idempotent(t *testing.T) {
 	h, _, _ := setupHandler(t)
 	ctx := context.Background()
@@ -164,12 +180,17 @@ func TestRelease_Idempotent(t *testing.T) {
 	if _, err := h.svc.Approve(ctx, seeded.ID, "u-approver"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	// First release.
+	// First release → release_pending.
 	req1 := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
 	req1 = mux.SetURLVars(req1, map[string]string{"id": seeded.ID})
 	h.Release(httptest.NewRecorder(), req1)
 
-	// Second release.
+	// Approve release → released (завершает цикл release).
+	reqAR := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/approve-release", nil), "u-admin2")
+	reqAR = mux.SetURLVars(reqAR, map[string]string{"id": seeded.ID})
+	h.ApproveRelease(httptest.NewRecorder(), reqAR)
+
+	// Second release — hold уже released → идемпотентный 200 already_released.
 	req2 := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/"+seeded.ID+"/release", nil), "u-admin")
 	req2 = mux.SetURLVars(req2, map[string]string{"id": seeded.ID})
 	w2 := httptest.NewRecorder()

@@ -100,7 +100,8 @@ func (m *memRepo) Reject(_ context.Context, id, rejectorID string) (*Hold, error
 	return nil, ErrNotFound
 }
 
-func (m *memRepo) Release(_ context.Context, id, releasedBy string) (*Hold, error) {
+// Release — PR-L5: теперь RequestRelease (active → release_pending).
+func (m *memRepo) Release(_ context.Context, id, requesterID string) (*Hold, error) {
 	if m.failOn == "release" {
 		return nil, m.failErr
 	}
@@ -108,22 +109,22 @@ func (m *memRepo) Release(_ context.Context, id, releasedBy string) (*Hold, erro
 		if m.holds[i].ID == id {
 			switch m.holds[i].Status {
 			case StatusPending:
-				// PR-L2.3: pending нельзя release — только reject.
 				return nil, ErrPendingNotReleasable
 			case StatusReleased:
 				return nil, ErrNotActive
+			case StatusReleasePending:
+				return nil, ErrAlreadyReleasePending
 			case StatusActive:
-				// ok, proceed below
+				// ok
 			default:
 				return nil, ErrNotActive
 			}
 			now := time.Now().UTC()
-			m.holds[i].Status = StatusReleased
-			m.holds[i].IsActive = false
-			m.holds[i].ReleasedAt = &now
-			if releasedBy != "" {
-				s := releasedBy
-				m.holds[i].ReleasedBy = &s
+			m.holds[i].Status = StatusReleasePending
+			m.holds[i].ReleaseRequestedAt = &now
+			if requesterID != "" {
+				s := requesterID
+				m.holds[i].ReleaseRequestedBy = &s
 			}
 			h := m.holds[i]
 			return &h, nil
@@ -137,7 +138,8 @@ func (m *memRepo) HasActiveHold(_ context.Context, userID string) (bool, error) 
 		return false, m.failErr
 	}
 	for _, h := range m.holds {
-		if h.TargetUserID == userID && h.Status == StatusActive {
+		// PR-L5: blocks for active AND release_pending.
+		if h.TargetUserID == userID && (h.Status == StatusActive || h.Status == StatusReleasePending) {
 			return true, nil
 		}
 	}
@@ -159,7 +161,8 @@ func (m *memRepo) ActiveUserIDs(_ context.Context) ([]string, error) {
 	}
 	var ids []string
 	for _, h := range m.holds {
-		if h.Status == StatusActive {
+		// PR-L5: includes release_pending.
+		if h.Status == StatusActive || h.Status == StatusReleasePending {
 			ids = append(ids, h.TargetUserID)
 		}
 	}
@@ -178,6 +181,62 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+func (m *memRepo) ApproveRelease(_ context.Context, id, approverID string) (*Hold, error) {
+	for i := range m.holds {
+		if m.holds[i].ID != id {
+			continue
+		}
+		if m.holds[i].Status != StatusReleasePending {
+			return nil, ErrNotReleasePending
+		}
+		// 4-eyes: approver != release requester.
+		if m.holds[i].ReleaseRequestedBy != nil && *m.holds[i].ReleaseRequestedBy == approverID {
+			return nil, ErrSelfReleaseApproval
+		}
+		now := time.Now().UTC()
+		m.holds[i].Status = StatusReleased
+		m.holds[i].IsActive = false
+		m.holds[i].ReleasedAt = &now
+		if approverID != "" {
+			s := approverID
+			m.holds[i].ReleasedBy = &s
+		}
+		h := m.holds[i]
+		return &h, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memRepo) RejectRelease(_ context.Context, id, rejectorID string) (*Hold, error) {
+	for i := range m.holds {
+		if m.holds[i].ID != id {
+			continue
+		}
+		if m.holds[i].Status != StatusReleasePending {
+			return nil, ErrNotReleasePending
+		}
+		m.holds[i].Status = StatusActive
+		m.holds[i].IsActive = true
+		m.holds[i].ReleaseRequestedAt = nil
+		m.holds[i].ReleaseRequestedBy = nil
+		_ = rejectorID
+		h := m.holds[i]
+		return &h, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memRepo) PendingOlderThan(_ context.Context, threshold time.Duration) ([]Hold, error) {
+	cutoff := time.Now().UTC().Add(-threshold)
+	var out []Hold
+	for _, h := range m.holds {
+		if h.Status == StatusPending && h.CreatedAt.Before(cutoff) {
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }
 
 // approveAs — helper для тестов: создать + approve другим admin'ом.
@@ -439,24 +498,39 @@ func TestReleaseHold_PendingUseReject(t *testing.T) {
 	}
 }
 
-// TestReleaseHold_AfterApprove — полный flow: create → approve →
-// release.
+// TestReleaseHold_AfterApprove — PR-L5: полный flow: create → approve →
+// release (request_release) → approve_release → released.
 func TestReleaseHold_AfterApprove(t *testing.T) {
 	s := NewService(&memRepo{})
 	h, _ := s.CreateHold(context.Background(), "u-1", "case", "r", "u-creator")
 	_ = approveAs(t, s, h, "u-approver")
 
-	released, err := s.ReleaseHold(context.Background(), h.ID, "u-releaser")
+	// Step 1: ReleaseHold → release_pending (не immediate release).
+	pending, err := s.ReleaseHold(context.Background(), h.ID, "u-releaser")
 	if err != nil {
-		t.Fatalf("release: %v", err)
+		t.Fatalf("ReleaseHold: %v", err)
 	}
-	if released.Status != StatusReleased {
-		t.Errorf("status = %q, want released", released.Status)
+	if pending.Status != StatusReleasePending {
+		t.Errorf("status after ReleaseHold = %q, want release_pending", pending.Status)
 	}
 
-	// Idempotent: second release → ErrNotActive.
+	// Повторный ReleaseHold → ErrAlreadyReleasePending (не ErrNotActive).
+	if _, err := s.ReleaseHold(context.Background(), h.ID, "u-releaser2"); !IsAlreadyReleasePending(err) {
+		t.Errorf("second ReleaseHold err = %v, want ErrAlreadyReleasePending", err)
+	}
+
+	// Step 2: ApproveRelease другим admin → released.
+	released, err := s.ApproveRelease(context.Background(), h.ID, "u-approver2")
+	if err != nil {
+		t.Fatalf("ApproveRelease: %v", err)
+	}
+	if released.Status != StatusReleased {
+		t.Errorf("status after ApproveRelease = %q, want released", released.Status)
+	}
+
+	// После ApproveRelease: третий ReleaseHold → ErrNotActive (идемпотентно).
 	if _, err := s.ReleaseHold(context.Background(), h.ID, "u-releaser"); !IsNotActive(err) {
-		t.Errorf("second release err = %v, want ErrNotActive", err)
+		t.Errorf("release of released hold err = %v, want ErrNotActive", err)
 	}
 }
 
@@ -469,8 +543,9 @@ func TestReleaseHold_NotFound(t *testing.T) {
 	}
 }
 
-// TestHasActiveHold_LifecyclePendingActiveReleased — PR-L2.3: только
-// active блокирует. Pending и released — не блокируют.
+// TestHasActiveHold_LifecyclePendingActiveReleased — PR-L5: lifecycle:
+// pending (не блокирует) → active (блокирует) → release_pending
+// (всё ещё блокирует) → released (не блокирует).
 func TestHasActiveHold_LifecyclePendingActiveReleased(t *testing.T) {
 	s := NewService(&memRepo{})
 	ctx := context.Background()
@@ -492,8 +567,14 @@ func TestHasActiveHold_LifecyclePendingActiveReleased(t *testing.T) {
 		t.Error("active hold должен блокировать, but doesn't")
 	}
 
-	// Release — больше не блокирует.
+	// ReleaseHold → release_pending: DSAR всё ещё заблокирован (PR-L5).
 	_, _ = s.ReleaseHold(ctx, h.ID, "u-admin")
+	if has, _ := s.HasActiveHold(ctx, "u-1"); !has {
+		t.Error("release_pending hold должен блокировать DSAR — PR-L5 contract нарушен")
+	}
+
+	// ApproveRelease → released: теперь больше не блокирует.
+	_, _ = s.ApproveRelease(ctx, h.ID, "u-admin2")
 	if has, _ := s.HasActiveHold(ctx, "u-1"); has {
 		t.Error("released hold всё ещё блокирует")
 	}
@@ -522,8 +603,9 @@ func TestHasActiveHold_NilService_FailClosed(t *testing.T) {
 	}
 }
 
-// TestActiveUserIDs_OnlyActive — scheduler получает только
-// active-hold target_user_ids; pending исключены.
+// TestActiveUserIDs_OnlyActive — PR-L5: scheduler получает
+// active И release_pending target_user_ids; pending и released
+// (полностью) исключены.
 func TestActiveUserIDs_OnlyActive(t *testing.T) {
 	s := NewService(&memRepo{})
 	ctx := context.Background()
@@ -531,10 +613,12 @@ func TestActiveUserIDs_OnlyActive(t *testing.T) {
 	_ = approveAs(t, s, h1, "u-approver")
 	// Pending hold (НЕ должен попасть в ActiveUserIDs).
 	_, _ = s.CreateHold(ctx, "u-pending", "c2", "r", "u-creator")
-	// Released hold (НЕ должен).
+	// Fully released hold (НЕ должен): нужен полный release-cycle
+	// (ReleaseHold + ApproveRelease) чтобы выйти из active.
 	h3, _ := s.CreateHold(ctx, "u-released", "c3", "r", "u-creator")
 	_ = approveAs(t, s, h3, "u-approver")
-	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin")
+	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin-req")
+	_, _ = s.ApproveRelease(ctx, h3.ID, "u-admin-approver")
 	// Rejected hold (НЕ должен).
 	h4, _ := s.CreateHold(ctx, "u-rejected", "c4", "r", "u-creator")
 	_, _ = s.Reject(ctx, h4.ID, "u-admin")
@@ -554,7 +638,7 @@ func TestActiveUserIDs_OnlyActive(t *testing.T) {
 		t.Error("pending leaked в ActiveUserIDs — защитный invariant нарушен")
 	}
 	if set["u-released"] {
-		t.Error("released leaked в ActiveUserIDs")
+		t.Error("fully released leaked в ActiveUserIDs")
 	}
 	if set["u-rejected"] {
 		t.Error("rejected leaked в ActiveUserIDs")
@@ -582,7 +666,9 @@ func TestActiveUserIDs_NilService_FailClosed(t *testing.T) {
 	}
 }
 
-// TestList_AllStatusesVisible — List возвращает pending+active+released.
+// TestList_AllStatusesVisible — PR-L5: List возвращает
+// pending+active+released. Для получения released нужен полный
+// release-cycle (ReleaseHold + ApproveRelease).
 func TestList_AllStatusesVisible(t *testing.T) {
 	s := NewService(&memRepo{})
 	ctx := context.Background()
@@ -591,7 +677,9 @@ func TestList_AllStatusesVisible(t *testing.T) {
 	_, _ = s.CreateHold(ctx, "u-2", "c2", "r", "u-creator") // pending
 	h3, _ := s.CreateHold(ctx, "u-3", "c3", "r", "u-creator")
 	_ = approveAs(t, s, h3, "u-approver")
-	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin")
+	// Полный release-cycle: ReleaseHold (→ release_pending) + ApproveRelease (→ released).
+	_, _ = s.ReleaseHold(ctx, h3.ID, "u-admin-req")
+	_, _ = s.ApproveRelease(ctx, h3.ID, "u-admin-approver")
 
 	list, err := s.List(ctx)
 	if err != nil {
@@ -605,7 +693,7 @@ func TestList_AllStatusesVisible(t *testing.T) {
 		statusCount[h.Status]++
 	}
 	if statusCount[StatusActive] != 1 || statusCount[StatusPending] != 1 || statusCount[StatusReleased] != 1 {
-		t.Errorf("status distribution: %v, want 1/1/1", statusCount)
+		t.Errorf("status distribution: %v, want 1/1/1 (active/pending/released)", statusCount)
 	}
 }
 
@@ -628,5 +716,246 @@ func TestService_NilRepo_AllMethods(t *testing.T) {
 	}
 	if _, err := s.List(ctx); !IsNotConfigured(err) {
 		t.Errorf("List nil: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PR-L5: Release 4-eyes, DSAR blocking, Bulk, SLA tests
+// ---------------------------------------------------------------------------
+
+// activateHold — helper: create + approve to reach active state.
+func activateHold(t *testing.T, s *Service, userID string) *Hold {
+	t.Helper()
+	h, err := s.CreateHold(context.Background(), userID, "case-l5", "litigation L5", "admin-creator")
+	if err != nil {
+		t.Fatalf("CreateHold: %v", err)
+	}
+	return approveAs(t, s, h, "admin-approver")
+}
+
+// TestL5_Release_SelfApproval_Denied — DoD: approver of release must
+// differ from release requester (4-eyes for release).
+func TestL5_Release_SelfApproval_Denied(t *testing.T) {
+	s := NewService(&memRepo{})
+	h := activateHold(t, s, "u-release-self")
+
+	// Request release as "admin-requester".
+	rp, err := s.ReleaseHold(context.Background(), h.ID, "admin-requester")
+	if err != nil {
+		t.Fatalf("ReleaseHold: %v", err)
+	}
+	if rp.Status != StatusReleasePending {
+		t.Fatalf("status after ReleaseHold = %s, want release_pending", rp.Status)
+	}
+
+	// Attempt to self-approve (same actor "admin-requester").
+	_, err = s.ApproveRelease(context.Background(), h.ID, "admin-requester")
+	if !IsSelfReleaseApproval(err) {
+		t.Errorf("self release approval: want ErrSelfReleaseApproval, got %v", err)
+	}
+}
+
+// TestL5_ReleasePending_StillBlocksDSAR — DoD: DSAR must be blocked for
+// release_pending holds.
+func TestL5_ReleasePending_StillBlocksDSAR(t *testing.T) {
+	s := NewService(&memRepo{})
+	h := activateHold(t, s, "u-release-pending-dsar")
+
+	// Request release → release_pending.
+	if _, err := s.ReleaseHold(context.Background(), h.ID, "admin-req"); err != nil {
+		t.Fatalf("ReleaseHold: %v", err)
+	}
+
+	// DSAR check must still return true (hold still legally blocking).
+	blocked, err := s.HasActiveHold(context.Background(), "u-release-pending-dsar")
+	if err != nil {
+		t.Fatalf("HasActiveHold: %v", err)
+	}
+	if !blocked {
+		t.Error("release_pending: HasActiveHold should return true (DSAR still blocked)")
+	}
+}
+
+// TestL5_ApproveRelease_UnblocksDSAR — DoD: after ApproveRelease, DSAR
+// is no longer blocked.
+func TestL5_ApproveRelease_UnblocksDSAR(t *testing.T) {
+	s := NewService(&memRepo{})
+	h := activateHold(t, s, "u-approve-release")
+
+	if _, err := s.ReleaseHold(context.Background(), h.ID, "admin-req"); err != nil {
+		t.Fatalf("ReleaseHold: %v", err)
+	}
+
+	// Approve by different admin.
+	released, err := s.ApproveRelease(context.Background(), h.ID, "admin-approver-2")
+	if err != nil {
+		t.Fatalf("ApproveRelease: %v", err)
+	}
+	if released.Status != StatusReleased {
+		t.Errorf("ApproveRelease: status = %s, want released", released.Status)
+	}
+
+	// DSAR check must now return false.
+	blocked, err := s.HasActiveHold(context.Background(), "u-approve-release")
+	if err != nil {
+		t.Fatalf("HasActiveHold: %v", err)
+	}
+	if blocked {
+		t.Error("after ApproveRelease: HasActiveHold should return false (DSAR unblocked)")
+	}
+}
+
+// TestL5_RejectRelease_KeepsBlock — DoD: after RejectRelease, hold
+// returns to active and DSAR remains blocked.
+func TestL5_RejectRelease_KeepsBlock(t *testing.T) {
+	s := NewService(&memRepo{})
+	h := activateHold(t, s, "u-reject-release")
+
+	if _, err := s.ReleaseHold(context.Background(), h.ID, "admin-req"); err != nil {
+		t.Fatalf("ReleaseHold: %v", err)
+	}
+
+	// Reject release.
+	restored, err := s.RejectRelease(context.Background(), h.ID, "admin-rejector")
+	if err != nil {
+		t.Fatalf("RejectRelease: %v", err)
+	}
+	if restored.Status != StatusActive {
+		t.Errorf("RejectRelease: status = %s, want active", restored.Status)
+	}
+
+	// DSAR check must still return true.
+	blocked, err := s.HasActiveHold(context.Background(), "u-reject-release")
+	if err != nil {
+		t.Fatalf("HasActiveHold: %v", err)
+	}
+	if !blocked {
+		t.Error("after RejectRelease: HasActiveHold should return true (back to active)")
+	}
+}
+
+// TestL5_Bulk_PartialFailure — DoD: bulk partial failure is reported
+// per-item; other items are not rolled back.
+func TestL5_BulkApprove_PartialFailure(t *testing.T) {
+	s := NewService(&memRepo{})
+
+	// Create two pending holds.
+	h1, _ := s.CreateHold(context.Background(), "u-bulk-1", "case-b1", "reason", "creator-bulk")
+	h2, _ := s.CreateHold(context.Background(), "u-bulk-2", "case-b2", "reason", "creator-bulk")
+
+	// Approve first hold normally; leave second as pending.
+	// Now bulk approve: h1 will fail (already approved by approver-1 != creator),
+	// h2 will succeed, h3 doesn't exist → fail.
+	h1ap, _ := s.Approve(context.Background(), h1.ID, "approver-1") // h1 is now active
+	_ = h1ap
+
+	// Bulk approve [h1, h2, "nonexistent"] as "approver-2".
+	// h1: already active → ErrNotPending
+	// h2: pending → active (success, approver-2 != creator-bulk)
+	// nonexistent: ErrNotFound
+	results, err := s.BulkApprove(context.Background(),
+		[]string{h1.ID, h2.ID, "nonexistent"}, "approver-2")
+	if err != nil {
+		t.Fatalf("BulkApprove: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("BulkApprove: expected 3 results, got %d", len(results))
+	}
+
+	// h1: fail (not_pending)
+	if results[0].Success {
+		t.Errorf("h1 (already active) should fail, got success")
+	}
+	if results[0].Error != "not_pending" {
+		t.Errorf("h1 error_code = %q, want not_pending", results[0].Error)
+	}
+
+	// h2: success
+	if !results[1].Success {
+		t.Errorf("h2 should succeed, got error: %s", results[1].Error)
+	}
+	if results[1].Status != StatusActive {
+		t.Errorf("h2 status = %s, want active", results[1].Status)
+	}
+
+	// nonexistent: fail (not_found)
+	if results[2].Success {
+		t.Errorf("nonexistent should fail")
+	}
+	if results[2].Error != "not_found" {
+		t.Errorf("nonexistent error_code = %q, want not_found", results[2].Error)
+	}
+}
+
+// TestL5_SLA_PendingQuery — DoD: PendingOlderThan returns pending holds
+// older than threshold.
+func TestL5_SLA_PendingQuery(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	ctx := context.Background()
+
+	// Create a hold and backdated it in the repo.
+	h, _ := s.CreateHold(ctx, "u-sla", "case-sla", "sla test", "creator-sla")
+
+	// Backdate the created_at to simulate an old pending hold.
+	for i := range repo.holds {
+		if repo.holds[i].ID == h.ID {
+			repo.holds[i].CreatedAt = time.Now().UTC().Add(-50 * time.Hour)
+		}
+	}
+
+	// Query with 24h threshold: should return the backdated hold.
+	holds, err := s.PendingOlderThan(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("PendingOlderThan: %v", err)
+	}
+	if len(holds) != 1 || holds[0].ID != h.ID {
+		t.Errorf("PendingOlderThan(24h): expected 1 hold, got %d", len(holds))
+	}
+
+	// Query with 72h threshold: should NOT return it (only 50h old).
+	holds2, _ := s.PendingOlderThan(ctx, 72*time.Hour)
+	if len(holds2) != 0 {
+		t.Errorf("PendingOlderThan(72h): expected 0 holds, got %d", len(holds2))
+	}
+}
+
+// TestL5_WholeUserBackwardCompat — DoD: existing whole_user holds
+// continue to work after L5 scope model addition.
+func TestL5_WholeUserBackwardCompat(t *testing.T) {
+	s := NewService(&memRepo{})
+	h, err := s.CreateHold(context.Background(), "u-compat", "case-compat", "backward compat", "creator")
+	if err != nil {
+		t.Fatalf("CreateHold: %v", err)
+	}
+	if h.Status != StatusPending {
+		t.Errorf("new hold status = %s, want pending", h.Status)
+	}
+	// Scope type defaults to whole_user in memRepo (not set explicitly).
+	// The Hold struct has ScopeType field; memRepo doesn't set it = default.
+	// Legacy whole_user behavior: DSAR/purge protection on active holds.
+	approved := approveAs(t, s, h, "approver-compat")
+	if approved.Status != StatusActive {
+		t.Errorf("approved status = %s, want active", approved.Status)
+	}
+	blocked, _ := s.HasActiveHold(context.Background(), "u-compat")
+	if !blocked {
+		t.Error("whole_user backward compat: active hold should block DSAR")
+	}
+}
+
+// TestL5_AlreadyReleasePending_IsConflict — повторный RequestRelease
+// возвращает явный конфликт, не idempotent.
+func TestL5_AlreadyReleasePending_IsConflict(t *testing.T) {
+	s := NewService(&memRepo{})
+	h := activateHold(t, s, "u-double-release")
+
+	if _, err := s.ReleaseHold(context.Background(), h.ID, "admin-req"); err != nil {
+		t.Fatalf("first ReleaseHold: %v", err)
+	}
+	// Second RequestRelease: must fail with ErrAlreadyReleasePending.
+	_, err := s.ReleaseHold(context.Background(), h.ID, "admin-req2")
+	if !IsAlreadyReleasePending(err) {
+		t.Errorf("second ReleaseHold: want ErrAlreadyReleasePending, got %v", err)
 	}
 }

@@ -13,28 +13,27 @@ import (
 	"time"
 )
 
-// Status — состояние legal hold в L2.3 4-eyes workflow.
-//   - Pending  — создан, ждёт approve (ещё НЕ блокирует DSAR).
-//   - Active   — approve'нут другим admin, блокирует DSAR и
-//     участвует в retention-aware purge.
-//   - Released — либо released после active, либо rejected из
-//     pending.
+// Status — состояние legal hold в L2.3/L5 workflow.
 //
-// Hot-path check (HasActiveHold, purge NOT EXISTS) использует
-// именно Status = 'active', не is_active.
+//   - Pending        — создан, ждёт approve (НЕ блокирует DSAR).
+//   - Active         — approve'нут другим admin, блокирует DSAR
+//     и участвует в retention-aware purge.
+//   - ReleasePending — PR-L5: release запрошен, ждёт второго
+//     approver. ДSAR и purge protection ОСТАЮТСЯ в силе.
+//   - Released       — финально снят (approve release или reject).
 type Status string
 
 const (
-	StatusPending  Status = "pending"
-	StatusActive   Status = "active"
-	StatusReleased Status = "released"
+	StatusPending        Status = "pending"
+	StatusActive         Status = "active"
+	StatusReleasePending Status = "release_pending" // PR-L5
+	StatusReleased       Status = "released"
 )
 
 // Hold — одна запись в legal_holds.
 //
-// L2.3: добавлены Status, ApprovedAt, ApprovedBy. IsActive
-// сохраняется как производное от Status (active ↔ true) для
-// backward compat.
+// L2.3: Status, ApprovedAt, ApprovedBy.
+// L5: ReleaseRequestedAt, ReleaseRequestedBy, ScopeType, ScopeDateFrom, ScopeDateTo.
 type Hold struct {
 	ID           string
 	TargetUserID string
@@ -45,13 +44,32 @@ type Hold struct {
 	CreatedAt    time.Time
 	ApprovedAt   *time.Time
 	ApprovedBy   *string
-	ReleasedAt   *time.Time
-	ReleasedBy   *string
-	IsActive     bool
+	// L5: release request audit (set when active → release_pending).
+	ReleaseRequestedAt *time.Time
+	ReleaseRequestedBy *string
+	// ReleasedAt/ReleasedBy set on final release (approve_release or reject path).
+	ReleasedAt *time.Time
+	ReleasedBy *string
+	IsActive   bool
+	// L5 scope fields. Default: ScopeType="whole_user" (backward compat).
+	ScopeType     string
+	ScopeDateFrom *time.Time
+	ScopeDateTo   *time.Time
+}
+
+// BulkItemResult — результат одной операции в bulk approve/reject.
+type BulkItemResult struct {
+	ID      string `json:"id"`
+	Success bool   `json:"success"`
+	Status  Status `json:"status,omitempty"`
+	Error   string `json:"error,omitempty"` // machine-readable error code
 }
 
 // HoldChecker — минимальный интерфейс, который ErasureService
 // использует для pre-tx check. Реализуется *Service.
+//
+// PR-L5: HasActiveHold блокирует для 'active' И 'release_pending' —
+// release_pending остаётся legally binding до ApproveRelease.
 type HoldChecker interface {
 	HasActiveHold(ctx context.Context, userID string) (bool, error)
 }

@@ -9,7 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+	"strings" //nolint:unused
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +47,19 @@ var ErrNotPending = errors.New("legalhold: hold is not pending")
 
 // ErrSelfApproval — 4-eyes policy violation: approver == creator.
 var ErrSelfApproval = errors.New("legalhold: approver must differ from creator")
+
+// ErrNotReleasePending — PR-L5: ApproveRelease/RejectRelease на hold
+// который не в статусе release_pending.
+var ErrNotReleasePending = errors.New("legalhold: hold is not in release_pending state")
+
+// ErrSelfReleaseApproval — PR-L5: 4-eyes violation для ApproveRelease:
+// approver совпадает с тем, кто запросил release.
+var ErrSelfReleaseApproval = errors.New("legalhold: release approver must differ from release requester")
+
+// ErrAlreadyReleasePending — PR-L5: RequestRelease на hold который уже
+// в release_pending. Повторный запрос должен быть явным конфликтом,
+// не idempotent.
+var ErrAlreadyReleasePending = errors.New("legalhold: hold is already awaiting release approval")
 
 type PGRepository struct {
 	db          *sql.DB
@@ -360,55 +373,82 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 	return &h, nil
 }
 
-// Release — переводит hold в inactive. Идемпотентно выбирается на
-// handler-level: если is_active=false, repo вернёт ErrNotActive,
-// handler превращает в "already_released" response.
-// PR-W2: выполняется в tx чтобы insertHoldEvent был атомарным.
-func (r *PGRepository) Release(ctx context.Context, id, releasedBy string) (*Hold, error) {
+// Release — PR-L5 BREAKING CHANGE: теперь RequestRelease.
+// active → release_pending (не immediate active → released).
+//
+// Идемпотентность:
+//   - already release_pending → ErrAlreadyReleasePending (409, explicit conflict)
+//   - already released        → ErrNotActive (200 "already_released")
+//   - pending                 → ErrPendingNotReleasable (409, use reject)
+func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Hold, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("legalhold: repo not configured")
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("legalhold: release begin tx: %w", err)
+		return nil, fmt.Errorf("legalhold: request_release begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const q = `UPDATE legal_holds
-	    SET status = 'released', is_active = false,
-	        released_at = now(), released_by = $2
-	    WHERE id = $1 AND status = 'active'
-	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
-	              approved_at, approved_by, released_at, released_by, status, is_active`
-	var (
-		h          Hold
-		createdBy  sql.NullString
-		approvedAt sql.NullTime
-		approvedBy sql.NullString
-		releasedAt sql.NullTime
-		releasedOp sql.NullString
-	)
-	var actor any
-	if releasedBy != "" {
-		actor = releasedBy
-	}
-	err = tx.QueryRowContext(ctx, q, id, actor).Scan(
-		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
-		&h.CreatedAt, &approvedAt, &approvedBy,
-		&releasedAt, &releasedOp, &h.Status, &h.IsActive,
-	)
+	// Lock row + read current state.
+	var status string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status FROM legal_holds WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&status)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return r.checkExistsInactive(ctx, id)
+			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("legalhold: release update: %w", err)
+		return nil, fmt.Errorf("legalhold: request_release lookup: %w", err)
 	}
-	// PR-W2: chain entry for 'release' transition.
-	if err := r.insertHoldEvent(ctx, tx, id, "release", "released", releasedBy); err != nil {
-		return nil, fmt.Errorf("legalhold: release hold event: %w", err)
+	switch Status(status) {
+	case StatusPending:
+		return nil, ErrPendingNotReleasable
+	case StatusReleasePending:
+		return nil, ErrAlreadyReleasePending
+	case StatusReleased:
+		return nil, ErrNotActive
+	case StatusActive:
+		// proceed
+	default:
+		return nil, ErrNotActive
+	}
+
+	var actor any
+	if requesterID != "" {
+		actor = requesterID
+	}
+	const q = `UPDATE legal_holds
+	    SET status = 'release_pending',
+	        release_requested_at = now(), release_requested_by = $2
+	    WHERE id = $1
+	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
+	              approved_at, approved_by, released_at, released_by,
+	              release_requested_at, release_requested_by, status, is_active`
+	var (
+		h                  Hold
+		createdBy          sql.NullString
+		approvedAt         sql.NullTime
+		approvedBy         sql.NullString
+		releasedAt         sql.NullTime
+		releasedBy         sql.NullString
+		releaseReqAt       sql.NullTime
+		releaseReqBy       sql.NullString
+	)
+	if err := tx.QueryRowContext(ctx, q, id, actor).Scan(
+		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
+		&h.CreatedAt, &approvedAt, &approvedBy,
+		&releasedAt, &releasedBy,
+		&releaseReqAt, &releaseReqBy,
+		&h.Status, &h.IsActive,
+	); err != nil {
+		return nil, fmt.Errorf("legalhold: request_release update: %w", err)
+	}
+	if err := r.insertHoldEvent(ctx, tx, id, "request_release", "release_pending", requesterID); err != nil {
+		return nil, fmt.Errorf("legalhold: request_release hold event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("legalhold: release commit: %w", err)
+		return nil, fmt.Errorf("legalhold: request_release commit: %w", err)
 	}
 	h.ID = id
 	if createdBy.Valid {
@@ -427,11 +467,268 @@ func (r *PGRepository) Release(ctx context.Context, id, releasedBy string) (*Hol
 		t := releasedAt.Time
 		h.ReleasedAt = &t
 	}
-	if releasedOp.Valid {
-		s := releasedOp.String
+	if releasedBy.Valid {
+		s := releasedBy.String
 		h.ReleasedBy = &s
 	}
+	if releaseReqAt.Valid {
+		t := releaseReqAt.Time
+		h.ReleaseRequestedAt = &t
+	}
+	if releaseReqBy.Valid {
+		s := releaseReqBy.String
+		h.ReleaseRequestedBy = &s
+	}
 	return &h, nil
+}
+
+// ApproveRelease — PR-L5: 4-eyes перевод release_pending → released.
+// approverID должен отличаться от release_requested_by.
+func (r *PGRepository) ApproveRelease(ctx context.Context, id, approverID string) (*Hold, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	if approverID == "" {
+		return nil, fmt.Errorf("legalhold: approver id required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: approve_release begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := legalholdcoord.AcquireHoldPurgeLock(ctx, tx); err != nil {
+		return nil, err
+	}
+
+	var (
+		status       string
+		releaseReqBy sql.NullString
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT status, release_requested_by FROM legal_holds WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&status, &releaseReqBy)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("legalhold: approve_release lookup: %w", err)
+	}
+	if Status(status) != StatusReleasePending {
+		return nil, ErrNotReleasePending
+	}
+	// 4-eyes: approver != requester.
+	if releaseReqBy.Valid && releaseReqBy.String == approverID {
+		return nil, ErrSelfReleaseApproval
+	}
+
+	var actor any
+	if approverID != "" {
+		actor = approverID
+	}
+	const upd = `UPDATE legal_holds
+	    SET status = 'released', is_active = false,
+	        released_at = now(), released_by = $2
+	    WHERE id = $1
+	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
+	              approved_at, approved_by, released_at, released_by,
+	              release_requested_at, release_requested_by, status, is_active`
+	h, err := r.scanHoldFull(tx.QueryRowContext(ctx, upd, id, actor))
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: approve_release update: %w", err)
+	}
+	if err := r.insertHoldEvent(ctx, tx, id, "approve_release", "released", approverID); err != nil {
+		return nil, fmt.Errorf("legalhold: approve_release hold event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("legalhold: approve_release commit: %w", err)
+	}
+	h.ID = id
+	return h, nil
+}
+
+// RejectRelease — PR-L5: перевод release_pending → active (release rejected).
+func (r *PGRepository) RejectRelease(ctx context.Context, id, rejectorID string) (*Hold, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: reject_release begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var status string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status FROM legal_holds WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("legalhold: reject_release lookup: %w", err)
+	}
+	if Status(status) != StatusReleasePending {
+		return nil, ErrNotReleasePending
+	}
+
+	var actor any
+	if rejectorID != "" {
+		actor = rejectorID
+	}
+	const upd = `UPDATE legal_holds
+	    SET status = 'active', is_active = true,
+	        release_requested_at = NULL, release_requested_by = NULL,
+	        released_at = now(), released_by = $2
+	    WHERE id = $1
+	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
+	              approved_at, approved_by, released_at, released_by,
+	              release_requested_at, release_requested_by, status, is_active`
+	h, err := r.scanHoldFull(tx.QueryRowContext(ctx, upd, id, actor))
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: reject_release update: %w", err)
+	}
+	if err := r.insertHoldEvent(ctx, tx, id, "reject_release", "active", rejectorID); err != nil {
+		return nil, fmt.Errorf("legalhold: reject_release hold event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("legalhold: reject_release commit: %w", err)
+	}
+	h.ID = id
+	// released_by carries the rejector in this transition; clear it since hold is active again.
+	h.ReleasedAt = nil
+	h.ReleasedBy = nil
+	_ = actor
+	return h, nil
+}
+
+// PendingOlderThan — PR-L5: SLA visibility query.
+// Возвращает pending holds созданные более threshold назад.
+func (r *PGRepository) PendingOlderThan(ctx context.Context, threshold time.Duration) ([]Hold, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	cutoff := time.Now().UTC().Add(-threshold)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, target_user_id, case_ref, reason, created_by,
+		    created_at, approved_at, approved_by,
+		    released_at, released_by, status, is_active,
+		    release_requested_at, release_requested_by
+		 FROM legal_holds
+		 WHERE status = 'pending' AND created_at < $1
+		 ORDER BY created_at ASC`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: pending_older_than: %w", err)
+	}
+	defer rows.Close()
+	return r.scanHolds(rows)
+}
+
+// scanHoldFull — helper для single-row scans with all columns.
+func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
+	var (
+		h            Hold
+		createdBy    sql.NullString
+		approvedAt   sql.NullTime
+		approvedBy   sql.NullString
+		releasedAt   sql.NullTime
+		releasedBy   sql.NullString
+		releaseReqAt sql.NullTime
+		releaseReqBy sql.NullString
+	)
+	if err := row.Scan(
+		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
+		&h.CreatedAt, &approvedAt, &approvedBy,
+		&releasedAt, &releasedBy,
+		&releaseReqAt, &releaseReqBy,
+		&h.Status, &h.IsActive,
+	); err != nil {
+		return nil, err
+	}
+	if createdBy.Valid {
+		s := createdBy.String
+		h.CreatedBy = &s
+	}
+	if approvedAt.Valid {
+		t := approvedAt.Time
+		h.ApprovedAt = &t
+	}
+	if approvedBy.Valid {
+		s := approvedBy.String
+		h.ApprovedBy = &s
+	}
+	if releasedAt.Valid {
+		t := releasedAt.Time
+		h.ReleasedAt = &t
+	}
+	if releasedBy.Valid {
+		s := releasedBy.String
+		h.ReleasedBy = &s
+	}
+	if releaseReqAt.Valid {
+		t := releaseReqAt.Time
+		h.ReleaseRequestedAt = &t
+	}
+	if releaseReqBy.Valid {
+		s := releaseReqBy.String
+		h.ReleaseRequestedBy = &s
+	}
+	return &h, nil
+}
+
+// scanHolds — helper for multi-row scans.
+func (r *PGRepository) scanHolds(rows *sql.Rows) ([]Hold, error) {
+	var out []Hold
+	for rows.Next() {
+		var (
+			h            Hold
+			createdBy    sql.NullString
+			approvedAt   sql.NullTime
+			approvedBy   sql.NullString
+			releasedAt   sql.NullTime
+			releasedBy   sql.NullString
+			releaseReqAt sql.NullTime
+			releaseReqBy sql.NullString
+		)
+		if err := rows.Scan(
+			&h.ID, &h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
+			&h.CreatedAt, &approvedAt, &approvedBy,
+			&releasedAt, &releasedBy, &h.Status, &h.IsActive,
+			&releaseReqAt, &releaseReqBy,
+		); err != nil {
+			return nil, err
+		}
+		if createdBy.Valid {
+			s := createdBy.String
+			h.CreatedBy = &s
+		}
+		if approvedAt.Valid {
+			t := approvedAt.Time
+			h.ApprovedAt = &t
+		}
+		if approvedBy.Valid {
+			s := approvedBy.String
+			h.ApprovedBy = &s
+		}
+		if releasedAt.Valid {
+			t := releasedAt.Time
+			h.ReleasedAt = &t
+		}
+		if releasedBy.Valid {
+			s := releasedBy.String
+			h.ReleasedBy = &s
+		}
+		if releaseReqAt.Valid {
+			t := releaseReqAt.Time
+			h.ReleaseRequestedAt = &t
+		}
+		if releaseReqBy.Valid {
+			s := releaseReqBy.String
+			h.ReleaseRequestedBy = &s
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
 
 // checkExistsInactive — используется Release для различения
@@ -461,15 +758,16 @@ func (r *PGRepository) checkExistsInactive(ctx context.Context, id string) (*Hol
 	}
 }
 
-// ActiveUserIDs — PR-L2 + L2.3: bulk lookup для retention-aware
-// audit purge. Возвращает target_user_id только тех записей, где
-// status='active' (pending НЕ защищает от purge до approve).
+// ActiveUserIDs — PR-L2 + L2.3 + L5: bulk lookup для retention-aware
+// audit purge. Возвращает target_user_id для status IN ('active',
+// 'release_pending'). release_pending держит purge protection до
+// ApproveRelease.
 func (r *PGRepository) ActiveUserIDs(ctx context.Context) ([]string, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("legalhold: repo not configured")
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT target_user_id::text FROM legal_holds WHERE status = 'active'`)
+		`SELECT target_user_id::text FROM legal_holds WHERE status IN ('active', 'release_pending')`)
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: active user ids: %w", err)
 	}
@@ -486,8 +784,9 @@ func (r *PGRepository) ActiveUserIDs(ctx context.Context) ([]string, error) {
 }
 
 // HasActiveHold — hot-path check для ErasureService.
-// L2.3: только status='active' блокирует. Pending НЕ блокирует
-// DSAR — creator может пересмотреть до approve.
+// PR-L5: блокирует для status IN ('active', 'release_pending').
+// release_pending остаётся legally binding до ApproveRelease.
+// pending НЕ блокирует (ещё не approve'нут).
 func (r *PGRepository) HasActiveHold(ctx context.Context, userID string) (bool, error) {
 	if r == nil || r.db == nil {
 		return false, fmt.Errorf("legalhold: repo not configured")
@@ -496,7 +795,7 @@ func (r *PGRepository) HasActiveHold(ctx context.Context, userID string) (bool, 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT EXISTS(
 		    SELECT 1 FROM legal_holds
-		    WHERE target_user_id = $1 AND status = 'active'
+		    WHERE target_user_id = $1 AND status IN ('active', 'release_pending')
 		)`, userID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("legalhold: has active: %w", err)

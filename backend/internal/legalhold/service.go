@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Sentinel errors для различения validation / config / runtime
@@ -35,20 +36,25 @@ func IsNotConfigured(err error) bool { return errors.Is(err, ErrNotConfigured) }
 // PGRepository. Тесты mock'ают через in-memory impl.
 type Repository interface {
 	Create(ctx context.Context, h *Hold) (*Hold, error)
-	Release(ctx context.Context, id, releasedBy string) (*Hold, error)
+	// PR-L5: Release → RequestRelease (active → release_pending).
+	// BREAKING CHANGE from L2.3: was immediate active → released.
+	// See migration 020 and handler documentation.
+	Release(ctx context.Context, id, requesterID string) (*Hold, error)
 	HasActiveHold(ctx context.Context, userID string) (bool, error)
 	List(ctx context.Context) ([]Hold, error)
-	// PR-L2 + L2.3: bulk lookup для retention-aware purge.
-	// Возвращает target_user_id'ы записей со status='active'
-	// (каждый UUID не более одного раза). Pending hold'ы НЕ
-	// попадают сюда до approve.
+	// PR-L2 + L2.3 + L5: bulk lookup для retention-aware purge.
+	// Возвращает target_user_id'ы с status IN ('active','release_pending').
+	// release_pending остаётся legally blocking до ApproveRelease.
 	ActiveUserIDs(ctx context.Context) ([]string, error)
-	// PR-L2.3 4-eyes: перевод pending → active. approverID
-	// должен отличаться от creator (4-eyes policy; check в
-	// repo-implementation).
+	// PR-L2.3 4-eyes: перевод pending → active.
 	Approve(ctx context.Context, id, approverID string) (*Hold, error)
 	// PR-L2.3: pending → released (rejected / cancelled).
 	Reject(ctx context.Context, id, rejectorID string) (*Hold, error)
+	// PR-L5: release 4-eyes workflow.
+	ApproveRelease(ctx context.Context, id, approverID string) (*Hold, error)
+	RejectRelease(ctx context.Context, id, rejectorID string) (*Hold, error)
+	// PR-L5: SLA visibility — pending holds older than threshold.
+	PendingOlderThan(ctx context.Context, threshold time.Duration) ([]Hold, error)
 }
 
 // Service — тонкая обёртка над repo. Валидация входа (non-empty
@@ -96,17 +102,136 @@ func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason,
 	return s.repo.Create(ctx, h)
 }
 
-// ReleaseHold — снимает hold. Идемпотентность: повторный release
-// → возвращает (nil, ErrNotActive); handler переводит в
-// "already_released" 200-ответ без ошибки.
-func (s *Service) ReleaseHold(ctx context.Context, id, releasedBy string) (*Hold, error) {
+// ReleaseHold — PR-L5 BREAKING CHANGE: теперь означает RequestRelease
+// (active → release_pending), не immediate release.
+// Двухшаговый процесс: RequestRelease + ApproveRelease (другим admin).
+//
+// Идемпотентность изменилась:
+//   - active → release_pending (success, 200)
+//   - release_pending → ErrAlreadyReleasePending (409, повторный запрос явный конфликт)
+//   - released → ErrNotActive (200 "already_released" — идемпотентно)
+func (s *Service) ReleaseHold(ctx context.Context, id, requesterID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("id required: %w", ErrValidation)
 	}
-	return s.repo.Release(ctx, id, releasedBy)
+	return s.repo.Release(ctx, id, requesterID)
+}
+
+// ApproveRelease — PR-L5: 4-eyes перевод release_pending → released.
+// approverID должен отличаться от того, кто запросил release.
+func (s *Service) ApproveRelease(ctx context.Context, id, approverID string) (*Hold, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	if strings.TrimSpace(approverID) == "" {
+		return nil, fmt.Errorf("approver_id required: %w", ErrValidation)
+	}
+	return s.repo.ApproveRelease(ctx, id, approverID)
+}
+
+// RejectRelease — PR-L5: перевод release_pending → active (release rejected).
+func (s *Service) RejectRelease(ctx context.Context, id, rejectorID string) (*Hold, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	return s.repo.RejectRelease(ctx, id, rejectorID)
+}
+
+// BulkApprove — PR-L5: bulk перевод pending → active.
+// Per-item semantics: один failing item не rollback'ает остальные.
+// Возвращает полный список результатов, включая partial failures.
+func (s *Service) BulkApprove(ctx context.Context, ids []string, approverID string) ([]BulkItemResult, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("ids required: %w", ErrValidation)
+	}
+	if strings.TrimSpace(approverID) == "" {
+		return nil, fmt.Errorf("approver_id required: %w", ErrValidation)
+	}
+	results := make([]BulkItemResult, 0, len(ids))
+	for _, id := range ids {
+		hold, err := s.repo.Approve(ctx, id, approverID)
+		if err != nil {
+			results = append(results, BulkItemResult{
+				ID:    id,
+				Error: bulkErrorCode(err),
+			})
+			continue
+		}
+		results = append(results, BulkItemResult{
+			ID:      id,
+			Success: true,
+			Status:  hold.Status,
+		})
+	}
+	return results, nil
+}
+
+// BulkReject — PR-L5: bulk перевод pending → released.
+// Per-item semantics: partial failure не rollback'ает остальные.
+func (s *Service) BulkReject(ctx context.Context, ids []string, rejectorID string) ([]BulkItemResult, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("ids required: %w", ErrValidation)
+	}
+	results := make([]BulkItemResult, 0, len(ids))
+	for _, id := range ids {
+		hold, err := s.repo.Reject(ctx, id, rejectorID)
+		if err != nil {
+			results = append(results, BulkItemResult{
+				ID:    id,
+				Error: bulkErrorCode(err),
+			})
+			continue
+		}
+		results = append(results, BulkItemResult{
+			ID:      id,
+			Success: true,
+			Status:  hold.Status,
+		})
+	}
+	return results, nil
+}
+
+// PendingOlderThan — PR-L5: SLA visibility. Возвращает pending holds,
+// созданные более threshold назад. Без фонового воркера: query-on-demand.
+func (s *Service) PendingOlderThan(ctx context.Context, threshold time.Duration) ([]Hold, error) {
+	if s == nil || s.repo == nil {
+		return nil, ErrNotConfigured
+	}
+	if threshold <= 0 {
+		return nil, fmt.Errorf("threshold must be positive: %w", ErrValidation)
+	}
+	return s.repo.PendingOlderThan(ctx, threshold)
+}
+
+// bulkErrorCode — machine-readable error code для BulkItemResult.
+func bulkErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrNotPending):
+		return "not_pending"
+	case errors.Is(err, ErrSelfApproval):
+		return "self_approval"
+	case errors.Is(err, ErrNotReleasePending):
+		return "not_release_pending"
+	default:
+		return "internal_error"
+	}
 }
 
 // HasActiveHold — satisfies HoldChecker interface. Возвращает
@@ -195,3 +320,16 @@ func IsNotActive(err error) bool { return errors.Is(err, ErrNotActive) }
 
 // IsNotFound — helper для handler'а (release of missing id).
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
+
+// PR-L5 error predicates.
+
+// IsNotReleasePending — ApproveRelease/RejectRelease на hold не в
+// release_pending → 409 Conflict.
+func IsNotReleasePending(err error) bool { return errors.Is(err, ErrNotReleasePending) }
+
+// IsSelfReleaseApproval — approver совпадает с release requester → 403.
+func IsSelfReleaseApproval(err error) bool { return errors.Is(err, ErrSelfReleaseApproval) }
+
+// IsAlreadyReleasePending — RequestRelease на hold уже в
+// release_pending → 409 Conflict.
+func IsAlreadyReleasePending(err error) bool { return errors.Is(err, ErrAlreadyReleasePending) }

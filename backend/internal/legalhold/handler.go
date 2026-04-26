@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -358,58 +359,292 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PR-L5 BREAKING CHANGE: ReleaseHold теперь RequestRelease
+	// (active → release_pending). Требуется ApproveRelease от второго admin.
 	hold, err := h.svc.ReleaseHold(r.Context(), id, claims.UserID)
 	if err != nil {
-		// PR-L1.1: machine-readable error_code в metadata.
 		switch {
 		case IsNotFound(err):
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "hold not found"})
-			h.recordAdmin(r, "release_hold", id, http.StatusNotFound, false, map[string]any{
+			h.recordAdmin(r, "request_release", id, http.StatusNotFound, false, map[string]any{
 				"error_code": "not_found",
 			})
 		case IsPendingNotReleasable(err):
-			// PR-L2.3: pending hold нельзя release. Operator должен
-			// использовать /reject. Возвращаем 409, НЕ 200
-			// already_released — контракт "pending ещё не был active"
-			// требует явной отмены через другой endpoint.
 			writeJSON(w, http.StatusConflict, errorResponse{Error: "hold is pending, use reject to cancel"})
-			h.recordAdmin(r, "release_hold", id, http.StatusConflict, false, map[string]any{
+			h.recordAdmin(r, "request_release", id, http.StatusConflict, false, map[string]any{
 				"error_code": "pending_not_releasable",
 			})
+		case IsAlreadyReleasePending(err):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "release already pending for this hold"})
+			h.recordAdmin(r, "request_release", id, http.StatusConflict, false, map[string]any{
+				"error_code": "already_release_pending",
+			})
 		case IsNotActive(err):
-			// Идемпотентность: already-released (ранее был active →
-			// released). 200 с маркером.
-			writeJSON(w, http.StatusOK, map[string]any{
-				"id":     id,
-				"status": "already_released",
-			})
-			h.recordAdmin(r, "release_hold", id, http.StatusOK, true, map[string]any{
-				"status": "already_released",
-			})
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "already_released"})
+			h.recordAdmin(r, "request_release", id, http.StatusOK, true, map[string]any{"status": "already_released"})
 		case IsValidation(err):
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
-			h.recordAdmin(r, "release_hold", id, http.StatusBadRequest, false, map[string]any{
-				"error_code": "validation_failed",
-			})
+			h.recordAdmin(r, "request_release", id, http.StatusBadRequest, false, map[string]any{"error_code": "validation_failed"})
 		case IsNotConfigured(err):
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
-			h.recordAdmin(r, "release_hold", id, http.StatusServiceUnavailable, false, map[string]any{
-				"error_code": "not_configured",
-			})
+			h.recordAdmin(r, "request_release", id, http.StatusServiceUnavailable, false, map[string]any{"error_code": "not_configured"})
 		default:
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold release failed"})
-			h.recordAdmin(r, "release_hold", id, http.StatusInternalServerError, false, map[string]any{
-				"error_code": "internal_error",
-			})
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold release request failed"})
+			h.recordAdmin(r, "request_release", id, http.StatusInternalServerError, false, map[string]any{"error_code": "internal_error"})
 		}
 		return
 	}
 
 	writeJSON(w, http.StatusOK, toResponse(hold))
-	// PR-L1.1: case_ref_hash вместо raw case_ref.
-	h.recordAdmin(r, "release_hold", hold.ID, http.StatusOK, true, map[string]any{
+	h.recordAdmin(r, "request_release", hold.ID, http.StatusOK, true, map[string]any{
 		"target_user_id": hold.TargetUserID,
 		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+		"new_status":     string(hold.Status),
+	})
+}
+
+// ApproveRelease — POST /api/legal-holds/{id}/approve-release.
+// PR-L5: 4-eyes перевод release_pending → released.
+// approver должен отличаться от того, кто запросил release.
+func (h *Handler) ApproveRelease(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing id"})
+		return
+	}
+
+	hold, err := h.svc.ApproveRelease(r.Context(), id, claims.UserID)
+	if err != nil {
+		switch {
+		case IsNotFound(err):
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "hold not found"})
+			h.recordAdmin(r, "approve_release", id, http.StatusNotFound, false, map[string]any{"error_code": "not_found"})
+		case IsNotReleasePending(err):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "hold is not awaiting release approval"})
+			h.recordAdmin(r, "approve_release", id, http.StatusConflict, false, map[string]any{"error_code": "not_release_pending"})
+		case IsSelfReleaseApproval(err):
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "release approver must differ from release requester (4-eyes policy)"})
+			h.recordAdmin(r, "approve_release", id, http.StatusForbidden, false, map[string]any{"error_code": "self_release_approval"})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "approve_release", id, http.StatusServiceUnavailable, false, map[string]any{"error_code": "not_configured"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "approve release failed"})
+			h.recordAdmin(r, "approve_release", id, http.StatusInternalServerError, false, map[string]any{"error_code": "internal_error"})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toResponse(hold))
+	h.recordAdmin(r, "approve_release", hold.ID, http.StatusOK, true, map[string]any{
+		"target_user_id": hold.TargetUserID,
+		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+	})
+}
+
+// RejectRelease — POST /api/legal-holds/{id}/reject-release.
+// PR-L5: перевод release_pending → active (release rejected).
+func (h *Handler) RejectRelease(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing id"})
+		return
+	}
+
+	hold, err := h.svc.RejectRelease(r.Context(), id, claims.UserID)
+	if err != nil {
+		switch {
+		case IsNotFound(err):
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "hold not found"})
+			h.recordAdmin(r, "reject_release", id, http.StatusNotFound, false, map[string]any{"error_code": "not_found"})
+		case IsNotReleasePending(err):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "hold is not awaiting release approval"})
+			h.recordAdmin(r, "reject_release", id, http.StatusConflict, false, map[string]any{"error_code": "not_release_pending"})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "reject_release", id, http.StatusServiceUnavailable, false, map[string]any{"error_code": "not_configured"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "reject release failed"})
+			h.recordAdmin(r, "reject_release", id, http.StatusInternalServerError, false, map[string]any{"error_code": "internal_error"})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toResponse(hold))
+	h.recordAdmin(r, "reject_release", hold.ID, http.StatusOK, true, map[string]any{
+		"target_user_id": hold.TargetUserID,
+		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+		"new_status":     string(hold.Status),
+	})
+}
+
+// BulkApprove — POST /api/legal-holds/bulk-approve. Admin-only.
+// Body: {"ids": ["id-1", "id-2", ...]}
+// Per-item semantics: partial failures are reported per-item.
+func (h *Handler) BulkApprove(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "ids required"})
+		return
+	}
+
+	results, err := h.svc.BulkApprove(r.Context(), req.IDs, claims.UserID)
+	if err != nil {
+		if IsNotConfigured(err) {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	successCount, failureCount := 0, 0
+	for _, res := range results {
+		if res.Success {
+			successCount++
+		} else {
+			failureCount++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results":       results,
+		"success_count": successCount,
+		"failure_count": failureCount,
+	})
+	h.recordAdmin(r, "bulk_approve", "", http.StatusOK, failureCount == 0, map[string]any{
+		"requested": len(req.IDs),
+		"success":   successCount,
+		"failures":  failureCount,
+	})
+}
+
+// BulkReject — POST /api/legal-holds/bulk-reject. Admin-only.
+// Body: {"ids": [...]}
+func (h *Handler) BulkReject(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "ids required"})
+		return
+	}
+
+	results, err := h.svc.BulkReject(r.Context(), req.IDs, claims.UserID)
+	if err != nil {
+		if IsNotConfigured(err) {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	successCount, failureCount := 0, 0
+	for _, res := range results {
+		if res.Success {
+			successCount++
+		} else {
+			failureCount++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results":       results,
+		"success_count": successCount,
+		"failure_count": failureCount,
+	})
+	h.recordAdmin(r, "bulk_reject", "", http.StatusOK, failureCount == 0, map[string]any{
+		"requested": len(req.IDs),
+		"success":   successCount,
+		"failures":  failureCount,
+	})
+}
+
+// PendingSLA — GET /api/legal-holds/pending-sla?threshold_hours=N.
+// PR-L5: SLA visibility. Возвращает pending holds старше threshold.
+// Default threshold: 24 hours.
+func (h *Handler) PendingSLA(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+
+	thresholdHours := 24
+	if s := r.URL.Query().Get("threshold_hours"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			thresholdHours = n
+		}
+	}
+	threshold := time.Duration(thresholdHours) * time.Hour
+
+	holds, err := h.svc.PendingOlderThan(r.Context(), threshold)
+	if err != nil {
+		if IsNotConfigured(err) {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal"})
+		return
+	}
+
+	out := make([]holdResponse, 0, len(holds))
+	for i := range holds {
+		out = append(out, toResponse(&holds[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"holds":           out,
+		"count":           len(out),
+		"threshold_hours": thresholdHours,
 	})
 }
 
