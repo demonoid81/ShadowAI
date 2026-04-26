@@ -23,6 +23,7 @@ and pre-launch checklist.
 | SA_v2 embedder degraded | [deploy-rollback.md#semantic-v2-degraded](deploy-rollback.md#semantic-v2-degraded) |
 | Evidence export / WORM / Object Lock | [evidence-export-runbook.md](../evidence-export-runbook.md) |
 | Quarterly compliance evidence collection | [evidence-collection.md](evidence-collection.md) |
+| Access review (SOC2.3) | [access-review.md](access-review.md) |
 
 ---
 

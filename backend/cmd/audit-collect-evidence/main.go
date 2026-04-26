@@ -212,6 +212,36 @@ func run(args []string, stdout, stderr io.Writer) int {
 		})
 	}
 
+	// ── 3.5 Access review report (SOC2.3 — requires DATABASE_URL) ─────────
+	if os.Getenv("DATABASE_URL") != "" {
+		arFile := filepath.Join(workDir, "evidence", "access-review.json")
+		if err := collectAccessReview(arFile, *from, *to, stderr); err == nil {
+			manifest.addControl(ControlEntry{
+				ID:          "access_review",
+				Description: "Period-scoped access review: users, privileged roles, MFA, IdP linkage, break-glass (SOC2.3)",
+				Status:      ControlCollected,
+				File:        "evidence/access-review.json",
+			})
+		} else {
+			fmt.Fprintf(stderr, "warning: access review: %v\n", err)
+			manifest.addControl(ControlEntry{
+				ID:                "access_review",
+				Description:       "Period-scoped access review: users, privileged roles, MFA, IdP linkage, break-glass",
+				Status:            ControlNotCollected,
+				LiveCheckRequired: true,
+				Reason:            fmt.Sprintf("audit-access-review failed: %v", err),
+			})
+		}
+	} else {
+		manifest.addControl(ControlEntry{
+			ID:                "access_review",
+			Description:       "Period-scoped access review: users, privileged roles, MFA, IdP linkage, break-glass",
+			Status:            ControlNotCollected,
+			LiveCheckRequired: true,
+			Reason:            "DATABASE_URL not set; run: audit-access-review --global --from <from> --to <to> --format json",
+		})
+	}
+
 	// ── 4. Checklist templates (always generated) ──────────────────────────
 	checklists := map[string]string{
 		"access-review-checklist.md":          accessReviewChecklist(*from, *to),
@@ -478,4 +508,33 @@ func writeJSONPackage(workDir string, m *PackageManifest, outFile string) error 
 		return err
 	}
 	return os.WriteFile(outFile, data, 0o644)
+}
+
+// collectAccessReview invokes audit-access-review and saves its JSON output.
+// Runs in global mode to capture cross-org view; period-scoped for break-glass events.
+func collectAccessReview(outFile, from, to string, stderr io.Writer) error {
+	bin, err := exec.LookPath("audit-access-review")
+	if err != nil {
+		return fmt.Errorf("audit-access-review not found in PATH; install via make build-cli")
+	}
+	cmd := exec.Command(bin,
+		"--global",
+		"--from", from, "--to", to,
+		"--format", "json",
+	)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr, cmd.Env = &outBuf, &errBuf, os.Environ()
+
+	runErr := cmd.Run()
+	if errBuf.Len() > 0 {
+		fmt.Fprintf(stderr, "  (audit-access-review) %s\n", strings.TrimSpace(errBuf.String()))
+	}
+	// Exit 1 = findings (still a valid JSON report — save it).
+	if runErr != nil {
+		if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() == 2 {
+			return runErr // config/runtime error
+		}
+		// exit 1 = findings: report is valid JSON, save it
+	}
+	return os.WriteFile(outFile, outBuf.Bytes(), 0o644)
 }
