@@ -181,6 +181,51 @@ func TestVerifyTenantBundle_WrongRootFails(t *testing.T) {
 	}
 }
 
+// TestVerifyTenantBundle_ExtraProofRejected — a proof for a row NOT in
+// tenant_chain_hashes.jsonl must fail (cross-tenant injection guard).
+func TestVerifyTenantBundle_ExtraProofRejected(t *testing.T) {
+	// Build a valid bundle, then inject an extra proof for a non-tenant row.
+	dir := buildTestTenantBundle(t, nil, nil, "")
+
+	// Read existing merkle_proofs.jsonl and append an extra entry.
+	f, err := os.OpenFile(dir+"/merkle_proofs.jsonl", os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open proofs for append: %v", err)
+	}
+	extraProof := MerkleProofLine{
+		Table:       "audit_logs",
+		SeqNo:       99, // not in tenant_chain_hashes.jsonl
+		AnchorSeqLo: 0,
+		AnchorSeqHi: 3,
+		LeafHashHex: hex.EncodeToString(bytes.Repeat([]byte{0x05}, 32)),
+		RootHex:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	enc := json.NewEncoder(f)
+	enc.SetEscapeHTML(false)
+	enc.Encode(extraProof)
+	f.Close()
+
+	// Recompute manifest so file integrity passes.
+	hashes, _ := ComputeBundleHashes(dir)
+	WriteManifest(dir, &BundleManifest{
+		Version:    BundleVersion,
+		ExportTime: time.Now().UTC(),
+		Tables:     []string{"audit_logs"},
+		OrgID:      "test-org",
+		FileSHA256: hashes,
+	})
+
+	res, err := VerifyTenantBundle(dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyTenantBundle: %v", err)
+	}
+	// The extra proof's root_hex is wrong so it fails Merkle verify first,
+	// or the reverse check fails. Either way result must not be OK.
+	if res.OK {
+		t.Error("bundle with extra (cross-tenant) proof should fail verification")
+	}
+}
+
 func TestVerifyTenantBundle_WrongSignatureFails(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	dir := buildTestTenantBundle(t, pub, priv, "")

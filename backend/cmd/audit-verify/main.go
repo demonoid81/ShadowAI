@@ -112,15 +112,40 @@ func main() {
 		}
 		defer cleanup()
 
-		result, err := evidencebundle.VerifyBundle(dir, pubKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: bundle verify: %v\n", err)
+		// T3/W6: dispatch on bundle type.
+		// Tenant bundles (org_id != "") use VerifyTenantBundle (Merkle proofs).
+		// Global bundles use legacy VerifyBundle (full chain inventory).
+		manifest, manifestErr := evidencebundle.ReadBundleManifest(dir)
+		if manifestErr != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: read manifest: %v\n", manifestErr)
 			os.Exit(1)
 		}
 
-		printBundleResult(result, *verbose)
-		if !result.OK {
-			os.Exit(1)
+		if manifest.OrgID != "" {
+			// Tenant bundle — resolve pubKey from bundle if not supplied.
+			if pubKey == nil {
+				pubKey, _ = evidencebundle.LoadBundlePublicKey(dir)
+			}
+			tenantResult, err := evidencebundle.VerifyTenantBundle(dir, pubKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: tenant bundle verify: %v\n", err)
+				os.Exit(1)
+			}
+			printTenantBundleResult(tenantResult, *verbose)
+			if !tenantResult.OK {
+				os.Exit(1)
+			}
+		} else {
+			// Global bundle — legacy path.
+			result, err := evidencebundle.VerifyBundle(dir, pubKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: bundle verify: %v\n", err)
+				os.Exit(1)
+			}
+			printBundleResult(result, *verbose)
+			if !result.OK {
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -453,6 +478,31 @@ func printBundleResult(r evidencebundle.BundleVerifyResult, verbose bool) {
 				fmt.Printf("  COUNT_MISMATCH anchor_id=%s range=[%d,%d] anchor_count=%d inventory_count=%d\n",
 					m.AnchorID, m.SeqLo, m.SeqHi, m.AnchorRowCount, m.InventoryCount)
 			}
+		}
+	}
+}
+
+func printTenantBundleResult(r evidencebundle.TenantVerifyResult, verbose bool) {
+	ok := func(b bool) string {
+		if b {
+			return "OK"
+		}
+		return "FAIL"
+	}
+	status := ok(r.OK)
+	fmt.Printf("tenant bundle proofs            %-6s checked=%d failed=%d\n",
+		status, r.ProofsChecked, len(r.ProofsFailed))
+	if verbose {
+		for _, f := range r.ProofsFailed {
+			fmt.Printf("  PROOF_FAIL table=%s seq_no=%d reason=%s\n",
+				f.Table, f.SeqNo, f.Reason)
+		}
+	}
+	fmt.Printf("tenant bundle sigs              %-6s failed=%d\n",
+		ok(len(r.SignaturesFailed) == 0), len(r.SignaturesFailed))
+	if verbose {
+		for _, id := range r.SignaturesFailed {
+			fmt.Printf("  SIG_FAIL anchor_id=%s\n", id)
 		}
 	}
 }

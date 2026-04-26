@@ -15,14 +15,23 @@ import (
 //
 // Verification steps:
 //  1. File integrity: SHA256 of every file matches bundle_manifest.json.
-//  2. For every proof in merkle_proofs.jsonl:
+//  2. Auto-load public_key.b64 from bundle dir if pubKey is nil and file exists.
+//  3. For every proof in merkle_proofs.jsonl:
 //     a. Reconstruct Merkle root from leaf hash + siblings.
 //     b. Compare with RootHex (which must match the signed anchor root).
-//  3. For every anchor in anchors.jsonl with a signature: verify Ed25519.
-//  4. Cross-check: every row in tenant_chain_hashes.jsonl has a proof.
+//  4. For every anchor with a signature: verify Ed25519 (if pubKey available).
+//  5. Reverse cross-check: every proof has a declared tenant row.
+//  6. Forward cross-check: every tenant row has a proof and matches leaf hash.
 //
-// pubKey may be nil (skips Ed25519 check).
+// pubKey may be nil; if so VerifyTenantBundle tries to load public_key.b64
+// from the bundle directory (same behavior as VerifyBundle).
 func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResult, error) {
+	// Auto-load bundle's own public key when caller doesn't supply one.
+	if pubKey == nil {
+		if loaded, _ := LoadBundlePublicKey(dir); loaded != nil {
+			pubKey = loaded
+		}
+	}
 	var res TenantVerifyResult
 
 	// 1. File integrity.
@@ -122,7 +131,46 @@ func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResul
 		return res, fmt.Errorf("scan merkle_proofs.jsonl: %w", err)
 	}
 
-	// 5. Cross-check: every tenant hash has a proof AND matches the proof's leaf hash.
+	// 5. Cross-checks (forward + reverse).
+
+	// Build tenant hash set for reverse proof validation.
+	tenantHashSet := make(map[string]bool) // table|seqNo → exists in tenant_chain_hashes.jsonl
+	thForReverse, err := os.Open(filepath.Join(dir, "tenant_chain_hashes.jsonl"))
+	if err != nil {
+		return res, fmt.Errorf("open tenant_chain_hashes.jsonl (reverse check): %w", err)
+	}
+	sc0 := bufio.NewScanner(thForReverse)
+	for sc0.Scan() {
+		b := sc0.Bytes()
+		if len(b) == 0 {
+			continue
+		}
+		var th TenantChainHashLine
+		if json.Unmarshal(b, &th) == nil {
+			tenantHashSet[fmt.Sprintf("%s|%d", th.Table, th.SeqNo)] = true
+		}
+	}
+	thForReverse.Close()
+
+	// Reverse validation: every proof must have a declared tenant row.
+	// A malicious bundle could include cross-tenant leaf hashes in merkle_proofs.jsonl
+	// not present in tenant_chain_hashes.jsonl. coveredSeqs captures only proofs that
+	// passed Merkle verification — iterate it to check reverse membership.
+	for key := range coveredSeqs {
+		if !tenantHashSet[key] {
+			// Parse table and seqNo from key.
+			var table string
+			var seqNo int64
+			fmt.Sscanf(key, "%s", &table) // best-effort; key is "table|seqNo"
+			_ = seqNo
+			res.ProofsFailed = append(res.ProofsFailed, TenantProofFailure{
+				Table:  table,
+				SeqNo:  0,
+				Reason: fmt.Sprintf("proof for %q has no corresponding row in tenant_chain_hashes.jsonl (cross-tenant injection)", key),
+			})
+		}
+	}
+
 	// Build proof leaf map: table|seqNo → leaf_hash_hex.
 	proofLeafMap := make(map[string]string)
 	proofsFile2, err := os.Open(proofsPath)

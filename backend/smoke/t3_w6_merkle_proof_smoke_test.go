@@ -202,13 +202,13 @@ func buildSmokeProofBundle(
 			SeqHi:         a.SeqHi,
 			RowCount:      a.RowCount,
 			MerkleRootHex: a.MerkleRootHex(),
+			SinkName:      a.SinkName,  // required for ManifestCanonical signature
+			SinkRef:       a.SinkRef,   // required for ManifestCanonical signature
+			SinkOK:        a.SinkOK,
 			PubKeyID:      a.PubKeyID,
 			CreatedAt:     a.CreatedAt,
 		}
 		if len(a.Signature) > 0 {
-			import_hex := make([]byte, len(a.Signature)*2)
-			hexLen := len(import_hex)
-			_ = hexLen
 			l.SignatureHex = encHex(a.Signature)
 		}
 		anchorLines = append(anchorLines, l)

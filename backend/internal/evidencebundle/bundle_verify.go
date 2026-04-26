@@ -464,6 +464,17 @@ func countInRange(sorted []int64, lo, hi int64) int {
 // NDJSON readers
 // ---------------------------------------------------------------------------
 
+// ReadBundleManifest is the exported version of readManifest for CLI dispatch.
+func ReadBundleManifest(dir string) (*BundleManifest, error) {
+	return readManifest(dir)
+}
+
+// LoadBundlePublicKey loads public_key.b64 from the bundle directory.
+// Returns nil, nil when the file is absent (unsigned bundle).
+func LoadBundlePublicKey(dir string) (ed25519.PublicKey, error) {
+	return readBundlePubKey(filepath.Join(dir, "public_key.b64"))
+}
+
 func readManifest(dir string) (*BundleManifest, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "bundle_manifest.json"))
 	if err != nil {

@@ -285,7 +285,8 @@ func main() {
 		}
 	} else {
 		fmt.Printf("Note: global verification reports skipped for tenant bundle (org=%s).\n", tenantOrgID)
-		fmt.Printf("  Use anchors.jsonl + chain_inventory.jsonl for offline Merkle verification.\n")
+		fmt.Printf("  Use audit-verify --bundle <dir> for offline Merkle inclusion proof verification.\n")
+		fmt.Printf("  Files: anchors.jsonl + tenant_chain_hashes.jsonl + merkle_proofs.jsonl\n")
 	}
 
 	// Write README.txt.
