@@ -402,7 +402,23 @@ type SignatureVerifyResult struct {
 // Unsigned anchors (Signature=nil) are counted but do not cause failure —
 // they are pre-W4.1 records. Only anchors with a non-nil signature that
 // fail verification are reported as failures.
+//
+// For multi-key (post-rotation) scenarios use VerifyAnchorSignaturesWithKeyring.
 func VerifyAnchorSignatures(ctx context.Context, db *sql.DB, tableName string, pubKey ed25519.PublicKey) (SignatureVerifyResult, error) {
+	return VerifyAnchorSignaturesWithKeyring(ctx, db, tableName, SingleKeyKeyring(pubKey))
+}
+
+// VerifyAnchorSignaturesWithKeyring verifies Ed25519 signatures using a
+// SigningKeyring that supports multiple key epochs (W7 key rotation).
+//
+// For each signed anchor, the keyring is consulted by a.PubKeyID:
+//   - empty pubkey_id → uses keyring legacy key (backward compat with pre-W4.1 anchors)
+//   - known pubkey_id → verified with its registered public key
+//   - unknown pubkey_id → FAIL-CLOSED: reported as signature failure
+//
+// Unsigned anchors (nil Signature) are counted but do not cause failure.
+// Extra keys in the keyring (not referenced by any anchor) are not errors.
+func VerifyAnchorSignaturesWithKeyring(ctx context.Context, db *sql.DB, tableName string, keyring *SigningKeyring) (SignatureVerifyResult, error) {
 	res := SignatureVerifyResult{Table: tableName}
 	repo := NewAnchorRepository(db)
 
@@ -417,13 +433,23 @@ func VerifyAnchorSignatures(ctx context.Context, db *sql.DB, tableName string, p
 			res.UnsignedCount++
 			continue
 		}
-		if !VerifyAnchorSignature(&a, pubKey) {
+		pub, ok := keyring.LookupSigningKey(a.PubKeyID)
+		if !ok {
+			// Unknown key_id: fail-closed (cannot verify, must report as failure).
 			res.SignatureFails = append(res.SignatureFails, AnchorMismatch{
 				AnchorID: a.ID,
 				SeqLo:    a.SeqLo,
 				SeqHi:    a.SeqHi,
 				Stored:   a.Signature,
-				// Recomputed = nil (signature verification is boolean)
+			})
+			continue
+		}
+		if !VerifyAnchorSignature(&a, pub) {
+			res.SignatureFails = append(res.SignatureFails, AnchorMismatch{
+				AnchorID: a.ID,
+				SeqLo:    a.SeqLo,
+				SeqHi:    a.SeqHi,
+				Stored:   a.Signature,
 			})
 		}
 	}
@@ -763,4 +789,109 @@ func splitPGArray(s string) []string {
 		result = append(result, string(current))
 	}
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// W7: Chain secret keyring — multi-epoch HMAC verification
+// ---------------------------------------------------------------------------
+
+// VerifyAuditLogsWithKeyring verifies audit_logs chain integrity using a
+// ChainSecretKeyring that supports AUDIT_CHAIN_SECRET rotation (W7).
+//
+// For each row, the keyring is queried by seq_no to find the correct HMAC secret.
+// Rows with seq_no not covered by any epoch → BREAK (fail-closed).
+// Legacy usage (single secret) is covered by SingleSecretKeyring(secret).
+func VerifyAuditLogsWithKeyring(ctx context.Context, db *sql.DB, keyring *ChainSecretKeyring) (VerifyResult, error) {
+	start := time.Now()
+	res := VerifyResult{Table: "audit_logs"}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, coalesce(user_id::text,''), coalesce(model,''),
+		        coalesce(provider,''), coalesce(endpoint,''), status_code,
+		        coalesce(prompt_tokens,0), coalesce(completion_tokens,0),
+		        coalesce(total_tokens,0), coalesce(cost_usd,0),
+		        coalesce(pii_detected,false), coalesce(pii_types,'{}'),
+		        coalesce(policy_action,''), coalesce(outcome,''),
+		        coalesce(fallback_reason,''), coalesce(usage_source,''),
+		        created_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001')
+		 FROM audit_logs
+		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
+		 ORDER BY seq_no`)
+	if err != nil {
+		return res, fmt.Errorf("verify audit_logs (keyring): query: %w", err)
+	}
+	defer rows.Close()
+
+	var prevHash []byte
+	var prevSeqNo int64
+
+	for rows.Next() {
+		var r AuditRow
+		var piiTypes []string
+		var canonVer, orgID string
+		if err := rows.Scan(
+			&r.ID, &r.UserID, &r.Model, &r.Provider, &r.Endpoint,
+			&r.StatusCode, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens,
+			&r.CostUSD, &r.PIIDetected, pqArrayScan(&piiTypes),
+			&r.PolicyAction, &r.Outcome, &r.FallbackReason, &r.UsageSource,
+			&r.CreatedAt, &r.SeqNo, &r.RowHash,
+			&canonVer, &orgID,
+		); err != nil {
+			return res, fmt.Errorf("verify audit_logs (keyring): scan: %w", err)
+		}
+		r.PIITypes = piiTypes
+		res.RowCount++
+
+		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
+			for gap := prevSeqNo + 1; gap < r.SeqNo; gap++ {
+				res.Gaps = append(res.Gaps, gap)
+			}
+		}
+
+		secret, ok := keyring.LookupSecret(r.SeqNo)
+		if !ok {
+			res.Breaks = append(res.Breaks, ChainBreak{
+				SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash,
+			})
+			prevHash = r.RowHash
+			prevSeqNo = r.SeqNo
+			continue
+		}
+
+		var canonical string
+		if canonVer == "v2" {
+			canonical = CanonicalAuditLogV2(
+				r.ID, r.UserID, r.Model, r.Provider, r.Endpoint,
+				r.StatusCode, r.PromptTokens, r.CompletionTokens, r.TotalTokens,
+				CostMicrocents(r.CostUSD),
+				r.PIIDetected, r.PIITypes,
+				r.PolicyAction, r.Outcome, r.FallbackReason, r.UsageSource,
+				r.CreatedAt.UTC().Unix(), orgID,
+			)
+		} else {
+			canonical = CanonicalAuditLog(
+				r.ID, r.UserID, r.Model, r.Provider, r.Endpoint,
+				r.StatusCode, r.PromptTokens, r.CompletionTokens, r.TotalTokens,
+				CostMicrocents(r.CostUSD),
+				r.PIIDetected, r.PIITypes,
+				r.PolicyAction, r.Outcome, r.FallbackReason, r.UsageSource,
+				r.CreatedAt.UTC().Unix(),
+			)
+		}
+		if !Verify(prevHash, canonical, secret, r.RowHash) {
+			res.Breaks = append(res.Breaks, ChainBreak{
+				SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash,
+			})
+		}
+		prevHash = r.RowHash
+		prevSeqNo = r.SeqNo
+	}
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("verify audit_logs (keyring): rows: %w", err)
+	}
+	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
+	res.Duration = time.Since(start)
+	return res, nil
 }

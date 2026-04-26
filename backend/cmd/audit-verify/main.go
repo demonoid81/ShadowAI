@@ -74,6 +74,14 @@ func main() {
 	immudbPass      := flag.String("immudb-pass", "", "immudb password for --verify-sink")
 	immudbAPIPrefix := flag.String("immudb-api-prefix", "", "immudb REST API prefix (default /v1/immurestproxy for immugw; /api/v2 for immudb 2.x built-in REST)")
 	immudbProfile   := flag.String("immudb-rest-profile", "", "W4.3.1: immudb REST API profile: immugw_v1 (default) or immudb_v2 (immudb 1.9+ built-in REST)")
+	// W7: key rotation keyring flags.
+	signingKeyringFile := flag.String("signing-keyring", "", "W7: path to JSON signing keyring file (pubkey_id→pubkey map for multi-epoch signature verification)")
+	chainKeyringFile   := flag.String("chain-keyring", "", "W7: path to JSON chain secret keyring file (seq_no epoch ranges for AUDIT_CHAIN_SECRET rotation)")
+	// W7: restore drill — automated restore verification flow.
+	// Runs: chain verification + anchor verification + signature verification in sequence.
+	// Requires DATABASE_URL (chain+anchors) and AUDIT_CHAIN_SECRET or --chain-keyring.
+	// Exit 0=all pass, 1=verification failure, 2=config error.
+	restoreDrill := flag.Bool("restore-drill", false, "W7: run full restore verification suite (chain+anchors+signatures) — automated restore drill")
 	flag.Parse()
 
 	// Config errors exit with code 2 (not 1 which is verification failure).
@@ -150,14 +158,34 @@ func main() {
 		return
 	}
 
-	// Chain verification (W2 tier) requires AUDIT_CHAIN_SECRET.
+	// W7: load signing keyring if provided (replaces single --pubkey for multi-epoch).
+	var signingKeyring *chain.SigningKeyring
+	if *signingKeyringFile != "" {
+		kr, err := chain.LoadSigningKeyringFromFile(*signingKeyringFile)
+		if err != nil {
+			exitConfig("--signing-keyring: %v", err)
+		}
+		signingKeyring = kr
+	}
+
+	// W7: load chain secret keyring if provided (replaces AUDIT_CHAIN_SECRET for rotation).
+	var chainKeyring *chain.ChainSecretKeyring
+	if *chainKeyringFile != "" {
+		kr, err := chain.LoadChainSecretKeyringFromFile(*chainKeyringFile)
+		if err != nil {
+			exitConfig("--chain-keyring: %v", err)
+		}
+		chainKeyring = kr
+	}
+
+	// Chain verification (W2 tier) requires AUDIT_CHAIN_SECRET or --chain-keyring.
 	// Anchor-only (W3 tier) does not.
 	wantChain := !*anchorOnly
 	var secretBytes []byte
-	if wantChain {
+	if wantChain && chainKeyring == nil {
 		secret := os.Getenv("AUDIT_CHAIN_SECRET")
 		if secret == "" {
-			exitConfig("AUDIT_CHAIN_SECRET is required for chain verification (use --anchor-only to skip)")
+			exitConfig("AUDIT_CHAIN_SECRET is required for chain verification (use --anchor-only to skip, or --chain-keyring for multi-epoch)")
 		}
 		if len(secret) < 32 {
 			exitConfig("AUDIT_CHAIN_SECRET must be >= 32 chars")
@@ -186,7 +214,13 @@ func main() {
 		tables = []string{"audit_logs", "admin_event_logs", "legal_hold_events", "audit_purge_runs"}
 	}
 
-	// W2 chain verification.
+	// Resolve effective chain keyring: --chain-keyring takes priority over env secret.
+	// If neither is set and chain verification is skipped, this stays nil.
+	if wantChain && chainKeyring == nil && len(secretBytes) > 0 {
+		chainKeyring = chain.SingleSecretKeyring(secretBytes)
+	}
+
+	// W2 chain verification — keyring-aware (W7) or legacy single-secret.
 	if wantChain {
 		var results []chain.VerifyResult
 		for _, table := range tables {
@@ -194,7 +228,7 @@ func main() {
 			var err error
 			switch table {
 			case "audit_logs":
-				res, err = chain.VerifyAuditLogs(ctx, db, secretBytes)
+				res, err = chain.VerifyAuditLogsWithKeyring(ctx, db, chainKeyring)
 			case "admin_event_logs":
 				res, err = chain.VerifyAdminEventLogs(ctx, db, secretBytes)
 			case "legal_hold_events":
@@ -233,45 +267,57 @@ func main() {
 		}
 	}
 
-	// W4.1: signature verification — no chain_secret required, needs public key.
-	if *verifySignatures {
-		var pubKeyB64 string
-		switch {
-		case *pubKeyFlag != "":
-			pubKeyB64 = *pubKeyFlag
-		case *pubKeyFile != "":
-			data, err := os.ReadFile(*pubKeyFile)
-			if err != nil {
-				exitConfig("pubkey-file: %v", err)
+	// W4.1/W7: signature verification — uses keyring (W7) or single pubkey (legacy).
+	// signingKeyring loaded above from --signing-keyring; also built from --pubkey/--pubkey-file.
+	if *verifySignatures || *restoreDrill {
+		// Resolve effective signing keyring.
+		effectiveKeyring := signingKeyring
+		if effectiveKeyring == nil {
+			// Try single-key mode from --pubkey or --pubkey-file.
+			var pubKeyB64 string
+			switch {
+			case *pubKeyFlag != "":
+				pubKeyB64 = *pubKeyFlag
+			case *pubKeyFile != "":
+				data, err := os.ReadFile(*pubKeyFile)
+				if err != nil {
+					exitConfig("pubkey-file: %v", err)
+				}
+				pubKeyB64 = strings.TrimSpace(string(data))
 			}
-			pubKeyB64 = strings.TrimSpace(string(data))
-		default:
-			exitConfig("--verify-signatures requires --pubkey or --pubkey-file")
+			if pubKeyB64 != "" {
+				pubKey, err := chain.ParsePublicKey(pubKeyB64)
+				if err != nil {
+					exitConfig("parse public key: %v", err)
+				}
+				effectiveKeyring = chain.SingleKeyKeyring(pubKey)
+			}
 		}
-		pubKey, err := chain.ParsePublicKey(pubKeyB64)
-		if err != nil {
-			exitConfig("parse public key: %v", err)
+		if effectiveKeyring == nil && *verifySignatures {
+			exitConfig("--verify-signatures requires --pubkey, --pubkey-file, or --signing-keyring")
 		}
-		for _, table := range tables {
-			sr, err := chain.VerifyAnchorSignatures(ctx, db, table, pubKey)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ERROR signatures %s: %v\n", table, err)
-				anyFail = true
-				continue
-			}
-			if !sr.OK {
-				anyFail = true
-			}
-			status := "OK"
-			if !sr.OK {
-				status = "FAIL"
-			}
-			fmt.Printf("sigs   %-24s %-6s total=%d unsigned=%d fails=%d\n",
-				sr.Table, status, sr.AnchorCount, sr.UnsignedCount, len(sr.SignatureFails))
-			if *verbose {
-				for _, f := range sr.SignatureFails {
-					fmt.Printf("  SIG_FAIL anchor_id=%s range=[%d,%d] (tampered or wrong key)\n",
-						f.AnchorID, f.SeqLo, f.SeqHi)
+		if effectiveKeyring != nil {
+			for _, table := range tables {
+				sr, err := chain.VerifyAnchorSignaturesWithKeyring(ctx, db, table, effectiveKeyring)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "ERROR signatures %s: %v\n", table, err)
+					anyFail = true
+					continue
+				}
+				if !sr.OK {
+					anyFail = true
+				}
+				status := "OK"
+				if !sr.OK {
+					status = "FAIL"
+				}
+				fmt.Printf("sigs   %-24s %-6s total=%d unsigned=%d fails=%d\n",
+					sr.Table, status, sr.AnchorCount, sr.UnsignedCount, len(sr.SignatureFails))
+				if *verbose {
+					for _, f := range sr.SignatureFails {
+						fmt.Printf("  SIG_FAIL anchor_id=%s range=[%d,%d] (tampered or wrong key — unknown key_id or bad signature)\n",
+							f.AnchorID, f.SeqLo, f.SeqHi)
+					}
 				}
 			}
 		}
@@ -367,7 +413,8 @@ func main() {
 	}
 
 	// W3 anchor verification — no secret required.
-	if *anchorOnly || *includeAnchors {
+	// restore-drill always runs anchor verification as part of the full suite.
+	if *anchorOnly || *includeAnchors || *restoreDrill {
 		for _, table := range tables {
 			ar, err := chain.VerifyAnchors(ctx, db, table, *anchorSinkPath)
 			if err != nil {

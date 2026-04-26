@@ -248,18 +248,105 @@ for Ed25519 anchor signature verification.
 
 ---
 
-## 6. Restore Drill
+## 6. W7 Key Epoch Model and Rotation
+
+### 6.1 Key epoch model
+
+ShadowAI uses two independent key types for evidence integrity:
+
+| Key type | Used for | Epoch model |
+|----------|----------|-------------|
+| `AUDIT_CHAIN_SECRET` | HMAC chain (W2) per-row tamper detection | Range-based: seq_no epochs |
+| Ed25519 signing key | Anchor manifest signatures (W4.1) | ID-based: `pubkey_id` per anchor |
+
+After rotation, **old evidence is verified with old keys, new evidence with new keys**.
+No DB schema change is required — epoch is determined at verify time.
+
+### 6.2 Signing key rotation (Ed25519)
+
+**Writer side** (anchor scheduler): rotate by passing a new key pair with a new `pubkey_id`:
+```bash
+# Generate new key pair
+openssl genpkey -algorithm ed25519 -out new-signing.pem
+openssl pkey -in new-signing.pem -pubout -out new-signing-pub.pem
+
+# Pass new key to anchor scheduler via env:
+ANCHOR_SIGNING_KEY_ID=ed25519-2026-Q3
+ANCHOR_SIGNING_PRIVATE_KEY=<base64 of new private key>
+```
+
+**Verifier side**: build a signing keyring file `signing-keyring.json`:
+```json
+{
+  "keys": {
+    "ed25519-2026-Q1": "base64pubkey-v1...",
+    "ed25519-2026-Q2": "base64pubkey-v2...",
+    "ed25519-2026-Q3": "base64pubkey-v3..."
+  },
+  "legacy_key": "base64pubkey-pre-W4.1..."
+}
+```
+
+Verify anchors across all epochs:
+```bash
+audit-verify \
+  --table all \
+  --verify-signatures \
+  --signing-keyring ./signing-keyring.json \
+  --verbose
+```
+
+Rules:
+- `keys`: known pubkey_id → public key (checked fail-closed: unknown key_id = failure)
+- `legacy_key`: used for anchors with empty `pubkey_id` (pre-W4.1 compatibility)
+- Extra keys in the keyring (not referenced by anchors) are not errors
+
+### 6.3 Chain secret rotation (AUDIT_CHAIN_SECRET)
+
+**Writer side**: change `AUDIT_CHAIN_SECRET` in deployment. New rows use new secret; old rows were sealed with old secret.
+
+**Verifier side**: build a chain keyring file `chain-keyring.json`:
+```json
+{
+  "epochs": [
+    {"from_seq_no": 0, "to_seq_no": 12499, "secret_base64": "base64-secret-v1..."},
+    {"from_seq_no": 12500, "to_seq_no": -1, "secret_base64": "base64-secret-v2..."}
+  ]
+}
+```
+
+`to_seq_no: -1` means "no upper bound" (current epoch). `from_seq_no` of each epoch must
+not overlap with the previous.
+
+Verify chain across epochs:
+```bash
+audit-verify \
+  --table audit_logs \
+  --chain-keyring ./chain-keyring.json \
+  --verbose
+```
+
+Without `--chain-keyring`, `AUDIT_CHAIN_SECRET` env var is used as a single-epoch keyring
+(backward-compatible with all existing deployments).
+
+---
+
+## 7. Restore Drill
 
 A restore drill verifies that WORM evidence survives a DB restore and that
 anchors/bundles remain consistent with the restored data.
 
-### 6.1 Prerequisites
+### 7.1 Prerequisites
 
 - PG backup (pg_dump or managed snapshot)
 - Evidence bundle from same point in time
 - `AUDIT_CHAIN_SECRET` (stored separately, not in DB backup)
+- Optional: signing keyring file for multi-epoch key verification
 
-### 6.2 Steps
+### 7.2 Automated restore drill (W7)
+
+The `--restore-drill` flag runs the full verification suite in a single command.
+Use this in CI/CronJob pipelines and for quarterly drills.
 
 ```bash
 # 1. Restore DB to a new instance
@@ -269,33 +356,65 @@ pg_restore -d shadowai_restore backup.dump
 export DATABASE_URL=postgres://user:pass@restore-host/shadowai_restore
 export AUDIT_CHAIN_SECRET=<secret from vault>
 
-# 2. Run chain verification against restored DB
-audit-verify --include-anchors --table all --verbose
+# 2. Run automated restore drill (chain + anchors + signatures in sequence)
+audit-verify \
+  --restore-drill \
+  --table all \
+  --verbose
 
-# 3. Compare Merkle roots: DB-computed roots must match bundle anchors
-#    (Run from the restored DB context)
+# With multi-epoch signing keyring:
+audit-verify \
+  --restore-drill \
+  --table all \
+  --signing-keyring ./signing-keyring.json \
+  --verbose
+
+# With chain secret rotation keyring:
+audit-verify \
+  --restore-drill \
+  --table all \
+  --chain-keyring ./chain-keyring.json \
+  --signing-keyring ./signing-keyring.json \
+  --verbose
+
+# 3. Verify offline bundle
 audit-verify --bundle ./evidence-bundle-20260426 --verbose
 
 # 4. Cross-check row counts
 psql $DATABASE_URL -c \
   "SELECT table_name, COUNT(*) FROM audit_chain_anchors GROUP BY table_name"
-
-# 5. Verify no gaps in chain coverage
-audit-verify --table audit_logs --verbose
-audit-verify --table admin_event_logs --verbose
 ```
 
-Expected: all verifications pass. Any discrepancy indicates tampering or an
-incomplete backup.
+Exit codes:
+- `0` — all verifications passed
+- `1` — one or more verification failures (chain break, anchor mismatch, bad signature)
+- `2` — configuration error (missing env vars, invalid keyring file)
 
-### 6.3 Restore Drill Frequency
+### 7.3 Manual drill steps (if automated flow unavailable)
+
+```bash
+# Step 1: chain verification
+audit-verify --table all --verbose
+
+# Step 2: anchor verification
+audit-verify --anchor-only --table all --verbose
+
+# Step 3: signature verification
+audit-verify --verify-signatures --table all \
+  --signing-keyring ./signing-keyring.json --verbose
+
+# Step 4: offline bundle
+audit-verify --bundle ./evidence-bundle-20260426 --verbose
+```
+
+### 7.4 Restore Drill Frequency
 
 Recommended: quarterly. Required before SOC2 audit windows.
 Document each drill in the incident log with timestamp, operator, and results.
 
 ---
 
-## 7. Alert Response
+## 8. Alert Response
 
 ### EvidenceExportJobFailed
 
@@ -356,7 +475,7 @@ kubectl -n <namespace> logs job/<failed-job-name> | grep -E "FAIL|error|ERROR"
 
 ---
 
-## 8. Evidence Retention Audit Report (O4.4)
+## 9. Evidence Retention Audit Report (O4.4)
 
 `audit-evidence-report` gives operators and auditors a point-in-time view of the
 retention posture of every evidence bundle in S3 — without database access.
@@ -459,7 +578,7 @@ evidenceAuditReport:
 
 ---
 
-## 9. Helm Configuration Reference
+## 10. Helm Configuration Reference
 
 ```yaml
 evidenceExport:
@@ -498,7 +617,7 @@ evidenceExport:
 
 ---
 
-## 10. Prometheus Queries
+## 11. Prometheus Queries
 
 ```promql
 # Jobs that failed in the last 24h
