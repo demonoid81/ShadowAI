@@ -3,31 +3,27 @@
 {{- if not (has .Values.evidenceExport.mode $validModes) }}
 {{- fail (printf "evidenceExport.mode must be one of %v, got %q" $validModes .Values.evidenceExport.mode) }}
 {{- end }}
-{{- $validStorage := list "pvc" }}
+{{- $validStorage := list "pvc" "s3" }}
 {{- if not (has .Values.evidenceExport.storage $validStorage) }}
-{{- fail (printf "evidenceExport.storage must be one of %v, got %q (s3 support is deferred to O4.2)" $validStorage .Values.evidenceExport.storage) }}
+{{- fail (printf "evidenceExport.storage must be one of %v, got %q" $validStorage .Values.evidenceExport.storage) }}
+{{- end }}
+{{- if and (eq .Values.evidenceExport.storage "s3") (empty .Values.evidenceExport.s3.bucket) }}
+{{- fail "evidenceExport.s3.bucket must not be empty when storage=s3" }}
 {{- end }}
 {{- if and (eq .Values.evidenceExport.mode "tenants") (empty .Values.evidenceExport.orgIDs) }}
 {{- fail "evidenceExport.orgIDs must not be empty when mode=tenants" }}
 {{- end }}
-# PR-O4.1: Scheduled evidence bundle export + offline verification.
+# PR-O4.1/O4.2: Scheduled evidence bundle export + offline verification.
 #
 # Each run:
-#   1. Creates a timestamped output directory under /exports.
-#   2. Runs audit-export-evidence (global or per-tenant depending on mode).
-#   3. Runs audit-verify --bundle on the output.
-#   4. Optionally zips the bundle.
-#   5. Removes bundles older than retentionDays.
+#   1. Creates a timestamped output directory (/exports/... or /tmp/evidence/...).
+#   2. Runs audit-export-evidence (global or per-tenant).
+#   3. Runs audit-verify --bundle. Failure stops the Job immediately.
+#   4. (storage=s3) Uploads bundle zip via evidence-upload to S3. Failure fails Job.
+#   5. (storage=pvc) Removes local bundles older than retentionDays.
+#   6. (chainSecret=true) Runs live audit-verify --include-anchors against DB.
 #
 # exit code != 0 → Job fails → kube_job_status_failed alert fires.
-#
-# Mode options:
-#   global  — exports all tables as a global bundle (--global flag).
-#   tenants — exports one bundle per org in evidenceExport.orgIDs list.
-#
-# Storage options:
-#   pvc — mounts the evidence-exports PVC at /exports.
-#   (s3 deferred to O4.2)
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -42,7 +38,7 @@ spec:
   failedJobsHistoryLimit: 5
   jobTemplate:
     spec:
-      backoffLimit: 0   # no retry — failure may indicate tampered evidence
+      backoffLimit: 0
       activeDeadlineSeconds: {{ .Values.evidenceExport.deadlineSeconds | default 3600 }}
       template:
         metadata:
@@ -68,70 +64,82 @@ spec:
                 - |
                   set -eu
                   TS=$(date -u +%Y%m%d-%H%M%S)
-                  echo "[evidence-export] run started at ${TS}"
-                  # Runtime guard: Helm validation above prevents reaching here with invalid
-                  # mode/storage, but explicit check defends against --set bypasses.
+                  YYYY=$(date -u +%Y)
+                  MM=$(date -u +%m)
+                  DD=$(date -u +%d)
+                  echo "[evidence-export] run started at ${TS} storage={{ .Values.evidenceExport.storage }}"
+
+                  # Runtime guard against --set bypasses.
                   MODE="{{ .Values.evidenceExport.mode }}"
-                  case "${MODE}" in global|tenants) ;; *)
-                    echo "[evidence-export] ERROR: unknown mode=${MODE}" >&2; exit 2 ;; esac
+                  case "${MODE}" in global|tenants) ;;
+                    *) echo "ERROR: unknown mode=${MODE}" >&2; exit 2 ;; esac
+                  STORAGE="{{ .Values.evidenceExport.storage }}"
+                  case "${STORAGE}" in pvc|s3) ;;
+                    *) echo "ERROR: unknown storage=${STORAGE}" >&2; exit 2 ;; esac
+
+                  {{- if eq .Values.evidenceExport.storage "pvc" }}
+                  EXPORTS_BASE="/exports"
+                  {{- else }}
+                  # S3 mode: use local /tmp as staging area; never keep bundles on-disk.
+                  EXPORTS_BASE="/tmp/evidence"
+                  mkdir -p "${EXPORTS_BASE}"
+                  {{- end }}
+
+                  run_export() {
+                    local OUT="$1"
+                    local FLAGS="$2"
+                    echo "[evidence-export] export → ${OUT}"
+                    audit-export-evidence \
+                      --output "${OUT}" \
+                      ${FLAGS} \
+                      {{- if .Values.evidenceExport.pubKeyFile }}
+                      --pubkey-file {{ .Values.evidenceExport.pubKeyFile }} \
+                      {{- end }}
+                      --zip \
+                      --table all
+                    echo "[evidence-export] verify bundle ${OUT}"
+                    audit-verify --bundle "${OUT}" --verbose
+                    {{- if eq .Values.evidenceExport.storage "s3" }}
+                    BUNDLE_NAME=$(basename "${OUT}")
+                    S3_KEY="{{ .Values.evidenceExport.s3.prefix }}/${YYYY}/${MM}/${DD}/${BUNDLE_NAME}.zip"
+                    echo "[evidence-export] upload → s3://{{ .Values.evidenceExport.s3.bucket }}/${S3_KEY}"
+                    evidence-upload \
+                      --file "${OUT}.zip" \
+                      --bucket "{{ .Values.evidenceExport.s3.bucket }}" \
+                      --key "${S3_KEY}" \
+                      --region "{{ .Values.evidenceExport.s3.region | default "us-east-1" }}" \
+                      {{- if .Values.evidenceExport.s3.endpoint }}
+                      --endpoint "{{ .Values.evidenceExport.s3.endpoint }}" \
+                      {{- end }}
+                      {{- if .Values.evidenceExport.s3.forcePathStyle }}
+                      --force-path-style \
+                      {{- end }}
+                      --timeout 120
+                    # Remove local staging copy after successful upload.
+                    rm -rf "${OUT}" "${OUT}.zip" || true
+                    {{- end }}
+                  }
 
                   {{- if eq .Values.evidenceExport.mode "global" }}
-                  # Global export — single bundle for all orgs.
-                  OUT="/exports/global-${TS}"
-                  echo "[evidence-export] global export → ${OUT}"
-                  audit-export-evidence \
-                    --output "${OUT}" \
-                    --global \
-                    {{- if .Values.evidenceExport.pubKeyFile }}
-                    --pubkey-file {{ .Values.evidenceExport.pubKeyFile }} \
-                    {{- end }}
-                    {{- if .Values.evidenceExport.zip }}
-                    --zip \
-                    {{- end }}
-                    --table all
-                  echo "[evidence-export] verifying global bundle ${OUT}"
-                  audit-verify --bundle "${OUT}" --verbose
-
-                  {{- else if eq .Values.evidenceExport.mode "tenants" }}
-                  # Per-tenant export — one bundle per org_id.
-                  {{- if empty .Values.evidenceExport.orgIDs }}
-                  echo "[evidence-export] ERROR: mode=tenants requires non-empty evidenceExport.orgIDs" >&2
-                  exit 2
+                  run_export "${EXPORTS_BASE}/global-${TS}" "--global"
                   {{- else }}
                   {{- range .Values.evidenceExport.orgIDs }}
-                  ORG_ID="{{ . }}"
-                  OUT="/exports/tenant-${ORG_ID}-${TS}"
-                  echo "[evidence-export] tenant export org=${ORG_ID} → ${OUT}"
-                  audit-export-evidence \
-                    --output "${OUT}" \
-                    --org-id "${ORG_ID}" \
-                    {{- if $.Values.evidenceExport.pubKeyFile }}
-                    --pubkey-file {{ $.Values.evidenceExport.pubKeyFile }} \
-                    {{- end }}
-                    {{- if $.Values.evidenceExport.zip }}
-                    --zip \
-                    {{- end }}
-                    --table all
-                  echo "[evidence-export] verifying tenant bundle ${OUT}"
-                  audit-verify --bundle "${OUT}" --verbose
-                  {{- end }}
+                  run_export "${EXPORTS_BASE}/tenant-{{ . }}-${TS}" "--org-id {{ . }}"
                   {{- end }}
                   {{- end }}
 
                   {{- if .Values.evidenceExport.chainSecret }}
-                  # Live chain + anchor verification (W2+W3) using AUDIT_CHAIN_SECRET.
-                  # This is a separate live-DB check (not bundle-based) that catches
-                  # chain breaks in the source DB regardless of what was exported.
-                  echo "[evidence-export] live chain verify (W2+W3) — requires AUDIT_CHAIN_SECRET"
+                  echo "[evidence-export] live chain+anchor verify (W2+W3)"
                   audit-verify --include-anchors --table all --verbose
                   {{- end }}
 
-                  # Cleanup bundles older than retentionDays.
+                  {{- if eq .Values.evidenceExport.storage "pvc" }}
                   RETENTION={{ .Values.evidenceExport.retentionDays | default 90 }}
-                  echo "[evidence-export] cleaning exports older than ${RETENTION} days"
-                  # -mindepth 1 prevents matching the /exports mountpoint itself.
+                  echo "[evidence-export] cleaning PVC exports older than ${RETENTION} days"
                   find /exports -mindepth 1 -maxdepth 1 -type d -mtime +${RETENTION} -exec rm -rf {} + || true
                   find /exports -mindepth 1 -maxdepth 1 -name "*.zip" -mtime +${RETENTION} -delete || true
+                  {{- end }}
+
                   echo "[evidence-export] run complete"
 
               env:
@@ -147,6 +155,19 @@ spec:
                       name: {{ .Values.existingSecret }}
                       key: auditChainSecret
                 {{- end }}
+                {{- if eq .Values.evidenceExport.storage "s3" }}
+                {{- $s3Secret := .Values.evidenceExport.s3.secretName | default .Values.existingSecret }}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3Secret }}
+                      key: {{ .Values.evidenceExport.s3.accessKeyIDKey | default "s3AccessKeyID" }}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3Secret }}
+                      key: {{ .Values.evidenceExport.s3.secretAccessKeyKey | default "s3SecretAccessKey" }}
+                {{- end }}
 
               resources:
                 requests:
@@ -158,13 +179,15 @@ spec:
 
               securityContext:
                 allowPrivilegeEscalation: false
-                readOnlyRootFilesystem: false  # writes to /exports mount
+                readOnlyRootFilesystem: false
                 capabilities:
                   drop: [ALL]
 
               volumeMounts:
+                {{- if eq .Values.evidenceExport.storage "pvc" }}
                 - name: exports
                   mountPath: /exports
+                {{- end }}
                 {{- if .Values.evidenceExport.pubKeyFile }}
                 - name: pubkey
                   mountPath: {{ .Values.evidenceExport.pubKeyFile | dir }}
@@ -172,13 +195,11 @@ spec:
                 {{- end }}
 
           volumes:
+            {{- if eq .Values.evidenceExport.storage "pvc" }}
             - name: exports
-              {{- if eq .Values.evidenceExport.storage "pvc" }}
               persistentVolumeClaim:
                 claimName: {{ include "shadowai.fullname" . }}-evidence-exports
-              {{- else }}
-              emptyDir: {}
-              {{- end }}
+            {{- end }}
             {{- if .Values.evidenceExport.pubKeyFile }}
             - name: pubkey
               secret:

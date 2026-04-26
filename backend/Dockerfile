@@ -45,6 +45,18 @@ RUN CGO_ENABLED=0 go build \
     -o /audit-verify \
     ./cmd/audit-verify
 
+# Build audit-export-evidence CLI (PR-O4.1: evidence bundle export).
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /audit-export-evidence \
+    ./cmd/audit-export-evidence
+
+# Build evidence-upload CLI (PR-O4.2: S3-compatible bundle upload).
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /evidence-upload \
+    ./cmd/evidence-upload
+
 # ---------------------------------------------------------------------------
 # Runtime image
 # ---------------------------------------------------------------------------
@@ -56,9 +68,11 @@ RUN apk add --no-cache ca-certificates wget && \
     addgroup -g 10001 shadowai && \
     adduser -u 10001 -G shadowai -D -H shadowai
 
-COPY --from=builder /shadowai        /usr/local/bin/shadowai
-COPY --from=builder /migrate         /usr/local/bin/migrate
-COPY --from=builder /audit-verify    /usr/local/bin/audit-verify
+COPY --from=builder /shadowai               /usr/local/bin/shadowai
+COPY --from=builder /migrate                /usr/local/bin/migrate
+COPY --from=builder /audit-verify           /usr/local/bin/audit-verify
+COPY --from=builder /audit-export-evidence  /usr/local/bin/audit-export-evidence
+COPY --from=builder /evidence-upload        /usr/local/bin/evidence-upload
 
 # SQL migrations baked into the image so the migrate init container
 # doesn't need a volume mount.

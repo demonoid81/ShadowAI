@@ -174,13 +174,37 @@ evidenceExport:
   # retentionDays: delete bundles older than N days from /exports.
   retentionDays: 90
 
-  # storage: pvc | (s3 deferred to O4.2)
+  # storage: pvc | s3
+  #   pvc — bundles stored on a PVC at /exports (O4.1, default)
+  #   s3  — bundles exported to /tmp, verified, then uploaded via evidence-upload
   storage: pvc
 
   # pvc: PVC configuration when storage=pvc.
   pvc:
     size: 10Gi
     storageClass: ""   # leave empty for cluster default
+
+  # s3: S3-compatible storage configuration when storage=s3.
+  # Credentials read from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars
+  # (injected from s3.secretName / s3.*Key values below).
+  s3:
+    # bucket: required when storage=s3.
+    bucket: ""
+    # prefix: S3 object path prefix. Bundle key: <prefix>/<YYYY>/<MM>/<DD>/<name>.zip
+    prefix: "shadowai/evidence"
+    # region: AWS region.
+    region: "us-east-1"
+    # endpoint: custom S3-compatible endpoint (MinIO, GCS, etc.). Leave empty for AWS.
+    endpoint: ""
+    # forcePathStyle: required for most MinIO installations.
+    forcePathStyle: false
+    # secretName: K8s Secret containing S3 credentials.
+    # Defaults to existingSecret when empty.
+    secretName: ""
+    # accessKeyIDKey: Secret key for AWS_ACCESS_KEY_ID.
+    accessKeyIDKey: s3AccessKeyID
+    # secretAccessKeyKey: Secret key for AWS_SECRET_ACCESS_KEY.
+    secretAccessKeyKey: s3SecretAccessKey
 
   # zip: create <output>.zip archive after export.
   zip: false

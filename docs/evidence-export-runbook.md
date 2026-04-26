@@ -48,7 +48,50 @@ ls -lt /exports/*.zip | head -5
 
 ---
 
-## 2. Offline Bundle Verification
+---
+
+## 2. Retrieving a Bundle from S3 / MinIO (storage=s3)
+
+```bash
+# AWS S3
+aws s3 cp \
+  s3://shadowai-compliance/shadowai/evidence/2026/04/26/global-20260426-020001.zip \
+  ./evidence-bundle-20260426.zip
+
+# MinIO via mc CLI
+mc cp \
+  minio/shadowai-compliance/shadowai/evidence/2026/04/26/global-20260426-020001.zip \
+  ./evidence-bundle-20260426.zip
+
+# MinIO via aws CLI with custom endpoint
+AWS_ACCESS_KEY_ID=<key> AWS_SECRET_ACCESS_KEY=<secret> \
+  aws s3 cp \
+    s3://shadowai-compliance/shadowai/evidence/2026/04/26/global-20260426-020001.zip \
+    . \
+    --endpoint-url http://minio:9000
+
+# List all bundles for a given day
+aws s3 ls s3://shadowai-compliance/shadowai/evidence/2026/04/26/
+```
+
+### S3 key format
+
+```
+<prefix>/<YYYY>/<MM>/<DD>/<bundle-name>.zip
+shadowai/evidence/2026/04/26/global-20260426-020001.zip
+shadowai/evidence/2026/04/26/tenant-<org_id>-20260426-020001.zip
+```
+
+Then unzip and verify:
+
+```bash
+unzip global-20260426-020001.zip
+audit-verify --bundle ./global-20260426-020001 --verbose
+```
+
+---
+
+## 3. Offline Bundle Verification
 
 ```bash
 # Copy bundle from PVC to local machine
@@ -79,7 +122,7 @@ tenant bundle sigs              OK     failed=0
 
 ---
 
-## 3. Handing Bundle to an Auditor
+## 4. Handing Bundle to an Auditor
 
 ```bash
 # Verify first, then zip for transfer
@@ -96,7 +139,7 @@ for Ed25519 anchor signature verification.
 
 ---
 
-## 4. Restore Drill
+## 5. Restore Drill
 
 A restore drill verifies that WORM evidence survives a DB restore and that
 anchors/bundles remain consistent with the restored data.
@@ -143,7 +186,7 @@ Document each drill in the incident log with timestamp, operator, and results.
 
 ---
 
-## 5. Alert Response
+## 6. Alert Response
 
 ### EvidenceExportJobFailed
 
@@ -190,7 +233,7 @@ which indicates:
 
 ---
 
-## 6. Helm Configuration Reference
+## 7. Helm Configuration Reference
 
 ```yaml
 evidenceExport:
@@ -213,7 +256,7 @@ evidenceExport:
 
 ---
 
-## 7. Prometheus Queries
+## 8. Prometheus Queries
 
 ```promql
 # Jobs that failed in the last 24h
