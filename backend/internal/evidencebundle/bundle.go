@@ -278,19 +278,26 @@ func WriteReadme(dir string, tables []string, hasPubKey bool, tenantOrgID string
   For independent re-verification see the manual steps below.`
 
 	if tenantOrgID != "" {
-		reportsSection = fmt.Sprintf(`reports/
-  NOT PRESENT in this tenant bundle (org_id=%s).
+		reportsSection = `reports/
+  NOT PRESENT in this tenant bundle (org_id=` + tenantOrgID + `).
   Global verification reports are omitted to avoid exposing cross-tenant anchor
-  metadata to the tenant auditor. Use anchors.jsonl + chain_inventory.jsonl for
-  offline Merkle verification of this org's anchor ranges (see steps below).
+  metadata. Use merkle_proofs.jsonl for offline Merkle verification (see below).
 
-TENANT BUNDLE NOTE
-  This bundle contains evidence for org_id=%s only.
-  chain_inventory.jsonl includes ALL row hashes for intersecting anchor ranges,
-  including rows from other orgs. Those hashes are cryptographic commitments
-  (HMAC outputs) — they are opaque and do not expose other orgs' content.
-  They are present so you can recompute Merkle roots from the full leaf set.`,
-			tenantOrgID, tenantOrgID)
+TENANT BUNDLE NOTE (T3/W6)
+  This bundle contains evidence for org_id=` + tenantOrgID + ` only.
+  It uses Merkle inclusion proofs (merkle_proofs.jsonl) — NOT a full chain
+  inventory. Each proof proves your row is included in the signed anchor
+  without exposing other tenants' hashes.
+
+OFFLINE MERKLE VERIFICATION
+  For each entry in merkle_proofs.jsonl:
+    1. Start with leaf = leaf_hash_hex.
+    2. For each sibling in siblings[]:
+         if side=="left":  hash = SHA256(sibling.hash_hex || current)
+         if side=="right": hash = SHA256(current || sibling.hash_hex)
+    3. Final hash must equal root_hex.
+    4. root_hex must match the corresponding anchor in anchors.jsonl.
+    5. anchor.signature_hex (Ed25519) covers the anchor canonical string.`
 	}
 
 	content := fmt.Sprintf(`ShadowAI Evidence Bundle
@@ -309,13 +316,23 @@ anchors.jsonl
   One JSON object per line. These are the cryptographic commitments over
   ranges of audit log rows.
 
-chain_inventory.jsonl
+chain_inventory.jsonl  (global bundles only)
   DIGEST INVENTORY — seq_no and row_hash for every chained row.
   NOT a full W2 chain verification. W2 chain HMAC requires AUDIT_CHAIN_SECRET
   and canonical row content (not exported). This file allows:
     - Gap/continuity analysis (check seq_no is contiguous)
     - Cross-referencing row_hash values against anchor Merkle roots
   It does NOT prove that row_hash corresponds to specific row content.
+
+tenant_chain_hashes.jsonl  (tenant bundles only, T3/W6)
+  Rows belonging to this org_id: seq_no, row_id_hash, row_hash_hex.
+  Contains ONLY this tenant's rows — no cross-tenant hashes.
+
+merkle_proofs.jsonl  (tenant bundles only, T3/W6)
+  Merkle inclusion proof for each tenant row. Proves the row is included in
+  a signed anchor without requiring the full chain inventory.
+  Each proof contains: anchor range, leaf_hash_hex, siblings[], root_hex.
+  Offline verification: leaf_hash + siblings → root_hex == anchor.merkle_root_hex.
 
 %s
 

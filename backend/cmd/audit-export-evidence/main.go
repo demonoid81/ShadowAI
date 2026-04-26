@@ -149,34 +149,60 @@ func main() {
 	}
 	fmt.Printf("Tables: %v\n", tables)
 
-	// Collect anchors and chain inventory across tables.
-	// Tenant mode (--org-id): per RFC D4 Option A — export full digest inventory
-	// for anchor ranges that intersect org rows; include cross-tenant hashes so
-	// the verifier can recompute Merkle roots. README carries disclaimer.
+	// Collect anchors and — depending on mode — inventory or Merkle proofs.
+	//
+	// T3/W6 TENANT MODE (--org-id):
+	//   Writes tenant_chain_hashes.jsonl (org rows only) and merkle_proofs.jsonl.
+	//   No cross-tenant hashes. Auditor reconstructs each anchor's Merkle root
+	//   offline using only their rows + sibling proofs.
+	//
+	// GLOBAL MODE (--global):
+	//   Legacy behavior: writes chain_inventory.jsonl with full ranges.
 	var allAnchors []evidencebundle.AnchorLine
 	var allInventory []evidencebundle.ChainInventoryLine
+	var tenantHashes []evidencebundle.TenantChainHashLine
+	var merkleProofs []evidencebundle.MerkleProofLine
 
 	for _, table := range tables {
-		var anchorsForTable []chain.AnchorRecord
 		if tenantOrgID != "" {
-			inv, orgAnchors, err := repo.FetchChainInventoryForOrgAnchors(ctx, table, tenantOrgID)
+			// T3/W6: generate Merkle inclusion proofs for org rows only.
+			tRows, tProofs, err := repo.GenerateTenantMerkleProofs(ctx, table, tenantOrgID)
 			if err != nil {
-				exitErr("chain inventory %s (org=%s): %v", table, tenantOrgID, err)
+				exitErr("tenant merkle proofs %s (org=%s): %v", table, tenantOrgID, err)
 			}
-			anchorsForTable = orgAnchors
-			for _, row := range inv {
-				allInventory = append(allInventory, evidencebundle.ChainInventoryLine{
+			// Collect intersecting anchors for anchors.jsonl.
+			_, orgAnchors, err := repo.FetchChainInventoryForOrgAnchors(ctx, table, tenantOrgID)
+			if err != nil {
+				exitErr("chain anchors %s (org=%s): %v", table, tenantOrgID, err)
+			}
+			for _, row := range tRows {
+				tenantHashes = append(tenantHashes, evidencebundle.TenantChainHashLine{
 					Table:      table,
 					SeqNo:      row.SeqNo,
 					RowIDHash:  row.RowIDHash,
 					RowHashHex: row.RowHashHex,
 				})
 			}
-			fmt.Printf("  %s: %d intersecting anchors, %d inventory rows (tenant=%s)\n",
-				table, len(orgAnchors), len(inv), tenantOrgID)
+			for _, p := range tProofs {
+				// Siblings is []chain.MerkleProofSibling — assign directly.
+				merkleProofs = append(merkleProofs, evidencebundle.MerkleProofLine{
+					Table:       p.Table,
+					SeqNo:       p.SeqNo,
+					AnchorSeqLo: p.AnchorSeqLo,
+					AnchorSeqHi: p.AnchorSeqHi,
+					LeafHashHex: p.LeafHashHex,
+					Siblings:    p.Siblings,
+					RootHex:     p.RootHex,
+				})
+			}
+			for _, a := range orgAnchors {
+				allAnchors = append(allAnchors, anchorToLine(a))
+			}
+			fmt.Printf("  %s: %d intersecting anchors, %d tenant rows, %d proofs (T3/W6)\n",
+				table, len(orgAnchors), len(tRows), len(tProofs))
 		} else {
-			var err error
-			anchorsForTable, err = repo.ListAnchors(ctx, table)
+			// Global: legacy full inventory.
+			anchorsForTable, err := repo.ListAnchors(ctx, table)
 			if err != nil {
 				exitErr("list anchors %s: %v", table, err)
 			}
@@ -192,38 +218,31 @@ func main() {
 					RowHashHex: row.RowHashHex,
 				})
 			}
+			for _, a := range anchorsForTable {
+				allAnchors = append(allAnchors, anchorToLine(a))
+			}
 			fmt.Printf("  %s: %d anchors, %d chained rows\n", table, len(anchorsForTable), len(inv))
-		}
-
-		for _, a := range anchorsForTable {
-			line := evidencebundle.AnchorLine{
-				ID:            a.ID,
-				Table:         a.TableName,
-				SeqLo:         a.SeqLo,
-				SeqHi:         a.SeqHi,
-				RowCount:      a.RowCount,
-				MerkleRootHex: a.MerkleRootHex(),
-				SinkName:      a.SinkName,
-				SinkRef:       a.SinkRef,
-				SinkOK:        a.SinkOK,
-				PubKeyID:      a.PubKeyID,
-				CreatedAt:     a.CreatedAt,
-			}
-			if len(a.Signature) > 0 {
-				line.SignatureHex = hex.EncodeToString(a.Signature)
-			}
-			allAnchors = append(allAnchors, line)
 		}
 	}
 
-	// Write anchors.jsonl.
+	// Write anchors.jsonl (always present).
 	if err := writeNDJSON(filepath.Join(outDir, "anchors.jsonl"), allAnchors); err != nil {
 		exitErr("write anchors.jsonl: %v", err)
 	}
 
-	// Write chain_inventory.jsonl.
-	if err := writeNDJSON(filepath.Join(outDir, "chain_inventory.jsonl"), allInventory); err != nil {
-		exitErr("write chain_inventory.jsonl: %v", err)
+	if tenantOrgID != "" {
+		// T3/W6: tenant-specific files; no chain_inventory.jsonl.
+		if err := writeNDJSON(filepath.Join(outDir, "tenant_chain_hashes.jsonl"), tenantHashes); err != nil {
+			exitErr("write tenant_chain_hashes.jsonl: %v", err)
+		}
+		if err := writeNDJSON(filepath.Join(outDir, "merkle_proofs.jsonl"), merkleProofs); err != nil {
+			exitErr("write merkle_proofs.jsonl: %v", err)
+		}
+	} else {
+		// Global: legacy inventory.
+		if err := writeNDJSON(filepath.Join(outDir, "chain_inventory.jsonl"), allInventory); err != nil {
+			exitErr("write chain_inventory.jsonl: %v", err)
+		}
 	}
 
 	// Write public key if provided.
@@ -320,6 +339,27 @@ func dbFingerprint(dsn string) string {
 	// DSN key=value format: extract host and dbname best-effort.
 	host, dbname := parseDSNFields(dsn)
 	return evidencebundle.DBFingerprint(host, dbname)
+}
+
+// anchorToLine converts an AnchorRecord to the bundle's AnchorLine format.
+func anchorToLine(a chain.AnchorRecord) evidencebundle.AnchorLine {
+	line := evidencebundle.AnchorLine{
+		ID:            a.ID,
+		Table:         a.TableName,
+		SeqLo:         a.SeqLo,
+		SeqHi:         a.SeqHi,
+		RowCount:      a.RowCount,
+		MerkleRootHex: a.MerkleRootHex(),
+		SinkName:      a.SinkName,
+		SinkRef:       a.SinkRef,
+		SinkOK:        a.SinkOK,
+		PubKeyID:      a.PubKeyID,
+		CreatedAt:     a.CreatedAt,
+	}
+	if len(a.Signature) > 0 {
+		line.SignatureHex = hex.EncodeToString(a.Signature)
+	}
+	return line
 }
 
 func parseDSNFields(dsn string) (host, dbname string) {

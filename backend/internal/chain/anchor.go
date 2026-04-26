@@ -311,3 +311,173 @@ func (r *AnchorRepository) ListAnchors(ctx context.Context, tableName string) ([
 	}
 	return records, rows.Err()
 }
+
+// TenantAnchorRow is a row fetched for Merkle proof generation.
+type TenantAnchorRow struct {
+	SeqNo      int64
+	RowIDHash  string // hex(SHA256(row_id))
+	RowHashHex string // hex of stored row_hash
+	IsTenant   bool   // belongs to the export's org
+}
+
+// GenerateTenantMerkleProofs generates Merkle inclusion proofs for all rows
+// belonging to orgID in intersecting anchor ranges (T3/W6).
+//
+// For each anchor whose [SeqLo, SeqHi] range contains at least one org row:
+//  1. Fetches ALL rows in the range (full set needed to rebuild the Merkle tree).
+//  2. Identifies org rows by querying org_id.
+//  3. Generates a Merkle inclusion proof for each org row.
+//
+// Returns:
+//   - tenantRows: org rows only (tenant_chain_hashes.jsonl content)
+//   - proofs:     per-row inclusion proofs (merkle_proofs.jsonl content)
+func (r *AnchorRepository) GenerateTenantMerkleProofs(ctx context.Context, tableName, orgID string) (
+	tenantRows []TenantAnchorRow,
+	proofs []TenantAnchorProof,
+	err error,
+) {
+	if err := validateChainTable(tableName); err != nil {
+		return nil, nil, err
+	}
+
+	// Find org row seq_nos.
+	//nolint:gosec // tableName from allowlist
+	orgSeqRows, err := r.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id::text, seq_no FROM %s WHERE org_id = $1 AND seq_no IS NOT NULL ORDER BY seq_no`, tableName),
+		orgID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tenant proofs org seqs: %w", err)
+	}
+	defer orgSeqRows.Close()
+	type orgSeqEntry struct{ id string; seqNo int64 }
+	var orgSeqs []orgSeqEntry
+	for orgSeqRows.Next() {
+		var e orgSeqEntry
+		if err := orgSeqRows.Scan(&e.id, &e.seqNo); err != nil {
+			return nil, nil, fmt.Errorf("tenant proofs org seq scan: %w", err)
+		}
+		orgSeqs = append(orgSeqs, e)
+	}
+	if err := orgSeqRows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(orgSeqs) == 0 {
+		return nil, nil, nil
+	}
+
+	// Build set for quick lookup.
+	orgSeqSet := make(map[int64]string, len(orgSeqs)) // seqNo → row_id
+	for _, e := range orgSeqs {
+		orgSeqSet[e.seqNo] = e.id
+	}
+
+	// Get intersecting anchors.
+	allAnchors, err := r.ListAnchors(ctx, tableName)
+	if err != nil {
+		return nil, nil, err
+	}
+	var intersecting []AnchorRecord
+	for _, a := range allAnchors {
+		for s := a.SeqLo; s <= a.SeqHi; s++ {
+			if _, ok := orgSeqSet[s]; ok {
+				intersecting = append(intersecting, a)
+				break
+			}
+		}
+	}
+	if len(intersecting) == 0 {
+		return nil, nil, nil
+	}
+
+	// For each intersecting anchor: build full leaf set + generate proofs.
+	for _, anchor := range intersecting {
+		//nolint:gosec
+		rangeRows, rangeErr := r.db.QueryContext(ctx,
+			fmt.Sprintf(`SELECT id::text, seq_no, row_hash FROM %s
+			             WHERE seq_no >= $1 AND seq_no <= $2
+			             ORDER BY seq_no`, tableName),
+			anchor.SeqLo, anchor.SeqHi)
+		if rangeErr != nil {
+			return nil, nil, fmt.Errorf("tenant proofs range query: %w", rangeErr)
+		}
+
+		type rangeEntry struct {
+			rowID      string
+			seqNo      int64
+			rowHash    []byte
+		}
+		var entries []rangeEntry
+		for rangeRows.Next() {
+			var e rangeEntry
+			if err := rangeRows.Scan(&e.rowID, &e.seqNo, &e.rowHash); err != nil {
+				rangeRows.Close()
+				return nil, nil, fmt.Errorf("tenant proofs range scan: %w", err)
+			}
+			entries = append(entries, e)
+		}
+		if rowsErr := rangeRows.Err(); rowsErr != nil {
+			rangeRows.Close()
+			return nil, nil, rowsErr
+		}
+		rangeRows.Close()
+
+		if len(entries) == 0 {
+			continue
+		}
+
+		// Build leaf hash array for Merkle tree (same order as stored).
+		leafHashes := make([][]byte, len(entries))
+		for i, e := range entries {
+			leafHashes[i] = e.rowHash
+		}
+
+		rootHex := anchor.MerkleRootHex()
+
+		for leafIdx, e := range entries {
+			if _, isTenant := orgSeqSet[e.seqNo]; !isTenant {
+				continue
+			}
+			// Generate proof for this tenant row.
+			siblingProof, proofErr := GenerateMerkleProof(leafHashes, leafIdx)
+			if proofErr != nil {
+				return nil, nil, fmt.Errorf("tenant proofs generate: %w", proofErr)
+			}
+			rowIDHash := rowIDHashHex(e.rowID)
+			rowHashHex := hex.EncodeToString(e.rowHash)
+
+			tenantRows = append(tenantRows, TenantAnchorRow{
+				SeqNo:      e.seqNo,
+				RowIDHash:  rowIDHash,
+				RowHashHex: rowHashHex,
+				IsTenant:   true,
+			})
+			proofs = append(proofs, TenantAnchorProof{
+				Table:       tableName,
+				SeqNo:       e.seqNo,
+				AnchorSeqLo: anchor.SeqLo,
+				AnchorSeqHi: anchor.SeqHi,
+				LeafHashHex: rowHashHex,
+				Siblings:    siblingProof,
+				RootHex:     rootHex,
+			})
+		}
+	}
+	return tenantRows, proofs, nil
+}
+
+// TenantAnchorProof is one Merkle inclusion proof for a tenant row.
+type TenantAnchorProof struct {
+	Table       string
+	SeqNo       int64
+	AnchorSeqLo int64
+	AnchorSeqHi int64
+	LeafHashHex string
+	Siblings    []MerkleProofSibling
+	RootHex     string
+}
+
+// rowIDHashHex returns hex(SHA256(rowID)).
+func rowIDHashHex(rowID string) string {
+	h := sha256.Sum256([]byte(rowID))
+	return hex.EncodeToString(h[:])
+}
