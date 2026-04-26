@@ -76,6 +76,12 @@ jobs:
           go-version-file: ${{ env.GO_VERSION_FILE }}
           cache-dependency-path: backend/go.sum
 
+      # O4.2.1: evidence-upload integration tests (httptest fake S3, no Docker).
+      - name: go test -tags integration ./cmd/evidence-upload/...
+        run: |
+          go test -tags integration ./cmd/evidence-upload/... \
+            -count=1 -timeout 2m -v
+
       # Testcontainers needs Docker — available on ubuntu-latest.
       # No pipe: exit code must come from go test, not from any downstream command.
       - name: go test -tags 'enterprise integration' ./integration/...
