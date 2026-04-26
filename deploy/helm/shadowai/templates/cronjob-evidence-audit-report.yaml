@@ -1,0 +1,91 @@
+{{- if .Values.evidenceAuditReport.enabled }}
+{{- /* Resolve bucket: use explicit value or fall back to evidenceExport.s3.bucket */ -}}
+{{- $bucket := .Values.evidenceAuditReport.bucket | default .Values.evidenceExport.s3.bucket }}
+{{- if empty $bucket }}
+{{- fail "evidenceAuditReport.bucket (or evidenceExport.s3.bucket) must not be empty when evidenceAuditReport.enabled=true" }}
+{{- end }}
+{{- $secretName := .Values.evidenceAuditReport.secretName | default (.Values.evidenceExport.s3.secretName | default .Values.existingSecret) }}
+# PR-O4.4: Weekly S3 retention audit report.
+# Runs audit-evidence-report against the evidence bucket and exits non-zero
+# if any bundle violates the configured Object Lock policy.
+# exit 1 → kube_job_status_failed → EvidenceExportJobFailed alert.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "shadowai.fullname" . }}-evidence-audit-report
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: evidence-audit-report
+spec:
+  schedule: {{ .Values.evidenceAuditReport.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.evidenceAuditReport.deadlineSeconds | default 600 }}
+      template:
+        metadata:
+          labels:
+            {{- include "shadowai.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: evidence-audit-report
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          containers:
+            - name: evidence-audit-report
+              image: {{ include "shadowai.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - audit-evidence-report
+                - --bucket
+                - {{ $bucket | quote }}
+                - --prefix
+                - {{ .Values.evidenceAuditReport.prefix | default "shadowai/evidence" | quote }}
+                - --region
+                - {{ .Values.evidenceAuditReport.region | default "us-east-1" | quote }}
+                {{- if .Values.evidenceAuditReport.endpoint }}
+                - --endpoint
+                - {{ .Values.evidenceAuditReport.endpoint | quote }}
+                {{- end }}
+                {{- if .Values.evidenceAuditReport.forcePathStyle }}
+                - --force-path-style
+                {{- end }}
+                {{- if .Values.evidenceAuditReport.requireLock }}
+                - --require-lock
+                {{- end }}
+                {{- if .Values.evidenceAuditReport.minRetentionDays }}
+                - --min-retention-days
+                - {{ .Values.evidenceAuditReport.minRetentionDays | quote }}
+                {{- end }}
+                - --format
+                - {{ .Values.evidenceAuditReport.format | default "json" | quote }}
+                - --timeout
+                - "120"
+              env:
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ .Values.evidenceAuditReport.accessKeyIDKey | default "s3AccessKeyID" }}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ .Values.evidenceAuditReport.secretAccessKeyKey | default "s3SecretAccessKey" }}
+              resources:
+                requests:
+                  cpu: {{ .Values.evidenceAuditReport.resources.requests.cpu | default "50m" }}
+                  memory: {{ .Values.evidenceAuditReport.resources.requests.memory | default "64Mi" }}
+                limits:
+                  cpu: {{ .Values.evidenceAuditReport.resources.limits.cpu | default "200m" }}
+                  memory: {{ .Values.evidenceAuditReport.resources.limits.memory | default "128Mi" }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+{{- end }}

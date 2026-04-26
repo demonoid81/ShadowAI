@@ -356,7 +356,108 @@ kubectl -n <namespace> logs job/<failed-job-name> | grep -E "FAIL|error|ERROR"
 
 ---
 
-## 8. Helm Configuration Reference
+## 8. Evidence Retention Audit Report (O4.4)
+
+`audit-evidence-report` gives operators and auditors a point-in-time view of the
+retention posture of every evidence bundle in S3 — without database access.
+
+### Manual run
+
+```bash
+# Human-readable table — operator use
+audit-evidence-report \
+  --bucket shadowai-compliance \
+  --prefix shadowai/evidence \
+  --require-lock \
+  --min-retention-days 90 \
+  --format table
+
+# Machine-readable JSON — CI / auditor archive
+audit-evidence-report \
+  --bucket shadowai-compliance \
+  --prefix shadowai/evidence \
+  --require-lock \
+  --min-retention-days 90 \
+  --format json \
+  --output /tmp/retention-report-$(date +%Y%m%d).json
+
+# Scoped to a quarter (2026-Q1)
+audit-evidence-report \
+  --bucket shadowai-compliance \
+  --after 2026-01-01 \
+  --before 2026-03-31 \
+  --require-lock \
+  --min-retention-days 90 \
+  --format json
+
+# MinIO with custom endpoint
+audit-evidence-report \
+  --bucket shadowai-compliance \
+  --endpoint http://minio:9000 \
+  --force-path-style \
+  --require-lock \
+  --min-retention-days 90 \
+  --format table
+```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | All bundles compliant (or no policy flags set) |
+| 1 | One or more violations — `EvidenceExportJobFailed` alert fires when running as CronJob |
+| 2 | S3 access / configuration error |
+
+### Violation types
+
+| Violation | Cause |
+|-----------|-------|
+| `missing_object_lock` | Bundle has no Object Lock mode (fired when `--require-lock`) |
+| `lock_expired(since=YYYY-MM-DD)` | `retain_until` is in the past |
+| `retention_too_short(retain_until=...,need_days=N)` | `retain_until < now + N days` |
+
+### Providing retention coverage to an auditor
+
+```bash
+# 1. Generate a quarterly report
+audit-evidence-report \
+  --bucket shadowai-compliance \
+  --after 2026-01-01 --before 2026-03-31 \
+  --require-lock --min-retention-days 90 \
+  --format json \
+  --output evidence-retention-Q1-2026.json
+
+# 2. Verify the report itself (no violations = exit 0)
+jq '.violation_count' evidence-retention-Q1-2026.json
+# Expected: 0
+
+# 3. For each bundle verify individual retention:
+jq '.bundles[] | {key, lock_mode, retain_until, compliant}' \
+  evidence-retention-Q1-2026.json
+
+# 4. SHA256 for chain of custody
+sha256sum evidence-retention-Q1-2026.json
+```
+
+The JSON report contains `generated_at`, `bucket`, `prefix`, policy parameters,
+per-bundle `lock_mode` and `retain_until`, and `compliant`/`violations` fields —
+sufficient for SOC2 and ISO27001 evidence archives.
+
+### Helm CronJob (weekly)
+
+```yaml
+evidenceAuditReport:
+  enabled: true
+  schedule: "0 8 * * 1"   # Mondays 08:00 UTC
+  requireLock: true
+  minRetentionDays: 90
+  format: json
+  # bucket/region/secretName default to evidenceExport.s3.* when empty
+```
+
+---
+
+## 9. Helm Configuration Reference
 
 ```yaml
 evidenceExport:
@@ -395,7 +496,7 @@ evidenceExport:
 
 ---
 
-## 9. Prometheus Queries
+## 10. Prometheus Queries
 
 ```promql
 # Jobs that failed in the last 24h

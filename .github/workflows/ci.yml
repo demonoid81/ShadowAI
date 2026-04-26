@@ -82,6 +82,12 @@ jobs:
           go test -tags integration ./cmd/evidence-upload/... \
             -count=1 -timeout 2m -v
 
+      # O4.4: audit-evidence-report integration tests (httptest fake S3, no Docker).
+      - name: go test -tags integration ./cmd/audit-evidence-report/...
+        run: |
+          go test -tags integration ./cmd/audit-evidence-report/... \
+            -count=1 -timeout 2m -v
+
       # Testcontainers needs Docker — available on ubuntu-latest.
       # No pipe: exit code must come from go test, not from any downstream command.
       - name: go test -tags 'enterprise integration' ./integration/...
@@ -151,7 +157,7 @@ jobs:
         run: |
           TAGS=""
           [ "${{ matrix.variant }}" = "enterprise" ] && TAGS="-tags enterprise"
-          for cmd in audit-verify audit-export-evidence evidence-upload migrate; do
+          for cmd in audit-verify audit-export-evidence evidence-upload audit-evidence-report migrate; do
             echo "Building $cmd..."
             CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/$cmd
           done

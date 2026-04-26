@@ -263,6 +263,48 @@ evidenceExport:
     # ruleLabels:
     #   prometheus: kube-prometheus
 
+# ─────────────────────────────────────────────────────────────────────────────
+# evidenceAuditReport (O4.4): periodic S3 retention posture report.
+# Reads S3 List + HeadObject — no database access required.
+# exit 0 = all compliant; exit 1 = violations found (alert fires);
+# exit 2 = S3 access / config error.
+# ─────────────────────────────────────────────────────────────────────────────
+evidenceAuditReport:
+  enabled: false
+  # schedule: weekly Monday 08:00 UTC — after the nightly export has run.
+  schedule: "0 8 * * 1"
+
+  # bucket + prefix: defaults to evidenceExport.s3.* when left empty.
+  bucket: ""
+  prefix: "shadowai/evidence"
+  region: "us-east-1"
+  endpoint: ""
+  forcePathStyle: false
+
+  # Policy flags: same semantics as audit-evidence-report CLI.
+  requireLock: true
+  minRetentionDays: 90
+
+  # format: "json" produces machine-readable output captured in Job logs.
+  # Use "table" for human-readable operator output.
+  format: "json"
+
+  # secretName: K8s Secret containing AWS credentials.
+  # Defaults to evidenceExport.s3.secretName → existingSecret when empty.
+  secretName: ""
+  accessKeyIDKey: s3AccessKeyID
+  secretAccessKeyKey: s3SecretAccessKey
+
+  deadlineSeconds: 600
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
 serviceAccount:
   create: true
   annotations: {}

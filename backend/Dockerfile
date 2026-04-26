@@ -57,6 +57,12 @@ RUN CGO_ENABLED=0 go build \
     -o /evidence-upload \
     ./cmd/evidence-upload
 
+# Build audit-evidence-report CLI (PR-O4.4: S3 retention audit report).
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /audit-evidence-report \
+    ./cmd/audit-evidence-report
+
 # ---------------------------------------------------------------------------
 # Runtime image
 # ---------------------------------------------------------------------------
@@ -73,6 +79,7 @@ COPY --from=builder /migrate                /usr/local/bin/migrate
 COPY --from=builder /audit-verify           /usr/local/bin/audit-verify
 COPY --from=builder /audit-export-evidence  /usr/local/bin/audit-export-evidence
 COPY --from=builder /evidence-upload        /usr/local/bin/evidence-upload
+COPY --from=builder /audit-evidence-report  /usr/local/bin/audit-evidence-report
 
 # SQL migrations baked into the image so the migrate init container
 # doesn't need a volume mount.
