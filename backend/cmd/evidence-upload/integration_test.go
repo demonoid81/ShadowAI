@@ -337,6 +337,134 @@ func TestIntegration_ConfigError_MissingFile(t *testing.T) {
 // Key construction helper (not AWS-specific, tested here for completeness)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// O4.3: Object Lock integration tests
+// ---------------------------------------------------------------------------
+
+// TestIntegration_ObjectLock_COMPLIANCE_Headers verifies that --object-lock-mode COMPLIANCE
+// and --retain-until send the correct x-amz-object-lock-* headers.
+func TestIntegration_ObjectLock_COMPLIANCE_Headers(t *testing.T) {
+	srv, state := setupTest(t, http.StatusOK)
+
+	bundlePath := writeTempBundle(t, "compliance-bundle")
+	retainDate := "2099-06-01T00:00:00Z"
+
+	code := run([]string{
+		"--file", bundlePath,
+		"--bucket", "b",
+		"--key", "k.zip",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--sse", "none",
+		"--timeout", "30",
+		"--object-lock-mode", "COMPLIANCE",
+		"--retain-until", retainDate,
+	}, os.Stdout, os.Stderr)
+	if code != exitOK {
+		t.Fatalf("expected exitOK, got %d", code)
+	}
+
+	mode := state.lastHeaders.Get("x-amz-object-lock-mode")
+	if mode != "COMPLIANCE" {
+		t.Errorf("x-amz-object-lock-mode = %q, want COMPLIANCE", mode)
+	}
+	retain := state.lastHeaders.Get("x-amz-object-lock-retain-until-date")
+	if retain == "" {
+		t.Error("x-amz-object-lock-retain-until-date missing")
+	}
+	if !strings.Contains(retain, "2099") {
+		t.Errorf("x-amz-object-lock-retain-until-date = %q, want year 2099", retain)
+	}
+	t.Logf("integration/o4.3: COMPLIANCE mode=%s retain=%s", mode, retain)
+}
+
+// TestIntegration_ObjectLock_GOVERNANCE_Headers verifies GOVERNANCE mode header.
+func TestIntegration_ObjectLock_GOVERNANCE_Headers(t *testing.T) {
+	srv, state := setupTest(t, http.StatusOK)
+
+	bundlePath := writeTempBundle(t, "governance-bundle")
+
+	run([]string{
+		"--file", bundlePath,
+		"--bucket", "b",
+		"--key", "k.zip",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--sse", "none",
+		"--timeout", "30",
+		"--object-lock-mode", "GOVERNANCE",
+		"--retain-until", "90d",
+	}, os.Stdout, os.Stderr)
+
+	mode := state.lastHeaders.Get("x-amz-object-lock-mode")
+	if mode != "GOVERNANCE" {
+		t.Errorf("x-amz-object-lock-mode = %q, want GOVERNANCE", mode)
+	}
+	retain := state.lastHeaders.Get("x-amz-object-lock-retain-until-date")
+	if retain == "" {
+		t.Error("x-amz-object-lock-retain-until-date missing for 90d retention")
+	}
+	t.Logf("integration/o4.3: GOVERNANCE mode=%s retain=%s", mode, retain)
+}
+
+// TestIntegration_ObjectLock_LegalHold_ON verifies --legal-hold ON sends the header.
+func TestIntegration_ObjectLock_LegalHold_ON(t *testing.T) {
+	srv, state := setupTest(t, http.StatusOK)
+
+	bundlePath := writeTempBundle(t, "hold-bundle")
+
+	run([]string{
+		"--file", bundlePath,
+		"--bucket", "b",
+		"--key", "k.zip",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--sse", "none",
+		"--timeout", "30",
+		"--object-lock-mode", "COMPLIANCE",
+		"--retain-until", "2099-12-31T00:00:00Z",
+		"--legal-hold", "ON",
+	}, os.Stdout, os.Stderr)
+
+	hold := state.lastHeaders.Get("x-amz-object-lock-legal-hold")
+	if hold != "ON" {
+		t.Errorf("x-amz-object-lock-legal-hold = %q, want ON", hold)
+	}
+	t.Logf("integration/o4.3: legal-hold=%s", hold)
+}
+
+// TestIntegration_ObjectLock_NoFlags_NoHeaders is a regression guard: without
+// --object-lock-mode, none of the x-amz-object-lock-* headers must appear.
+func TestIntegration_ObjectLock_NoFlags_NoHeaders(t *testing.T) {
+	srv, state := setupTest(t, http.StatusOK)
+
+	bundlePath := writeTempBundle(t, "plain-bundle")
+	run([]string{
+		"--file", bundlePath,
+		"--bucket", "b",
+		"--key", "k.zip",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--sse", "AES256",
+		"--timeout", "30",
+	}, os.Stdout, os.Stderr)
+
+	for _, h := range []string{
+		"x-amz-object-lock-mode",
+		"x-amz-object-lock-retain-until-date",
+		"x-amz-object-lock-legal-hold",
+	} {
+		if v := state.lastHeaders.Get(h); v != "" {
+			t.Errorf("no-lock upload: header %s should be absent, got %q", h, v)
+		}
+	}
+	t.Logf("integration/o4.3: no Object Lock headers on plain upload ✓")
+}
+
+// ---------------------------------------------------------------------------
+// Key construction helper (not AWS-specific, tested here for completeness)
+// ---------------------------------------------------------------------------
+
 func TestIntegration_S3KeyFormat(t *testing.T) {
 	prefix := "shadowai/evidence"
 	cases := []struct {

@@ -13,7 +13,16 @@
 {{- if and (eq .Values.evidenceExport.mode "tenants") (empty .Values.evidenceExport.orgIDs) }}
 {{- fail "evidenceExport.orgIDs must not be empty when mode=tenants" }}
 {{- end }}
-# PR-O4.1/O4.2: Scheduled evidence bundle export + offline verification.
+{{- if and (eq .Values.evidenceExport.storage "s3") .Values.evidenceExport.s3.objectLock.enabled }}
+{{- $validLockModes := list "GOVERNANCE" "COMPLIANCE" }}
+{{- if not (has .Values.evidenceExport.s3.objectLock.mode $validLockModes) }}
+{{- fail (printf "evidenceExport.s3.objectLock.mode must be GOVERNANCE or COMPLIANCE, got %q" .Values.evidenceExport.s3.objectLock.mode) }}
+{{- end }}
+{{- if not .Values.evidenceExport.s3.objectLock.retentionDays }}
+{{- fail "evidenceExport.s3.objectLock.retentionDays must be > 0 when objectLock.enabled=true" }}
+{{- end }}
+{{- end }}
+# PR-O4.1/O4.2/O4.3: Scheduled evidence bundle export + offline verification.
 #
 # Each run:
 #   1. Creates a timestamped output directory (/exports/... or /tmp/evidence/...).
@@ -114,6 +123,13 @@ spec:
                       {{- end }}
                       {{- if .Values.evidenceExport.s3.forcePathStyle }}
                       --force-path-style \
+                      {{- end }}
+                      {{- if .Values.evidenceExport.s3.objectLock.enabled }}
+                      --object-lock-mode "{{ .Values.evidenceExport.s3.objectLock.mode }}" \
+                      --retain-until "{{ .Values.evidenceExport.s3.objectLock.retentionDays }}d" \
+                      {{- if .Values.evidenceExport.s3.objectLock.legalHold }}
+                      --legal-hold "{{ .Values.evidenceExport.s3.objectLock.legalHold }}" \
+                      {{- end }}
                       {{- end }}
                       --timeout 120
                     # Remove local staging copy after successful upload.

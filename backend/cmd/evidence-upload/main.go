@@ -1,4 +1,4 @@
-// cmd/evidence-upload — PR-O4.2: Upload an evidence bundle to S3-compatible storage.
+// cmd/evidence-upload — PR-O4.2/O4.3: Upload an evidence bundle to S3-compatible storage.
 //
 // Usage:
 //
@@ -8,7 +8,10 @@
 //	  --key shadowai/evidence/2026/04/26/global-20260426-020000.zip \
 //	  [--region us-east-1] \
 //	  [--endpoint http://minio:9000] \
-//	  [--force-path-style]
+//	  [--force-path-style] \
+//	  [--sse AES256|none] \
+//	  [--object-lock-mode GOVERNANCE|COMPLIANCE --retain-until 90d] \
+//	  [--legal-hold ON|OFF]
 //
 // Credentials via standard AWS env vars:
 //
@@ -19,8 +22,8 @@
 // Exit codes:
 //
 //	0 — upload successful
-//	1 — upload failed (network, auth, S3 error)
-//	2 — configuration error (missing flags, bad file path)
+//	1 — upload failed (network, auth, S3 error; includes bucket Object Lock rejection)
+//	2 — configuration error (missing flags, bad file path, invalid Object Lock args)
 package main
 
 import (
@@ -28,6 +31,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -59,6 +64,10 @@ func run(args []string, stdout, stderr *os.File) int {
 		forcePathStyle = fs.Bool("force-path-style", false, "Use path-style addressing (required for many MinIO installs)")
 		sse            = fs.String("sse", "AES256", `Server-Side Encryption: "AES256" (default, AWS S3) or "none" (MinIO/custom S3)`)
 		timeout        = fs.Int("timeout", 300, "Upload timeout in seconds")
+		// O4.3: S3 Object Lock
+		objectLockMode = fs.String("object-lock-mode", "", `Object Lock retention mode: "GOVERNANCE" or "COMPLIANCE" (requires --retain-until)`)
+		retainUntil    = fs.String("retain-until", "", `Object Lock retention date: RFC3339 (2026-07-25T00:00:00Z) or duration (90d, 8760h)`)
+		legalHold      = fs.String("legal-hold", "", `Object Lock legal hold: "ON" or "OFF" (optional, independent of mode/retain-until)`)
 	)
 	if err := fs.Parse(args); err != nil {
 		return exitConfig
@@ -86,6 +95,48 @@ func run(args []string, stdout, stderr *os.File) int {
 	case "AES256", "none":
 	default:
 		return cfgErr("--sse must be AES256 or none, got %q", *sse)
+	}
+
+	// O4.3: Object Lock flag validation.
+	// mode and retain-until must be set together; partial config fails hard.
+	if (*objectLockMode == "") != (*retainUntil == "") {
+		if *objectLockMode == "" {
+			return cfgErr("--object-lock-mode is required when --retain-until is set")
+		}
+		return cfgErr("--retain-until is required when --object-lock-mode is set")
+	}
+	var lockModeVal types.ObjectLockMode
+	if *objectLockMode != "" {
+		switch *objectLockMode {
+		case "GOVERNANCE":
+			lockModeVal = types.ObjectLockModeGovernance
+		case "COMPLIANCE":
+			lockModeVal = types.ObjectLockModeCompliance
+		default:
+			return cfgErr("--object-lock-mode must be GOVERNANCE or COMPLIANCE, got %q", *objectLockMode)
+		}
+	}
+	var retainUntilTime time.Time
+	if *retainUntil != "" {
+		var err error
+		retainUntilTime, err = parseRetainUntil(*retainUntil)
+		if err != nil {
+			return cfgErr("%v", err)
+		}
+		if !retainUntilTime.After(time.Now()) {
+			return cfgErr("--retain-until must be in the future, got %s", retainUntilTime.Format(time.RFC3339))
+		}
+	}
+	var legalHoldVal types.ObjectLockLegalHoldStatus
+	if *legalHold != "" {
+		switch *legalHold {
+		case "ON":
+			legalHoldVal = types.ObjectLockLegalHoldStatusOn
+		case "OFF":
+			legalHoldVal = types.ObjectLockLegalHoldStatusOff
+		default:
+			return cfgErr("--legal-hold must be ON or OFF, got %q", *legalHold)
+		}
 	}
 
 	f, err := os.Open(*file)
@@ -135,8 +186,12 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	client := s3.NewFromConfig(cfg, s3Opts...)
 
-	fmt.Fprintf(stdout, "[evidence-upload] uploading %s → s3://%s/%s (%d bytes)\n",
-		*file, *bucket, *key, stat.Size())
+	lockSuffix := ""
+	if *objectLockMode != "" {
+		lockSuffix = fmt.Sprintf(" [object-lock=%s until=%s]", *objectLockMode, retainUntilTime.Format("2006-01-02"))
+	}
+	fmt.Fprintf(stdout, "[evidence-upload] uploading %s → s3://%s/%s (%d bytes)%s\n",
+		*file, *bucket, *key, stat.Size(), lockSuffix)
 
 	putInput := &s3.PutObjectInput{
 		Bucket:        aws.String(*bucket),
@@ -152,8 +207,19 @@ func run(args []string, stdout, stderr *os.File) int {
 	if *sse == "AES256" {
 		putInput.ServerSideEncryption = types.ServerSideEncryptionAes256
 	}
-	// sse=none: omit the SSE header — required for MinIO and some custom S3 targets
-	// that reject or ignore AES256 depending on server configuration.
+	// sse=none: omit the SSE header — required for MinIO and some custom S3 targets.
+
+	// O4.3: Object Lock headers. If mode+retain-until are set, apply retention.
+	// If the bucket does not have Object Lock enabled, AWS/MinIO returns an error,
+	// which propagates as exitFail — intentionally failing hard rather than degrading
+	// to a mutable upload.
+	if *objectLockMode != "" {
+		putInput.ObjectLockMode = lockModeVal
+		putInput.ObjectLockRetainUntilDate = aws.Time(retainUntilTime)
+	}
+	if *legalHold != "" {
+		putInput.ObjectLockLegalHoldStatus = legalHoldVal
+	}
 
 	_, err = client.PutObject(ctx, putInput)
 	if err != nil {
@@ -162,4 +228,26 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	fmt.Fprintf(stdout, "[evidence-upload] upload complete: s3://%s/%s\n", *bucket, *key)
 	return exitOK
+}
+
+// parseRetainUntil parses --retain-until value.
+//
+// Accepts:
+//   - RFC3339 timestamp: "2026-07-25T02:00:00Z"
+//   - Days suffix:       "90d"  → now + 90 days
+//   - Go duration:       "8760h" → now + 8760 hours
+func parseRetainUntil(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	if body, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(body)
+		if err == nil && n > 0 {
+			return time.Now().UTC().Add(time.Duration(n) * 24 * time.Hour), nil
+		}
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return time.Now().UTC().Add(d), nil
+	}
+	return time.Time{}, fmt.Errorf("invalid --retain-until %q: use RFC3339 (e.g. 2026-07-25T02:00:00Z) or duration (e.g. 90d, 8760h)", s)
 }

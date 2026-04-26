@@ -1,6 +1,6 @@
 # Evidence Export & Restore Drill — Operator Runbook
 
-**PR-O4.1 + O4.2** · Last updated: 2026-04-26
+**PR-O4.1 + O4.2 + O4.3** · Last updated: 2026-04-26
 
 ---
 
@@ -57,7 +57,97 @@ ls -lt /exports/*.zip | head -5
 
 ---
 
-## 2. Retrieving a Bundle from S3 / MinIO (storage=s3)
+## 2. S3 Object Lock Prerequisites (O4.3)
+
+Object Lock must be enabled **at bucket creation time** — it cannot be enabled on an existing
+bucket. This is an ops/Terraform responsibility, not the application chart.
+
+### AWS S3
+
+```bash
+# Create bucket with Object Lock enabled (versioning is automatically enabled).
+aws s3api create-bucket \
+  --bucket shadowai-compliance \
+  --region us-east-1 \
+  --object-lock-enabled-for-bucket
+
+# Optional: set a bucket-level default retention (applied when PutObject omits retention headers).
+# The per-object headers from evidence-upload override this default.
+aws s3api put-object-lock-configuration \
+  --bucket shadowai-compliance \
+  --object-lock-configuration '{
+    "ObjectLockEnabled": "Enabled",
+    "Rule": {
+      "DefaultRetention": {
+        "Mode": "COMPLIANCE",
+        "Days": 90
+      }
+    }
+  }'
+
+# Verify Object Lock is active:
+aws s3api get-object-lock-configuration --bucket shadowai-compliance
+```
+
+### MinIO
+
+```bash
+# Create bucket with object locking enabled:
+mc mb --with-lock minio/shadowai-compliance
+
+# Set default retention (optional):
+mc retention set --default COMPLIANCE 90d minio/shadowai-compliance
+
+# Verify:
+mc retention info minio/shadowai-compliance
+```
+
+### Helm configuration
+
+```yaml
+evidenceExport:
+  storage: s3
+  s3:
+    bucket: shadowai-compliance
+    sse: "AES256"
+    objectLock:
+      enabled: true
+      mode: "COMPLIANCE"     # or GOVERNANCE
+      retentionDays: 90
+      legalHold: ""          # "ON" | "OFF" | "" (omit header)
+```
+
+### Verifying retention on a specific object
+
+```bash
+# AWS S3
+aws s3api head-object \
+  --bucket shadowai-compliance \
+  --key shadowai/evidence/2026/04/26/global-20260426-020001.zip \
+  --query '{Mode:ObjectLockMode,RetainUntil:ObjectLockRetainUntilDate,LegalHold:ObjectLockLegalHoldStatus}'
+
+# Expected output (COMPLIANCE, 90-day window):
+# {
+#   "Mode": "COMPLIANCE",
+#   "RetainUntil": "2026-07-25T02:00:01+00:00",
+#   "LegalHold": null
+# }
+
+# MinIO
+mc stat --json minio/shadowai-compliance/shadowai/evidence/2026/04/26/global-20260426-020001.zip \
+  | jq '{mode: .metadata["X-Amz-Object-Lock-Mode"], until: .metadata["X-Amz-Object-Lock-Retain-Until-Date"]}'
+```
+
+### Behaviour when bucket is not Object Lock-enabled
+
+If `objectLock.enabled: true` but the bucket was created without `--object-lock-enabled-for-bucket`,
+AWS returns HTTP 400 / `InvalidRequest`. `evidence-upload` exits 1, the CronJob fails, and the
+`EvidenceExportJobFailed` alert fires. **Do not disable Object Lock in Helm to work around this —
+fix the bucket instead.**
+
+---
+
+## 3. Retrieving a Bundle from S3 / MinIO (storage=s3)
 
 ```bash
 # AWS S3
@@ -98,7 +188,7 @@ audit-verify --bundle ./global-20260426-020001 --verbose
 
 ---
 
-## 3. Offline Bundle Verification
+## 4. Offline Bundle Verification
 
 ```bash
 # Copy bundle from PVC to local machine
@@ -129,7 +219,7 @@ tenant bundle sigs              OK     failed=0
 
 ---
 
-## 4. Handing Bundle to an Auditor
+## 5. Handing Bundle to an Auditor
 
 ```bash
 # Verify first, then zip for transfer
@@ -146,7 +236,7 @@ for Ed25519 anchor signature verification.
 
 ---
 
-## 5. Restore Drill
+## 6. Restore Drill
 
 A restore drill verifies that WORM evidence survives a DB restore and that
 anchors/bundles remain consistent with the restored data.
@@ -193,7 +283,7 @@ Document each drill in the incident log with timestamp, operator, and results.
 
 ---
 
-## 6. Alert Response
+## 7. Alert Response
 
 ### EvidenceExportJobFailed
 
@@ -240,7 +330,7 @@ which indicates:
 
 ---
 
-## 7. Helm Configuration Reference
+## 8. Helm Configuration Reference
 
 ```yaml
 evidenceExport:
@@ -263,7 +353,7 @@ evidenceExport:
 
 ---
 
-## 8. Prometheus Queries
+## 9. Prometheus Queries
 
 ```promql
 # Jobs that failed in the last 24h

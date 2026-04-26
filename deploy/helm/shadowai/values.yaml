@@ -209,6 +209,20 @@ evidenceExport:
     stagingSize: "2Gi"
     # sse: Server-Side Encryption. "AES256" (default, AWS S3) or "none" (MinIO/custom S3).
     sse: "AES256"
+    # objectLock: S3 Object Lock / WORM retention (O4.3).
+    # Requires the bucket to have Object Lock enabled at creation time.
+    # See runbook section "S3 Object Lock Prerequisites" for bucket setup.
+    objectLock:
+      enabled: false
+      # mode: GOVERNANCE (can be overridden by privileged users) or
+      #        COMPLIANCE (immutable — cannot be shortened even by root).
+      mode: "COMPLIANCE"
+      # retentionDays: each uploaded bundle is locked for this many days from upload time.
+      # Typical values: 90 (quarterly audit), 365 (annual), 2555 (7-year regulatory).
+      retentionDays: 90
+      # legalHold: "ON" | "OFF" | "" (empty = don't set legal hold header).
+      # Legal hold is independent of retention and prevents deletion until explicitly removed.
+      legalHold: ""
 
   # zip: create <output>.zip archive after export.
   zip: false
