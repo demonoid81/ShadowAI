@@ -28,10 +28,16 @@ config:
   AUDIT_PURGE_CHUNK_SIZE: "1000"
 
   # Streaming: buffered is the safe production default.
-  # Do NOT enable incremental until F7.5 promotion criteria are met.
-  # See docs/production-hardening.md §6 for promotion criteria.
+  # Do NOT enable incremental until the 30-day proof window is complete.
+  # See docs/runbooks/streaming-production-proof.md for the full process:
+  #   Stage 0: baseline buffered (7 days)
+  #   Stage 1: shadow mode (14 days, 0 policy_action mismatches required)
+  #   Stage 2: limited incremental canary (8 days)
+  #   Stage 3: promotion review + operator sign-off
+  # Additional F7.6 constraint: Anthropic/Gemini/Ollama use identity-stub EmitSanitized —
+  # sanitize does NOT modify content for these providers (F7.x scope for full support).
   STREAMING_MODE: "buffered"
-  # STREAMING_ALLOW_INCREMENTAL_IN_PROD: "true"  # explicit opt-in only; F7.6 required for Anthropic/Gemini/Ollama
+  # STREAMING_ALLOW_INCREMENTAL_IN_PROD: "true"   # explicit opt-in; complete proof window first
 
   FIREWALL_ENABLED: "true"
   # Semantic V2 shadow mode: do not enforce until corpus baseline is established.

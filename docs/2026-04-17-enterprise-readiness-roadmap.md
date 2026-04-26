@@ -219,6 +219,7 @@ Acceptance criteria:
 6. ~~**L5 — Legal hold advanced workflow**~~ ✅
 7. ~~**BYOK1 — KMS / BYOK design**~~ ✅ → `docs/rfcs/2026-04-pr-byok1-kms-byok-design.md`
 8. ~~**GA1 — Hardened default / scale pass**~~ ✅ → `docs/production-hardening.md`
+9. **F7.6 — Streaming production proof window** ← current → `docs/runbooks/streaming-production-proof.md`
 
 ---
 
@@ -230,4 +231,4 @@ Acceptance criteria:
 - **До signed production:** ✅ все закрыты.
 - **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; остаются BYOK2 (после customer demand) и L6 (scoped holds).
 
-Следующий recommended work item: **BYOK2** (после customer KMS requirement) или **L6** (scoped legal hold enforcement).
+Следующий recommended work item: **F7.6 streaming proof window** (оперативная задача: запустить и пройти 30-day process), затем **BYOK2** или **L6**.

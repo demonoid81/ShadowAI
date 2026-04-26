@@ -14,6 +14,7 @@ and pre-launch checklist.
 | Situation | Runbook |
 |-----------|---------|
 | Production hardening / defaults | [production-hardening.md](../production-hardening.md) |
+| Streaming incremental rollout | [streaming-production-proof.md](streaming-production-proof.md) |
 | Deploy / rollback | [deploy-rollback.md](deploy-rollback.md) |
 | Emergency admin access | [break-glass.md](break-glass.md) |
 | OIDC/IdP MFA not confirming | [oidc-idp-mfa.md](oidc-idp-mfa.md) |
