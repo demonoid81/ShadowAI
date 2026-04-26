@@ -80,6 +80,24 @@ build-cli:
 build-all: build build-enterprise build-cli
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Performance benchmarks (Scale1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# perf-smoke: fast sanity run (100 samples each). Does NOT block CI.
+perf-smoke:
+	cd backend && go run -tags enterprise ./cmd/shadowai-bench -- \
+		--suite all --short --format table
+
+# perf-full: full measurement run (2000 samples each). For manual baseline capture.
+# Output: docs/performance-baseline-$(shell date +%Y%m%d).json
+perf-full:
+	cd backend && go run -tags enterprise ./cmd/shadowai-bench -- \
+		--suite all --samples 2000 --warmup 200 \
+		--format json \
+		--output ../docs/performance-baseline-$(shell date +%Y%m%d).json \
+	&& echo "Baseline written to docs/performance-baseline-$(shell date +%Y%m%d).json"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Code quality
 # ─────────────────────────────────────────────────────────────────────────────
 
