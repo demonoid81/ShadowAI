@@ -1,0 +1,239 @@
+{{- if .Values.evidenceCollection.enabled }}
+{{- /* ── Render-time validation ───────────────────────────────────────────── */}}
+{{- if empty .Values.evidenceCollection.s3.bucket }}
+{{- fail "evidenceCollection.s3.bucket must not be empty when evidenceCollection.enabled=true" }}
+{{- end }}
+{{- $validModes := list "previous_month" "previous_quarter" "explicit" }}
+{{- if not (has .Values.evidenceCollection.periodMode $validModes) }}
+{{- fail (printf "evidenceCollection.periodMode must be one of %v, got %q" $validModes .Values.evidenceCollection.periodMode) }}
+{{- end }}
+{{- if eq .Values.evidenceCollection.periodMode "explicit" }}
+{{- if empty .Values.evidenceCollection.periodFrom }}
+{{- fail "evidenceCollection.periodFrom is required when periodMode=explicit" }}
+{{- end }}
+{{- if empty .Values.evidenceCollection.periodTo }}
+{{- fail "evidenceCollection.periodTo is required when periodMode=explicit" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.evidenceCollection.s3.objectLock.enabled (not (has .Values.evidenceCollection.s3.objectLock.mode (list "GOVERNANCE" "COMPLIANCE"))) }}
+{{- fail (printf "evidenceCollection.s3.objectLock.mode must be GOVERNANCE or COMPLIANCE, got %q" .Values.evidenceCollection.s3.objectLock.mode) }}
+{{- end }}
+{{- if and .Values.evidenceCollection.s3.objectLock.enabled (not .Values.evidenceCollection.s3.objectLock.retentionDays) }}
+{{- fail "evidenceCollection.s3.objectLock.retentionDays must be > 0 when objectLock.enabled=true" }}
+{{- end }}
+{{- /* ── Secret resolution ───────────────────────────────────────────────── */}}
+{{- $s3Secret := .Values.evidenceCollection.s3.secretName | default .Values.existingSecret }}
+{{- $chainSecret := .Values.evidenceCollection.chainVerify.secretName | default .Values.existingSecret }}
+# SOC2.2: Scheduled compliance evidence collection CronJob.
+# Runs audit-collect-evidence for the configured period, then uploads the
+# resulting zip to S3 via evidence-upload (with optional Object Lock).
+# exit 0 = package collected and uploaded.
+# exit 1 = collection partial (if allowIncomplete=false, Job fails).
+# exit 2 = config or upload error.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "shadowai.fullname" . }}-evidence-collection
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: evidence-collection
+spec:
+  schedule: {{ .Values.evidenceCollection.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.evidenceCollection.deadlineSeconds | default 1800 }}
+      template:
+        metadata:
+          labels:
+            {{- include "shadowai.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: evidence-collection
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          containers:
+            - name: evidence-collection
+              image: {{ include "shadowai.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+
+                  # ── Pure-shell date arithmetic (BusyBox/Alpine compatible) ──
+                  days_in_month() {
+                    local y=$1 m
+                    m=$(( 10#$2 ))
+                    case $m in
+                      1|3|5|7|8|10|12) echo 31;;
+                      4|6|9|11) echo 30;;
+                      2) if [ $(( y % 4 )) -eq 0 ] && { [ $(( y % 100 )) -ne 0 ] || [ $(( y % 400 )) -eq 0 ]; }; then echo 29; else echo 28; fi;;
+                    esac
+                  }
+
+                  YEAR=$(date -u +%Y)
+                  MONTH=$(date -u +%m)
+                  MN=$(( 10#${MONTH} ))
+
+                  PERIOD_MODE="{{ .Values.evidenceCollection.periodMode }}"
+                  case "${PERIOD_MODE}" in
+                    previous_month)
+                      if [ $MN -eq 1 ]; then PY=$(( YEAR-1 )); PM=12
+                      else PY=$YEAR; PM=$(( MN-1 )); fi
+                      PM_PAD=$(printf "%02d" $PM)
+                      DAYS=$(days_in_month $PY $PM_PAD)
+                      FROM="${PY}-${PM_PAD}-01"
+                      TO="${PY}-${PM_PAD}-$(printf "%02d" $DAYS)"
+                      ;;
+                    previous_quarter)
+                      # Q = 0-indexed quarter of current month (0=Q1..3=Q4)
+                      Q=$(( (MN-1)/3 ))
+                      case $Q in
+                        0) QY=$(( YEAR-1 )); QS=10; QE=12;;
+                        1) QY=$YEAR; QS=1;  QE=3;;
+                        2) QY=$YEAR; QS=4;  QE=6;;
+                        *) QY=$YEAR; QS=7;  QE=9;;
+                      esac
+                      QS_PAD=$(printf "%02d" $QS); QE_PAD=$(printf "%02d" $QE)
+                      DAYS=$(days_in_month $QY $QE_PAD)
+                      FROM="${QY}-${QS_PAD}-01"
+                      TO="${QY}-${QE_PAD}-$(printf "%02d" $DAYS)"
+                      ;;
+                    explicit)
+                      FROM="{{ .Values.evidenceCollection.periodFrom }}"
+                      TO="{{ .Values.evidenceCollection.periodTo }}"
+                      ;;
+                    *)
+                      echo "ERROR: unknown periodMode=${PERIOD_MODE}" >&2; exit 2;;
+                  esac
+
+                  echo "[evidence-collection] period ${FROM} → ${TO} (mode=${PERIOD_MODE})"
+
+                  # ── Artifact paths ────────────────────────────────────────
+                  PACKAGE_NAME="evidence-collection-${FROM}-to-${TO}"
+                  PACKAGE_ZIP="/staging/${PACKAGE_NAME}.zip"
+                  YYYY=$(echo "${FROM}" | cut -c1-4)
+                  MM=$(echo "${FROM}" | cut -c6-7)
+                  S3_KEY="{{ .Values.evidenceCollection.s3.prefix | default "shadowai/evidence-collection" }}/${YYYY}/${MM}/${PACKAGE_NAME}.zip"
+
+                  # ── Run audit-collect-evidence ────────────────────────────
+                  echo "[evidence-collection] running audit-collect-evidence..."
+                  set +e
+                  audit-collect-evidence \
+                    --from "${FROM}" \
+                    --to   "${TO}" \
+                    --output "${PACKAGE_ZIP}" \
+                    --format zip \
+                    {{- if .Values.evidenceCollection.controlsDoc }}
+                    --controls-doc "{{ .Values.evidenceCollection.controlsDoc }}" \
+                    {{- end }}
+                    {{- if .Values.evidenceCollection.s3.bucket }}
+                    --bucket "{{ .Values.evidenceCollection.s3.bucket }}" \
+                    --region "{{ .Values.evidenceCollection.s3.region | default "us-east-1" }}" \
+                    {{- if .Values.evidenceCollection.s3.endpoint }}
+                    --endpoint "{{ .Values.evidenceCollection.s3.endpoint }}" \
+                    {{- end }}
+                    {{- if .Values.evidenceCollection.s3.forcePathStyle }}
+                    --force-path-style \
+                    {{- end }}
+                    {{- end }}
+                    {{- if .Values.evidenceCollection.allowIncomplete }}
+                    --allow-incomplete \
+                    {{- end }}
+                  COLLECT_RC=$?
+                  set -e
+
+                  if [ $COLLECT_RC -eq 2 ]; then
+                    echo "ERROR: audit-collect-evidence config error (exit 2); aborting upload" >&2
+                    exit 2
+                  fi
+                  {{- if not .Values.evidenceCollection.allowIncomplete }}
+                  if [ $COLLECT_RC -ne 0 ]; then
+                    echo "ERROR: audit-collect-evidence exit ${COLLECT_RC}; not uploading incomplete package (allowIncomplete=false)" >&2
+                    exit $COLLECT_RC
+                  fi
+                  {{- else }}
+                  echo "[evidence-collection] collection exit=${COLLECT_RC} (allowIncomplete=true; package may contain not_collected items)"
+                  {{- end }}
+
+                  # ── Upload to S3 via evidence-upload ─────────────────────
+                  echo "[evidence-collection] uploading ${PACKAGE_ZIP} → s3://{{ .Values.evidenceCollection.s3.bucket }}/${S3_KEY}"
+                  evidence-upload \
+                    --file   "${PACKAGE_ZIP}" \
+                    --bucket "{{ .Values.evidenceCollection.s3.bucket }}" \
+                    --key    "${S3_KEY}" \
+                    --region "{{ .Values.evidenceCollection.s3.region | default "us-east-1" }}" \
+                    --sse    "{{ .Values.evidenceCollection.s3.sse | default "AES256" }}" \
+                    {{- if .Values.evidenceCollection.s3.endpoint }}
+                    --endpoint "{{ .Values.evidenceCollection.s3.endpoint }}" \
+                    {{- end }}
+                    {{- if .Values.evidenceCollection.s3.forcePathStyle }}
+                    --force-path-style \
+                    {{- end }}
+                    {{- if .Values.evidenceCollection.s3.objectLock.enabled }}
+                    --object-lock-mode "{{ .Values.evidenceCollection.s3.objectLock.mode }}" \
+                    --retain-until "{{ .Values.evidenceCollection.s3.objectLock.retentionDays }}d" \
+                    {{- if .Values.evidenceCollection.s3.objectLock.legalHold }}
+                    --legal-hold "{{ .Values.evidenceCollection.s3.objectLock.legalHold }}" \
+                    {{- end }}
+                    {{- end }}
+                    --timeout 120
+
+                  echo "[evidence-collection] package uploaded: s3://{{ .Values.evidenceCollection.s3.bucket }}/${S3_KEY}"
+                  rm -f "${PACKAGE_ZIP}"
+                  echo "[evidence-collection] staging cleaned; run complete period=${FROM}→${TO}"
+
+              env:
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3Secret }}
+                      key: {{ .Values.evidenceCollection.s3.accessKeyIDKey | default "s3AccessKeyID" }}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3Secret }}
+                      key: {{ .Values.evidenceCollection.s3.secretAccessKeyKey | default "s3SecretAccessKey" }}
+                {{- if .Values.evidenceCollection.chainVerify.enabled }}
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $chainSecret }}
+                      key: databaseUrl
+                - name: AUDIT_CHAIN_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $chainSecret }}
+                      key: auditChainSecret
+                {{- end }}
+
+              resources:
+                requests:
+                  cpu: {{ .Values.evidenceCollection.resources.requests.cpu | default "100m" }}
+                  memory: {{ .Values.evidenceCollection.resources.requests.memory | default "128Mi" }}
+                limits:
+                  cpu: {{ .Values.evidenceCollection.resources.limits.cpu | default "500m" }}
+                  memory: {{ .Values.evidenceCollection.resources.limits.memory | default "256Mi" }}
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                # readOnlyRootFilesystem=true: all writes go to /staging emptyDir.
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+
+              volumeMounts:
+                - name: staging
+                  mountPath: /staging
+
+          volumes:
+            - name: staging
+              emptyDir:
+                sizeLimit: 500Mi
+{{- end }}

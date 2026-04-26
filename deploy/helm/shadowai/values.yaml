@@ -315,6 +315,96 @@ evidenceAuditReport:
     # Default 7 days (1× weekly period) — fires if Monday's run is skipped.
     missingAfterSeconds: 604800
 
+# ─────────────────────────────────────────────────────────────────────────────
+# evidenceCollection (SOC2.2): scheduled compliance evidence package collection.
+# Runs audit-collect-evidence, uploads result to S3 (with optional Object Lock),
+# and fires alerts on failure/missing schedule.
+#
+# Opt-in: enabled=false by default.
+# Requires: storage=s3 (no PVC mode; evidence package must be durably stored).
+# See docs/runbooks/evidence-collection.md for the full operational guide.
+# ─────────────────────────────────────────────────────────────────────────────
+evidenceCollection:
+  enabled: false
+
+  # schedule: when to run the collection job.
+  # Examples:
+  #   "0 4 1 * *"    — 1st of every month at 04:00 UTC (monthly cadence)
+  #   "0 4 1 1,4,7,10 *" — quarterly (1st of Jan/Apr/Jul/Oct)
+  schedule: "0 4 1 1,4,7,10 *"   # quarterly
+
+  # periodMode: how the collection period is determined.
+  #   previous_month   — calendar month before current (e.g. run in Feb → Jan)
+  #   previous_quarter — calendar quarter before current (e.g. run in Q2 → Q1)
+  #   explicit         — use periodFrom / periodTo directly
+  #
+  # Quarter boundaries are calendar (Q1=Jan–Mar, Q2=Apr–Jun, Q3=Jul–Sep, Q4=Oct–Dec).
+  # Year-boundary case: running in Q1 → previous quarter is Q4 of the prior year.
+  periodMode: "previous_quarter"
+
+  # periodFrom/periodTo: required when periodMode=explicit. Format: YYYY-MM-DD.
+  periodFrom: ""
+  periodTo: ""
+
+  # controlsDoc: path inside the container to soc2-iso-control-mapping.md.
+  # Leave empty to omit control mapping snapshot (added to not_collected).
+  controlsDoc: ""
+
+  # allowIncomplete: if true, Job exits 0 even when some controls are not_collected.
+  # Package will contain evidence/not_collected.json describing missing items.
+  # Default false (strict: Job fails if any controls are missing).
+  allowIncomplete: false
+
+  # chainVerify: pass DATABASE_URL and AUDIT_CHAIN_SECRET to audit-collect-evidence
+  # so it can run chain/anchor verification. Requires DB connectivity from the Job.
+  chainVerify:
+    enabled: false
+    # secretName: K8s Secret containing databaseUrl and auditChainSecret.
+    # Defaults to existingSecret when empty.
+    secretName: ""
+
+  # s3: S3-compatible storage for evidence package upload (required).
+  # Object Lock is strongly recommended for compliance-grade immutability.
+  # See docs/evidence-export-runbook.md §2 for bucket prerequisites.
+  s3:
+    # bucket: REQUIRED when evidenceCollection.enabled=true.
+    bucket: ""
+    prefix: "shadowai/evidence-collection"
+    region: "us-east-1"
+    endpoint: ""           # empty = AWS S3; set for MinIO/GCS
+    forcePathStyle: false  # true for MinIO
+    sse: "AES256"          # "none" for MinIO targets that reject AES256
+    # secretName: K8s Secret with AWS credentials.
+    # Defaults to existingSecret when empty.
+    secretName: ""
+    accessKeyIDKey: s3AccessKeyID
+    secretAccessKeyKey: s3SecretAccessKey
+    # objectLock: S3 Object Lock for immutable compliance storage.
+    # Requires bucket created with Object Lock enabled (ops/Terraform responsibility).
+    objectLock:
+      enabled: false
+      mode: "COMPLIANCE"       # COMPLIANCE (immutable even by root) or GOVERNANCE
+      retentionDays: 2555      # 7 years — typical regulatory compliance retention
+      legalHold: ""            # "ON" | "OFF" | "" (omit header)
+
+  deadlineSeconds: 1800   # 30 minutes hard Job deadline
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # alerts: PrometheusRule alerts for the evidence collection CronJob.
+  alerts:
+    enabled: true
+    severity: critical
+    # missingAfterSeconds: fire if CronJob has not run in this window.
+    # Default: ~31 days (covers both monthly and quarterly schedules).
+    missingAfterSeconds: 2678400   # 31 days
+
 serviceAccount:
   create: true
   annotations: {}

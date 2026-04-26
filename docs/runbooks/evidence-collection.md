@@ -1,4 +1,4 @@
-# Quarterly Compliance Evidence Collection Runbook (SOC2.1)
+# Quarterly Compliance Evidence Collection Runbook (SOC2.1 + SOC2.2)
 
 This runbook describes how to generate a quarterly compliance evidence package using
 `audit-collect-evidence`. The package is designed to be passed to an external auditor
@@ -255,19 +255,141 @@ The following items are intentionally excluded from the evidence package:
 
 ---
 
-## Helm / CronJob
+## Scheduled Collection (SOC2.2 — Helm CronJob)
 
-Quarterly automated collection is **not yet automated via CronJob** (out of scope for SOC2.1).
-The recommended approach is a **manual quarterly run** by a designated operator.
+### Overview
 
-Future consideration: add a quarterly CronJob that runs `audit-collect-evidence` and
-uploads the package to a secure S3 prefix for long-term retention.
+SOC2.2 adds a Helm-managed CronJob (`evidenceCollection`) that:
+1. Calculates the audit period automatically (previous month, previous quarter, or explicit)
+2. Runs `audit-collect-evidence` to build the package
+3. Uploads the zip to S3 using `evidence-upload` (with optional Object Lock)
+4. Fires `EvidenceCollectionJobFailed` or `EvidenceCollectionJobMissing` alerts
+
+### Helm configuration
+
+```yaml
+evidenceCollection:
+  enabled: true
+  schedule: "0 4 1 1,4,7,10 *"   # quarterly: 1st of Jan/Apr/Jul/Oct at 04:00 UTC
+  periodMode: "previous_quarter"   # or: previous_month | explicit
+  allowIncomplete: false            # fail Job if any controls are not_collected
+
+  s3:
+    bucket: shadowai-compliance
+    prefix: shadowai/evidence-collection
+    region: us-east-1
+    sse: "AES256"
+    objectLock:
+      enabled: true
+      mode: "COMPLIANCE"
+      retentionDays: 2555   # 7 years
+
+  chainVerify:
+    enabled: true    # pass DATABASE_URL + AUDIT_CHAIN_SECRET for chain verification
+
+  alerts:
+    enabled: true
+    severity: critical
+    missingAfterSeconds: 2678400   # 31 days
+```
+
+### Period calculation
+
+| `periodMode` | Run month | FROM | TO |
+|-------------|-----------|------|-----|
+| `previous_quarter` | January (Q1) | Oct 1 prior year | Dec 31 prior year |
+| `previous_quarter` | April (Q2) | Jan 1 this year | Mar 31 |
+| `previous_quarter` | July (Q3) | Apr 1 | Jun 30 |
+| `previous_quarter` | October (Q4) | Jul 1 | Sep 30 |
+| `previous_month` | February | Jan 1 | Jan 31 |
+| `previous_month` | March | Feb 1 | Feb 28/29 |
+| `explicit` | any | `periodFrom` | `periodTo` |
+
+**First run after deploy**: If there is no evidence for the computed period (e.g., no
+bundles in S3 for that quarter), `audit-collect-evidence` will include the retention
+report as empty/not_collected. This is expected for first runs.
+
+### S3 bucket prerequisites
+
+The S3 bucket must be pre-created. If Object Lock is enabled:
+```bash
+# AWS S3
+aws s3api create-bucket \
+  --bucket shadowai-compliance \
+  --object-lock-enabled-for-bucket
+
+# Optional default retention
+aws s3api put-object-lock-configuration \
+  --bucket shadowai-compliance \
+  --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Years":7}}}'
+```
+
+**Helm does not create the bucket.** This is an ops/Terraform responsibility.
+
+### Retrieving an evidence package from S3
+
+```bash
+# List available packages
+aws s3 ls s3://shadowai-compliance/shadowai/evidence-collection/
+
+# Download a specific quarterly package
+aws s3 cp \
+  s3://shadowai-compliance/shadowai/evidence-collection/2026/01/evidence-collection-2025-10-01-to-2025-12-31.zip \
+  ./evidence-Q4-2025.zip
+
+# Verify download
+sha256sum evidence-Q4-2025.zip
+unzip evidence-Q4-2025.zip
+cat manifest.json | jq '.controls[] | {id, status}'
+```
+
+### Failure handling
+
+| Alert | Meaning | Action |
+|-------|---------|--------|
+| `EvidenceCollectionJobFailed` | Job exited non-zero | Check `kubectl logs job/<name>`; look for chain verify failures or S3 upload errors |
+| `EvidenceCollectionJobMissing` | CronJob not run in 31 days | Check CronJob suspension; verify schedule |
+
+**S3 upload failure after successful collection**: Job exits non-zero. Package was
+collected locally but NOT uploaded to S3. The staging emptyDir is ephemeral — package
+is lost when Pod terminates. Re-run manually with explicit `--from`/`--to`.
+
+**Incomplete package policy** (`allowIncomplete`):
+- `false` (default): Job fails if any controls are not_collected. Audit team sees 0
+  packages for this period. Strong signal that something is wrong.
+- `true`: Job succeeds with incomplete package. Package is uploaded; `not_collected.json`
+  documents gaps. Use when some controls are intentionally unavailable (e.g., no DB for
+  chain verify in a specific environment).
+
+### Manual re-run for a specific period
+
+```bash
+# Re-collect for Q4 2025 with chain verification
+kubectl run evidence-regen --rm -it \
+  --image=shadowai:<tag> \
+  --env="AWS_ACCESS_KEY_ID=$(kubectl get secret shadowai-secrets -o jsonpath='{.data.s3AccessKeyID}' | base64 -d)" \
+  --env="AWS_SECRET_ACCESS_KEY=$(kubectl get secret shadowai-secrets -o jsonpath='{.data.s3SecretAccessKey}' | base64 -d)" \
+  --env="DATABASE_URL=$(kubectl get secret shadowai-secrets -o jsonpath='{.data.databaseUrl}' | base64 -d)" \
+  --env="AUDIT_CHAIN_SECRET=$(kubectl get secret shadowai-secrets -o jsonpath='{.data.auditChainSecret}' | base64 -d)" \
+  --command -- \
+  /bin/sh -c '
+    audit-collect-evidence \
+      --from 2025-10-01 --to 2025-12-31 \
+      --output /tmp/evidence-Q4-2025.zip --format zip \
+      --bucket shadowai-compliance && \
+    evidence-upload \
+      --file /tmp/evidence-Q4-2025.zip \
+      --bucket shadowai-compliance \
+      --key shadowai/evidence-collection/2025/10/evidence-collection-2025-10-01-to-2025-12-31.zip \
+      --region us-east-1 --sse AES256 --timeout 120
+  '
+```
 
 ---
 
 ## Related Documents
 
 - [`docs/compliance/soc2-iso-control-mapping.md`](../compliance/soc2-iso-control-mapping.md) — control mapping
-- [`docs/evidence-export-runbook.md`](../evidence-export-runbook.md) — evidence pipeline
+- [`docs/evidence-export-runbook.md`](../evidence-export-runbook.md) — evidence pipeline + Object Lock prerequisites
 - [`docs/production-hardening.md`](../production-hardening.md) — mandatory secrets and alerts
 - [`docs/runbooks/streaming-production-proof.md`](streaming-production-proof.md) — streaming rollout

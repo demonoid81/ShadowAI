@@ -1,6 +1,7 @@
 {{- $exportAlerts := .Values.evidenceExport.alerts.enabled }}
 {{- $auditAlerts := and .Values.evidenceAuditReport.enabled .Values.evidenceAuditReport.alerts.enabled }}
-{{- if or $exportAlerts $auditAlerts }}
+{{- $collectionAlerts := and .Values.evidenceCollection.enabled .Values.evidenceCollection.alerts.enabled }}
+{{- if or $exportAlerts $auditAlerts $collectionAlerts }}
 # PR-O4.1/O4.4: PrometheusRule for evidence pipeline alerting.
 # Requires kube-state-metrics (kube_job_status_failed, kube_cronjob_next_schedule_time).
 apiVersion: monitoring.coreos.com/v1
@@ -139,6 +140,67 @@ spec:
               {{ .Values.evidenceAuditReport.alerts.missingAfterSeconds | default 604800 | int | divf 3600 | floor }} hours.
               Check CronJob suspension status.
             runbook: "https://docs.shadowai.internal/runbooks/evidence-export#audit-report-missing"
+    {{- end }}
+
+    {{- if $collectionAlerts }}
+    - name: shadowai.evidence-collection
+      interval: 1m
+      rules:
+
+        # Alert: evidence-collection Job failed.
+        # exit 1 = collection incomplete (not_collected items) and allowIncomplete=false.
+        # exit 2 = config or S3 upload error.
+        - alert: EvidenceCollectionJobFailed
+          expr: |
+            kube_job_status_failed{
+              namespace="{{ .Release.Namespace }}",
+              job_name=~"{{ include "shadowai.fullname" . }}-evidence-collection-.*"
+            } > 0
+          for: 1m
+          labels:
+            severity: {{ .Values.evidenceCollection.alerts.severity | default "critical" }}
+            team: platform
+          annotations:
+            summary: "ShadowAI scheduled compliance evidence collection job failed"
+            description: >-
+              The evidence-collection CronJob
+              {{ include "shadowai.fullname" . }}-evidence-collection failed.
+              Exit 1 means audit-collect-evidence reported not_collected controls
+              and allowIncomplete=false. Exit 2 means a config or S3 upload error.
+              Check Job logs. Evidence package may not have been uploaded to S3.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-collection#failure"
+
+        # Alert: evidence-collection CronJob has not run within the expected window.
+        - alert: EvidenceCollectionJobMissing
+          expr: |
+            absent(
+              kube_cronjob_status_last_schedule_time{
+                namespace="{{ .Release.Namespace }}",
+                cronjob="{{ include "shadowai.fullname" . }}-evidence-collection"
+              }
+            )
+            OR
+            (
+              time()
+              - kube_cronjob_status_last_schedule_time{
+                  namespace="{{ .Release.Namespace }}",
+                  cronjob="{{ include "shadowai.fullname" . }}-evidence-collection"
+                }
+            )
+            > {{ .Values.evidenceCollection.alerts.missingAfterSeconds | default 2678400 }}
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ShadowAI evidence collection CronJob has not run"
+            description: >-
+              The evidence-collection CronJob
+              {{ include "shadowai.fullname" . }}-evidence-collection
+              has not run for more than
+              {{ .Values.evidenceCollection.alerts.missingAfterSeconds | default 2678400 | int | divf 86400 | floor }} days.
+              Check CronJob suspension status.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-collection#missing"
     {{- end }}
 
 {{- end }}
