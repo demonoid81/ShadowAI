@@ -1,0 +1,97 @@
+{
+  "schema_version": "1",
+  "updated_at": "2026-04-26",
+  "environment_note": "Thresholds are deliberately conservative for shared GitHub runners (which are slower and noisier than development machines). Baseline values are ~10-20x lower than dev-machine measurements. The goal is to catch CATASTROPHIC regressions (O(n²) replacing O(n), broken cache, etc.), not micro-optimizations. Update baseline_value when intentional changes alter performance characteristics.",
+  "benchmarks": [
+    {
+      "name": "GovernanceCacheHit",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 500000,
+      "warn_regression_pct": 50,
+      "fail_regression_pct": 80,
+      "min_samples": 50,
+      "notes": "In-process map lookup. Dev machine: ~4M RPS. Baseline ~500k for CI. Fail at 80% drop (100k RPS) signals broken cache or major lock contention."
+    },
+    {
+      "name": "GovernanceEvaluate",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 200000,
+      "warn_regression_pct": 50,
+      "fail_regression_pct": 80,
+      "min_samples": 50,
+      "notes": "Service.Evaluate() with cached policy. Dev machine: ~3.6M RPS. Conservative CI baseline."
+    },
+    {
+      "name": "ChainHMACVerify",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 20000,
+      "warn_regression_pct": 40,
+      "fail_regression_pct": 70,
+      "min_samples": 50,
+      "notes": "HMAC-SHA256 per-row computation. Dev machine: ~143k RPS. Stable pure-CPU benchmark. Regression signals algorithm change or crypto library issue."
+    },
+    {
+      "name": "ChainAnchorSign",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 2000,
+      "warn_regression_pct": 40,
+      "fail_regression_pct": 70,
+      "min_samples": 50,
+      "notes": "Ed25519 anchor signing. Dev machine: ~17k RPS. Pure crypto; stable across environments."
+    },
+    {
+      "name": "ChainAnchorVerify",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 1000,
+      "warn_regression_pct": 40,
+      "fail_regression_pct": 70,
+      "min_samples": 50,
+      "notes": "Ed25519 anchor verification. Dev machine: ~7.9k RPS."
+    },
+    {
+      "name": "StreamingDecodeEmit",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 200,
+      "warn_regression_pct": 50,
+      "fail_regression_pct": 80,
+      "min_samples": 50,
+      "notes": "Full SSE decode+emit round-trip (5 events). Dev machine: ~1500 RPS. Large tolerance due to CI scheduler jitter and I/O variance."
+    },
+    {
+      "name": "StreamingDecodeOnly",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 200,
+      "warn_regression_pct": 50,
+      "fail_regression_pct": 80,
+      "min_samples": 50,
+      "notes": "Decoder only, no emit. Dev machine: ~1580 RPS."
+    },
+    {
+      "name": "StreamingEmitSanitized",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 3000,
+      "warn_regression_pct": 50,
+      "fail_regression_pct": 80,
+      "min_samples": 50,
+      "notes": "EmitSanitized JSON re-encoding path (F7.5). Dev machine: ~29k RPS. Fail at 80% drop signals broken JSON marshal path."
+    },
+    {
+      "name": "SIEMEnqueueNormal",
+      "metric": "throughput_rps",
+      "direction": "higher_is_better",
+      "baseline_value": 50000,
+      "warn_regression_pct": 60,
+      "fail_regression_pct": 90,
+      "min_samples": 50,
+      "notes": "Non-blocking async queue enqueue. Dev machine: ~2.6M events/s. Very conservative baseline; 90% drop (5k/s) signals blocking or lock regression."
+    }
+  ]
+}

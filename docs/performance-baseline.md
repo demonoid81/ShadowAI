@@ -1,4 +1,4 @@
-# ShadowAI Performance Baseline — Scale1
+# ShadowAI Performance Baseline — Scale1 + Scale2
 
 **Date:** 2026-04-26  
 **Status:** Initial baseline — measured, not SLA commitment
@@ -14,6 +14,85 @@
 
 ---
 
+## Performance Regression Gate (Scale2)
+
+The performance regression gate (`backend/perf/baseline.json`) uses **conservative
+thresholds** specifically for GitHub shared runners, which are much slower and noisier
+than a development machine.
+
+### Why PR CI and nightly differ
+
+| | PR CI | Nightly |
+|---|---|---|
+| When | Every push | Scheduled 03:00 UTC |
+| What | Build only (`go build ./cmd/shadowai-bench`) | Run + compare with baseline |
+| Blocking | Never on perf | Only on FAIL regressions |
+| Purpose | Ensure harness compiles | Catch catastrophic regressions |
+
+**PR CI does NOT run benchmarks** to avoid blocking developers with noisy measurements
+on shared runners. The nightly workflow runs benchmarks and compares against baseline.
+
+### Interpreting warn vs fail
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| `improve` | Current is better than baseline | No action; consider updating baseline |
+| `ok` | Within tolerance | No action |
+| `warn` | Degraded but below fail threshold | Investigate; may be runner noise |
+| `fail` | Degraded beyond fail threshold | **Investigate immediately**; likely a real regression |
+| `missing` | Benchmark not in current results | Warning; renamed or excluded from suite |
+| `errors` | errors > 0 in current result | **Fail**; benchmark returned errors |
+
+### How to update the baseline
+
+When performance genuinely changes (intentional optimization, dependency update, etc.):
+
+1. Run a full measurement on a stable machine:
+   ```bash
+   make perf-full
+   # produces docs/performance-baseline-YYYYMMDD.json
+   ```
+
+2. Review the numbers. Determine new conservative baseline values for `backend/perf/baseline.json`.
+   Remember: baseline values should be ~10-20x lower than dev-machine numbers to account
+   for CI runner variance.
+
+3. Update `backend/perf/baseline.json`:
+   - Change `baseline_value` for affected benchmarks
+   - Update `updated_at`
+   - Add a note in `notes` explaining the change
+
+4. Run `make perf-compare` locally to verify the new baseline passes.
+
+5. Commit with message like: `perf: update baseline after G2.2 cache optimization`
+
+### How to run the comparison manually
+
+```bash
+# Run and compare (outputs compare report to stdout)
+make perf-compare
+
+# With custom samples
+go run -tags enterprise ./backend/cmd/shadowai-bench \
+  --suite all --samples 500 --warmup 50 \
+  --format json \
+  --compare backend/perf/baseline.json \
+  --compare-output /tmp/compare.json
+
+# Review compare report
+cat /tmp/compare.json | jq '.results[] | select(.status != "ok" and .status != "improve")'
+```
+
+### Exit codes for --compare
+
+| Code | Meaning |
+|------|---------|
+| 0 | All ok, improve, or warn; no fail-level regressions |
+| 1 | At least one fail or errors status |
+| 2 | Config/input error (bad baseline file path, etc.) |
+
+---
+
 ## How to Reproduce
 
 ```bash
@@ -23,10 +102,11 @@ make perf-smoke
 # Full baseline capture (2000 samples each)
 make perf-full
 
-# Manual with specific suite
-go run -tags enterprise ./backend/cmd/shadowai-bench \
-  --suite all --samples 2000 --warmup 200 \
-  --format json --output baseline.json
+# Run and compare with baseline (regression gate)
+make perf-compare
+
+# Nightly full comparison (1000 samples)
+make perf-nightly
 
 # Core-only (no governance/SIEM)
 go run ./backend/cmd/shadowai-bench \

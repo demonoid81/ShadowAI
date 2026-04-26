@@ -85,17 +85,36 @@ build-all: build build-enterprise build-cli
 
 # perf-smoke: fast sanity run (100 samples each). Does NOT block CI.
 perf-smoke:
-	cd backend && go run -tags enterprise ./cmd/shadowai-bench -- \
+	cd backend && go run -tags enterprise ./cmd/shadowai-bench \
 		--suite all --short --format table
 
 # perf-full: full measurement run (2000 samples each). For manual baseline capture.
 # Output: docs/performance-baseline-$(shell date +%Y%m%d).json
 perf-full:
-	cd backend && go run -tags enterprise ./cmd/shadowai-bench -- \
+	cd backend && go run -tags enterprise ./cmd/shadowai-bench \
 		--suite all --samples 2000 --warmup 200 \
 		--format json \
 		--output ../docs/performance-baseline-$(shell date +%Y%m%d).json \
 	&& echo "Baseline written to docs/performance-baseline-$(shell date +%Y%m%d).json"
+
+# perf-compare: run smoke benchmarks and compare against committed baseline.
+# Exit 1 if a FAIL regression is detected. Suitable for nightly CI gate.
+perf-compare:
+	cd backend && go run -tags enterprise ./cmd/shadowai-bench \
+		--suite all --short \
+		--format json --output /tmp/shadowai-bench-current.json \
+		--compare perf/baseline.json \
+		--compare-output /tmp/shadowai-bench-compare.json \
+	&& echo "[perf-compare] no regressions detected" \
+	|| (echo "[perf-compare] REGRESSION DETECTED — see /tmp/shadowai-bench-compare.json"; exit 1)
+
+# perf-nightly: full measurement + comparison. For scheduled CI (not every PR).
+perf-nightly:
+	cd backend && go run -tags enterprise ./cmd/shadowai-bench \
+		--suite all --samples 1000 --warmup 100 \
+		--format json --output /tmp/shadowai-bench-nightly.json \
+		--compare perf/baseline.json \
+		--compare-output /tmp/shadowai-bench-nightly-compare.json
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Code quality

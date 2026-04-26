@@ -1,0 +1,123 @@
+name: Performance Regression Gate (Nightly)
+
+# Scale2: Nightly performance regression check.
+# Runs benchmark smoke on GitHub Actions, compares against baseline.json,
+# fails if a FAIL-level regression is detected.
+#
+# This workflow is SEPARATE from the main CI on PRs to avoid blocking
+# every developer push with performance measurements (which are noisy
+# on shared runners).
+#
+# PR CI only compiles the harness (via build-cli / go build).
+# This workflow provides the actual regression gate.
+on:
+  schedule:
+    # Nightly at 03:00 UTC — after evidence collection CronJobs have run.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    # Allow manual trigger for ad-hoc comparison runs.
+    inputs:
+      suite:
+        description: 'Benchmark suite (all|chain|streaming|governance|siem)'
+        required: false
+        default: 'all'
+      samples:
+        description: 'Samples per benchmark'
+        required: false
+        default: '200'
+
+jobs:
+  perf-regression-gate:
+    name: Performance Regression Gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE || 'backend/go.mod' }}
+          cache-dependency-path: backend/go.sum
+
+      # Run benchmarks and compare with baseline.
+      # --short uses 100 samples; adjust via workflow_dispatch inputs.
+      - name: Run performance benchmarks
+        run: |
+          SUITE="${{ github.event.inputs.suite || 'all' }}"
+          SAMPLES="${{ github.event.inputs.samples || '200' }}"
+          echo "[perf-nightly] suite=${SUITE} samples=${SAMPLES}"
+          go run -tags enterprise ./cmd/shadowai-bench \
+            --suite "${SUITE}" \
+            --samples "${SAMPLES}" \
+            --warmup 20 \
+            --format json \
+            --output /tmp/perf-current.json \
+            --compare perf/baseline.json \
+            --compare-output /tmp/perf-compare.json \
+          || BENCH_EXIT=$?
+          echo "BENCH_EXIT=${BENCH_EXIT:-0}" >> $GITHUB_ENV
+          # Always upload artifacts before potentially failing
+          echo "benchmarks ran"
+
+      # Upload results regardless of pass/fail so they're available for review.
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-results-${{ github.run_id }}
+          path: |
+            /tmp/perf-current.json
+            /tmp/perf-compare.json
+          retention-days: 30
+
+      # Print comparison summary to the job log.
+      - name: Print comparison summary
+        if: always()
+        run: |
+          if [ -f /tmp/perf-compare.json ]; then
+            echo "=== Comparison Summary ==="
+            cat /tmp/perf-compare.json | python3 -c "
+          import json,sys
+          r=json.load(sys.stdin)
+          s=r['summary']
+          print(f\"ok={s['ok']} improve={s['improve']} warn={s['warn']} fail={s['fail']} errors={s['errors']} missing={s['missing']}\")
+          for item in r['results']:
+              if item['status'] in ('fail','errors','warn','missing'):
+                  print(f\"  {item['status'].upper()}: {item['name']} {item['metric']}: {item['reason']}\")
+          "
+          fi
+
+      # Hard fail only on FAIL-level regressions (not warn or missing).
+      - name: Check for regressions
+        run: |
+          if [ "${BENCH_EXIT:-0}" = "1" ]; then
+            echo "::error::Performance regression detected. See perf-compare artifact."
+            exit 1
+          fi
+          echo "No fail-level regressions."
+
+      # Post a summary to the workflow run.
+      - name: Post job summary
+        if: always()
+        run: |
+          echo "## Performance Regression Gate" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/perf-compare.json ]; then
+            python3 -c "
+          import json
+          with open('/tmp/perf-compare.json') as f:
+              r = json.load(f)
+          s = r['summary']
+          status = '✅ No regressions' if not s['has_fail'] else '❌ REGRESSION DETECTED'
+          print(f'**{status}**')
+          print(f'')
+          print(f'| ok | improve | warn | fail | errors | missing |')
+          print(f'|----|----|----|----|----|----|')
+          print(f'| {s[\"ok\"]} | {s[\"improve\"]} | {s[\"warn\"]} | {s[\"fail\"]} | {s[\"errors\"]} | {s[\"missing\"]} |')
+          print(f'')
+          print(f'Baseline: \`backend/perf/baseline.json\`')
+          " >> $GITHUB_STEP_SUMMARY
+          fi

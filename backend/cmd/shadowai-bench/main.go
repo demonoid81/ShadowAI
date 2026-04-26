@@ -32,7 +32,8 @@ import (
 
 const (
 	exitOK    = 0
-	exitError = 2
+	exitFail  = 1 // regression detected
+	exitError = 2 // config/input error
 )
 
 func main() {
@@ -50,6 +51,8 @@ func run(args []string) int {
 		format  = fs.String("format", "table", `Output format: "table" or "json"`)
 		output  = fs.String("output", "", "Write JSON results to file (default: stdout)")
 		short   = fs.Bool("short", false, "Run fewer iterations for CI smoke check (overrides --samples to 100, --warmup to 10)")
+		compare = fs.String("compare", "", "Path to baseline.json; if set, compare results and exit 1 on fail regressions")
+		compareOutput = fs.String("compare-output", "", "Write compare report JSON to this file (only used with --compare)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return exitError
@@ -93,6 +96,38 @@ func run(args []string) int {
 
 	// Build report.
 	report := buildReport(*suite, *samples, *warmup, results)
+
+	// Comparison (if requested).
+	if *compare != "" {
+		cmpReport, err := perf.Compare(*compare, results)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading baseline: %v\n", err)
+			return exitError
+		}
+
+		// Print comparison table.
+		perf.PrintCompareTable(os.Stdout, cmpReport)
+
+		// Optionally write JSON comparison report.
+		if *compareOutput != "" {
+			cmpData, _ := json.MarshalIndent(cmpReport, "", "  ")
+			if err := os.WriteFile(*compareOutput, cmpData, 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "error writing compare output: %v\n", err)
+				return exitError
+			}
+			fmt.Fprintf(os.Stderr, "[shadowai-bench] compare report written to %s\n", *compareOutput)
+		}
+
+		if cmpReport.Summary.HasFail {
+			fmt.Fprintf(os.Stderr, "\n[shadowai-bench] REGRESSION DETECTED: %d fail(s) found\n",
+				cmpReport.Summary.Fail+cmpReport.Summary.Errors)
+			return exitFail
+		}
+		if cmpReport.Summary.Warn > 0 || cmpReport.Summary.Missing > 0 {
+			fmt.Fprintf(os.Stderr, "\n[shadowai-bench] warnings: warn=%d missing=%d\n",
+				cmpReport.Summary.Warn, cmpReport.Summary.Missing)
+		}
+	}
 
 	// Output.
 	switch *format {
