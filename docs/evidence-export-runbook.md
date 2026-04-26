@@ -354,17 +354,38 @@ Partial failure is explicit: if sink B fails, `sink_ok=false` with `error_msg` i
 The point is that compromise of ONE storage backend does not destroy the audit trail.
 An auditor can detect tampering by cross-checking the two independently stored manifests.
 
-### 7.3 Configuration
+### 7.3 Configuration (W8.1: Operator Wiring)
 
-```go
-// In enterprise_wire.go, extend the anchor scheduler:
-scheduler := chain.NewAnchorScheduler(chainRepo, primaryFileSink, interval, tables).
-    WithSigning(privKey, pubKeyID, pubKey).
-    WithAdditionalSinks(
-        chain.NewFileSink("/exports/anchors-secondary.ndjson"),
-        // or immudb sink, or any AnchorSink implementation
-    )
+**Via env vars / Helm `values-prod.yaml`** (recommended):
+
+```yaml
+# Example 1: primary file PVC + additional immudb external ledger
+config:
+  AUDIT_ANCHOR_SINK: "file://"
+  AUDIT_ANCHOR_SINK_PATH: "/exports/anchors.ndjson"
+  AUDIT_ANCHOR_ADDITIONAL_SINKS: "immudb://"
+  # AUDIT_IMMUDB_* injected from K8s Secret
+
+# Example 2: primary immudb + additional file PVC
+config:
+  AUDIT_ANCHOR_SINK: "immudb://"
+  AUDIT_ANCHOR_ADDITIONAL_SINKS: "file://"
+  AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH: "/exports/anchors-secondary.ndjson"
 ```
+
+See commented examples in `deploy/helm/shadowai/values-prod.yaml`.
+
+**Validation (fail-fast in production)**:
+- `AUDIT_ANCHOR_ADDITIONAL_SINKS=file://` without `AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH` → startup error
+- Additional immudb when primary is already immudb → same server → startup error (not independent)
+- Additional file path same as primary file path → startup error (same file = not independent)
+- Unknown scheme (e.g. `s3://`) → startup error
+- Same scheme twice in additional list → startup error
+
+**File sink path requirements**:
+The additional `file://` path must be on a writable volume. Options:
+- Same evidence-export PVC at `/exports/anchors-secondary.ndjson` (durable, recommended)
+- `/tmp/anchors-secondary.ndjson` (ephemeral, data lost on pod restart — only for testing)
 
 The additional sinks receive the **same** manifest bytes as the primary sink.
 Write order does not affect the signed manifest.

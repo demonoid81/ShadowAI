@@ -417,6 +417,15 @@ func main() {
 			}
 			anchorSched = anchorSched.WithSigning(privKey, cfg.AuditAnchorPubKeyID, selfVerifyKey)
 		}
+		// W8: wire additional independent witness sinks.
+		if cfg.AuditAnchorAdditionalSinks != "" {
+			additional := buildAdditionalAnchorSinks(connectivityCtx, cfg)
+			if len(additional) > 0 {
+				anchorSched = anchorSched.WithAdditionalSinks(additional...)
+				log.Printf("anchor scheduler: %d additional sink(s) configured: %s",
+					len(additional), cfg.AuditAnchorAdditionalSinks)
+			}
+		}
 		go anchorSched.Run(connectivityCtx)
 	}
 
@@ -562,4 +571,60 @@ func main() {
 	depth, dropped, inserted, failed := auditSvc.Stats()
 	log.Printf("audit shutdown: inserted=%d failed=%d dropped=%d queue_depth_remaining=%d",
 		inserted, failed, dropped, depth)
+}
+
+// buildAdditionalAnchorSinks — W8: instantiates additional AnchorSink implementations
+// from AUDIT_ANCHOR_ADDITIONAL_SINKS config. Called only when the field is non-empty.
+// Logs each configured sink; fatalf on connection errors (fail-fast in prod).
+func buildAdditionalAnchorSinks(ctx context.Context, cfg *config.Config) []chain.AnchorSink {
+	var sinks []chain.AnchorSink
+	for _, raw := range strings.Split(cfg.AuditAnchorAdditionalSinks, ",") {
+		scheme := strings.TrimSpace(raw)
+		switch scheme {
+		case "file://":
+			if cfg.AuditAnchorAdditionalFilePath == "" {
+				log.Printf("anchor: additional file:// sink skipped (AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH not set)")
+				continue
+			}
+			sinks = append(sinks, chain.NewFileSink(cfg.AuditAnchorAdditionalFilePath))
+			log.Printf("anchor: additional file:// sink at %s", cfg.AuditAnchorAdditionalFilePath)
+
+		case "immudb://":
+			opts := chain.DefaultImmuDBOptions()
+			if cfg.AuditImmuDBAPIPrefix != "" {
+				opts.APIPrefix = cfg.AuditImmuDBAPIPrefix
+			}
+			if cfg.AuditImmuDBRestProfile != "" {
+				parsedProfile, profileErr := chain.ParseImmuDBRESTProfile(cfg.AuditImmuDBRestProfile)
+				if profileErr != nil {
+					log.Fatalf("anchor: additional immudb:// AUDIT_IMMUDB_REST_PROFILE: %v", profileErr)
+				}
+				opts.Profile = parsedProfile
+			}
+			immuClient, err := chain.DialImmuDBWithOptions(
+				ctx,
+				cfg.AuditImmuDBAddr,
+				cfg.AuditImmuDBUsername,
+				cfg.AuditImmuDBPassword,
+				cfg.AuditImmuDBDatabase,
+				opts,
+			)
+			if err != nil {
+				log.Fatalf("anchor: additional immudb:// connect failed (addr=%s db=%s): %v",
+					cfg.AuditImmuDBAddr, cfg.AuditImmuDBDatabase, err)
+			}
+			sinks = append(sinks, chain.NewImmuDBSink(immuClient, cfg.AuditImmuDBDatabase))
+			log.Printf("anchor: additional immudb:// sink connected (addr=%s db=%s)",
+				cfg.AuditImmuDBAddr, cfg.AuditImmuDBDatabase)
+
+		case "":
+			// empty after trim — skip
+
+		default:
+			// Unsupported scheme. ValidateStartupConfig would have caught this in prod,
+			// but log and skip gracefully for non-fatal misconfiguration in dev.
+			log.Printf("anchor: unsupported additional sink scheme %q — skipped (supported: file://, immudb://)", scheme)
+		}
+	}
+	return sinks
 }

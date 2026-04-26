@@ -396,3 +396,129 @@ func TestValidateStartupConfig_ImmuDBV2PlusAPIPrefix_Rejected(t *testing.T) {
 		t.Errorf("error should mention AUDIT_IMMUDB_API_PREFIX: %v", err)
 	}
 }
+
+// ── W8: Additional anchor sink validation tests ────────────────────────────
+
+// TestAdditionalAnchorSinks_Empty — no additional sinks = no errors.
+func TestAdditionalAnchorSinks_Empty(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorAdditionalSinks = ""
+	errs := validateAdditionalAnchorSinks(cfg)
+	if len(errs) != 0 {
+		t.Errorf("empty additional sinks: expected no errors, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_FileOnly_OK — file:// with path and primary != file.
+func TestAdditionalAnchorSinks_FileOnly_OK(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorSink = "immudb://" // primary is immudb
+	cfg.AuditAnchorAdditionalSinks = "file://"
+	cfg.AuditAnchorAdditionalFilePath = "/exports/anchors-secondary.ndjson"
+	errs := validateAdditionalAnchorSinks(cfg)
+	if len(errs) != 0 {
+		t.Errorf("file additional sink: expected no errors, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_FileMissingPath — file:// without path fails.
+func TestAdditionalAnchorSinks_FileMissingPath(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorAdditionalSinks = "file://"
+	cfg.AuditAnchorAdditionalFilePath = ""
+	errs := validateAdditionalAnchorSinks(cfg)
+	if len(errs) == 0 || !strings.Contains(errs[0], "AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH") {
+		t.Errorf("missing path: expected error, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_DuplicateFileSamePath — same file as primary fails.
+func TestAdditionalAnchorSinks_DuplicateFileSamePath(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorSink = "file://"
+	cfg.AuditAnchorSinkPath = "/exports/anchors.ndjson"
+	cfg.AuditAnchorAdditionalSinks = "file://"
+	cfg.AuditAnchorAdditionalFilePath = "/exports/anchors.ndjson" // same path!
+	errs := validateAdditionalAnchorSinks(cfg)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "not an independent witness") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("duplicate file path: expected independence error, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_DuplicateImmuDB — additional immudb when primary is immudb fails.
+func TestAdditionalAnchorSinks_DuplicateImmuDB(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorSink = "immudb://"
+	cfg.AuditAnchorAdditionalSinks = "immudb://"
+	errs := validateAdditionalAnchorSinks(cfg)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "not independent") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("duplicate immudb: expected independence error, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_InvalidScheme — unsupported scheme rejected.
+func TestAdditionalAnchorSinks_InvalidScheme(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorAdditionalSinks = "s3://"
+	errs := validateAdditionalAnchorSinks(cfg)
+	if len(errs) == 0 || !strings.Contains(errs[0], "unsupported") {
+		t.Errorf("invalid scheme: expected unsupported error, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_DuplicateScheme — same scheme twice in additional fails.
+func TestAdditionalAnchorSinks_DuplicateSchemeInList(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorAdditionalSinks = "file://,file://"
+	cfg.AuditAnchorAdditionalFilePath = "/exports/anchors-b.ndjson"
+	errs := validateAdditionalAnchorSinks(cfg)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "duplicate") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("duplicate scheme in list: expected duplicate error, got %v", errs)
+	}
+}
+
+// TestAdditionalAnchorSinks_ImmuDB_OK — immudb:// additional with primary=file passes.
+func TestAdditionalAnchorSinks_ImmuDB_OK(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorSink = "file://"
+	cfg.AuditAnchorSinkPath = "/exports/anchors.ndjson"
+	cfg.AuditAnchorAdditionalSinks = "immudb://"
+	// Provide all required immudb fields
+	cfg.AuditImmuDBAddr = "immudb.internal:3322"
+	cfg.AuditImmuDBUsername = "user"
+	cfg.AuditImmuDBPassword = "pass"
+	cfg.AuditImmuDBDatabase = "shadowai"
+	errs := validateAdditionalAnchorSinks(cfg)
+	if len(errs) != 0 {
+		t.Errorf("immudb additional sink: expected no errors, got %v", errs)
+	}
+}
+
+// TestValidateStartupConfig_AdditionalSinks_ProdFailFast — invalid scheme
+// causes ValidateStartupConfig to fail in production.
+func TestValidateStartupConfig_AdditionalSinks_ProdFailFast(t *testing.T) {
+	cfg := prodConfigBase()
+	cfg.AuditAnchorAdditionalSinks = "unknown://"
+	err := cfg.ValidateStartupConfig()
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("prod fail-fast: expected unsupported scheme error, got %v", err)
+	}
+}

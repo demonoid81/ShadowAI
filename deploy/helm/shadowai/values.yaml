@@ -43,6 +43,22 @@ config:
   AUDIT_PURGE_CHUNK_SIZE: "1000"
   STREAMING_MODE: "buffered"
   FIREWALL_ENABLED: "true"
+
+  # W8: Additional independent anchor sink (opt-in, default disabled).
+  # Enable to publish signed Merkle anchor manifests to a second independent backend.
+  # One signed manifest is written to ALL configured sinks (no re-signing).
+  # Partial failure is logged and recorded in audit_chain_anchor_sinks table.
+  #
+  # Recommended independent pairs (choose based on your primary sink):
+  #   primary=file://, additional=immudb://  → local PVC + external append-only ledger
+  #   primary=immudb://, additional=file://  → external ledger + local PVC backup
+  #
+  # Supported schemes: "file://" | "immudb://"  (S3 anchor sink not yet implemented)
+  AUDIT_ANCHOR_ADDITIONAL_SINKS: ""          # e.g. "file://" or "immudb://"
+  AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH: "" # required when additional sinks contains "file://"
+  # Note: additional immudb:// uses AUDIT_IMMUDB_* env vars (set in K8s Secret).
+  # The additional file:// path must be on a writable mount (PVC or /tmp for ephemeral).
+
   # Add more env vars as needed, e.g.:
   # OIDC_ENABLED: "true"
 

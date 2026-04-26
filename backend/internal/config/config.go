@@ -186,6 +186,17 @@ type Config struct {
 	// Обязателен если AuditAnchorSink = "file://".
 	AuditAnchorSinkPath string
 
+	// W8: additional independent witness sinks (opt-in).
+	// AUDIT_ANCHOR_ADDITIONAL_SINKS: comma-separated schemes ("file://", "immudb://").
+	// Empty = single-sink mode (backward-compatible default).
+	// Additional immudb:// uses AUDIT_IMMUDB_* vars; only valid when primary != immudb://.
+	AuditAnchorAdditionalSinks string // AUDIT_ANCHOR_ADDITIONAL_SINKS
+
+	// AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH: path for additional file:// sink.
+	// Required when AuditAnchorAdditionalSinks contains "file://".
+	// Must differ from AuditAnchorSinkPath (different file = independent witness).
+	AuditAnchorAdditionalFilePath string // AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH
+
 	// PR-W2: tamper-evident audit chain secret (RFC §7.2).
 	// AUDIT_CHAIN_SECRET: ключ для HMAC-SHA256 chain (HMAC(prev_hash||canonical, secret)).
 	// Не хранится в DB — только env var / secrets manager.
@@ -399,6 +410,9 @@ func Load() *Config {
 		AuditAnchorInterval: getDuration("AUDIT_ANCHOR_INTERVAL", time.Hour),
 		AuditAnchorSink:     getEnv("AUDIT_ANCHOR_SINK", ""),
 		AuditAnchorSinkPath: getEnv("AUDIT_ANCHOR_SINK_PATH", ""),
+		// W8: additional independent witness sinks.
+		AuditAnchorAdditionalSinks:    getEnv("AUDIT_ANCHOR_ADDITIONAL_SINKS", ""),
+		AuditAnchorAdditionalFilePath: getEnv("AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH", ""),
 
 		// PR-A: audit privacy. Secure-by-default: redacted.
 		AuditPayloadMode:            getEnv("AUDIT_PAYLOAD_MODE", "redacted"),

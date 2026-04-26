@@ -54,6 +54,24 @@ config:
   SIEM_DROP_POLICY: "drop_oldest"
   SIEM_TIMEOUT: "5s"                         # 3s default → 5s for high-latency SIEM
 
+  # W8: Additional independent anchor sink (opt-in, default disabled).
+  # Uncomment and configure to enable dual-sink WORM evidence posture.
+  # Partial failure is logged + recorded in audit_chain_anchor_sinks table.
+  #
+  # Example 1: primary=file:// (PVC), additional=immudb:// (external ledger)
+  #   AUDIT_ANCHOR_SINK: "file://"
+  #   AUDIT_ANCHOR_SINK_PATH: "/exports/anchors.ndjson"
+  #   AUDIT_ANCHOR_ADDITIONAL_SINKS: "immudb://"
+  #   # AUDIT_IMMUDB_* set in K8s Secret (existingSecret)
+  #
+  # Example 2: primary=immudb:// (external ledger), additional=file:// (PVC backup)
+  #   AUDIT_ANCHOR_SINK: "immudb://"
+  #   AUDIT_ANCHOR_ADDITIONAL_SINKS: "file://"
+  #   AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH: "/exports/anchors-secondary.ndjson"
+  #   # additional file path must be on a mounted PVC volume (not readOnlyRootFilesystem)
+  AUDIT_ANCHOR_ADDITIONAL_SINKS: ""
+  AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH: ""
+
 resources:
   requests:
     cpu: 250m

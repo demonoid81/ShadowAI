@@ -205,6 +205,9 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		errs = append(errs, "AUDIT_ANCHOR_SINK=file:// requires AUDIT_ANCHOR_SINK_PATH in prod")
 	}
 
+	// W8: validate additional anchor sinks.
+	errs = append(errs, validateAdditionalAnchorSinks(c)...)
+
 	// PR-W2: AUDIT_CHAIN_SECRET — keyed HMAC для tamper-evident audit chain.
 	// Enterprise prod требует secret для chain writes. Без него chain fields
 	// остаются NULL (chain disabled), что допустимо в dev/shadow-mode, но
@@ -213,6 +216,72 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 		errs = append(errs, "AUDIT_CHAIN_SECRET must be set (>=32 chars) in prod for tamper-evident audit chain (RFC PR-W2)")
 	} else if len(c.AuditChainSecret) < 32 {
 		errs = append(errs, "AUDIT_CHAIN_SECRET must be >=32 chars (insufficient entropy for HMAC chain key)")
+	}
+	return errs
+}
+
+// validateAdditionalAnchorSinks validates W8 AUDIT_ANCHOR_ADDITIONAL_SINKS config.
+// Called from validateEnterpriseStartupConfig (production only).
+func validateAdditionalAnchorSinks(c *Config) []string {
+	if strings.TrimSpace(c.AuditAnchorAdditionalSinks) == "" {
+		return nil
+	}
+	var errs []string
+	seenSchemes := make(map[string]int)
+
+	for _, raw := range strings.Split(c.AuditAnchorAdditionalSinks, ",") {
+		scheme := strings.TrimSpace(raw)
+		if scheme == "" {
+			continue
+		}
+		seenSchemes[scheme]++
+
+		switch scheme {
+		case "file://":
+			if strings.TrimSpace(c.AuditAnchorAdditionalFilePath) == "" {
+				errs = append(errs,
+					"AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH required when AUDIT_ANCHOR_ADDITIONAL_SINKS contains file://")
+			}
+			// Duplicate: same file path as primary file:// sink.
+			if c.AuditAnchorSink == "file://" &&
+				c.AuditAnchorSinkPath != "" &&
+				c.AuditAnchorAdditionalFilePath == c.AuditAnchorSinkPath {
+				errs = append(errs,
+					"AUDIT_ANCHOR_ADDITIONAL_SINK_FILE_PATH must differ from AUDIT_ANCHOR_SINK_PATH (same file is not an independent witness)")
+			}
+
+		case "immudb://":
+			// Duplicate: additional immudb when primary is also immudb → same server config → not independent.
+			if c.AuditAnchorSink == "immudb://" {
+				errs = append(errs,
+					"additional immudb:// sink uses same AUDIT_IMMUDB_* config as primary immudb:// — not independent; use a different immudb server or switch primary to file://")
+			}
+			// Validate required immudb connection fields.
+			if strings.TrimSpace(c.AuditImmuDBAddr) == "" {
+				errs = append(errs, "AUDIT_IMMUDB_ADDR required for additional immudb:// sink")
+			}
+			if strings.TrimSpace(c.AuditImmuDBUsername) == "" {
+				errs = append(errs, "AUDIT_IMMUDB_USERNAME required for additional immudb:// sink")
+			}
+			if strings.TrimSpace(c.AuditImmuDBPassword) == "" {
+				errs = append(errs, "AUDIT_IMMUDB_PASSWORD required for additional immudb:// sink")
+			}
+			if strings.TrimSpace(c.AuditImmuDBDatabase) == "" {
+				errs = append(errs, "AUDIT_IMMUDB_DATABASE required for additional immudb:// sink")
+			}
+
+		default:
+			errs = append(errs, fmt.Sprintf(
+				"unsupported additional anchor sink scheme %q (supported: file://, immudb://)", scheme))
+		}
+	}
+
+	// Duplicate scheme detection (same scheme twice in additional list).
+	for scheme, count := range seenSchemes {
+		if count > 1 {
+			errs = append(errs, fmt.Sprintf(
+				"duplicate additional anchor sink scheme %q (appears %d times); use distinct schemes", scheme, count))
+		}
 	}
 	return errs
 }
