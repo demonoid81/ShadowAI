@@ -13,7 +13,10 @@
 {{- if and (eq .Values.evidenceExport.mode "tenants") (empty .Values.evidenceExport.orgIDs) }}
 {{- fail "evidenceExport.orgIDs must not be empty when mode=tenants" }}
 {{- end }}
-{{- if and (eq .Values.evidenceExport.storage "s3") .Values.evidenceExport.s3.objectLock.enabled }}
+{{- if .Values.evidenceExport.s3.objectLock.enabled }}
+{{- if ne .Values.evidenceExport.storage "s3" }}
+{{- fail "evidenceExport.s3.objectLock.enabled=true requires storage=s3" }}
+{{- end }}
 {{- $validLockModes := list "GOVERNANCE" "COMPLIANCE" }}
 {{- if not (has .Values.evidenceExport.s3.objectLock.mode $validLockModes) }}
 {{- fail (printf "evidenceExport.s3.objectLock.mode must be GOVERNANCE or COMPLIANCE, got %q" .Values.evidenceExport.s3.objectLock.mode) }}

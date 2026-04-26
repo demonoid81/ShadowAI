@@ -28,8 +28,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -213,9 +216,23 @@ func run(args []string, stdout, stderr *os.File) int {
 	// If the bucket does not have Object Lock enabled, AWS/MinIO returns an error,
 	// which propagates as exitFail — intentionally failing hard rather than degrading
 	// to a mutable upload.
+	//
+	// AWS S3 requires a checksum (SHA256) on every PutObject that sets Object Lock
+	// retention; without it the request is rejected with InvalidRequest.
+	// We compute SHA256 upfront, seek back to position 0, then send with the
+	// precomputed value so the SDK does not need to re-read the file.
 	if *objectLockMode != "" {
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return cfgErr("compute SHA256 for Object Lock: %v", err)
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return cfgErr("seek file after SHA256 computation: %v", err)
+		}
 		putInput.ObjectLockMode = lockModeVal
 		putInput.ObjectLockRetainUntilDate = aws.Time(retainUntilTime)
+		putInput.ChecksumAlgorithm = types.ChecksumAlgorithmSha256
+		putInput.ChecksumSHA256 = aws.String(base64.StdEncoding.EncodeToString(h.Sum(nil)))
 	}
 	if *legalHold != "" {
 		putInput.ObjectLockLegalHoldStatus = legalHoldVal

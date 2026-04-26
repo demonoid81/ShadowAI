@@ -433,6 +433,65 @@ func TestIntegration_ObjectLock_LegalHold_ON(t *testing.T) {
 	t.Logf("integration/o4.3: legal-hold=%s", hold)
 }
 
+// TestIntegration_ObjectLock_ChecksumSHA256 verifies that an Object Lock upload
+// sends x-amz-checksum-sha256 and x-amz-sdk-checksum-algorithm: SHA256.
+// AWS S3 requires a checksum for every PutObject that sets Object Lock retention.
+func TestIntegration_ObjectLock_ChecksumSHA256(t *testing.T) {
+	srv, state := setupTest(t, http.StatusOK)
+
+	bundlePath := writeTempBundle(t, "checksum-bundle-data")
+	code := run([]string{
+		"--file", bundlePath,
+		"--bucket", "b",
+		"--key", "k.zip",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--sse", "none",
+		"--timeout", "30",
+		"--object-lock-mode", "COMPLIANCE",
+		"--retain-until", "2099-12-31T00:00:00Z",
+	}, os.Stdout, os.Stderr)
+	if code != exitOK {
+		t.Fatalf("expected exitOK, got %d", code)
+	}
+
+	checksum := state.lastHeaders.Get("x-amz-checksum-sha256")
+	if checksum == "" {
+		t.Error("x-amz-checksum-sha256 missing — AWS S3 will reject Object Lock uploads without it")
+	}
+	algo := state.lastHeaders.Get("x-amz-sdk-checksum-algorithm")
+	if algo != "SHA256" {
+		t.Errorf("x-amz-sdk-checksum-algorithm = %q, want SHA256", algo)
+	}
+	t.Logf("integration/o4.3: checksum sha256=%s (len=%d) algo=%s", checksum[:8]+"…", len(checksum), algo)
+}
+
+// TestIntegration_ObjectLock_NoFlags_NoChecksumHeader — plain upload (no Object Lock)
+// must NOT send the checksum headers (overhead + MinIO compatibility concern).
+func TestIntegration_ObjectLock_NoChecksumOnPlainUpload(t *testing.T) {
+	srv, state := setupTest(t, http.StatusOK)
+
+	bundlePath := writeTempBundle(t, "plain-no-checksum")
+	run([]string{
+		"--file", bundlePath,
+		"--bucket", "b",
+		"--key", "k.zip",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--sse", "AES256",
+		"--timeout", "30",
+		// No --object-lock-mode
+	}, os.Stdout, os.Stderr)
+
+	if v := state.lastHeaders.Get("x-amz-checksum-sha256"); v != "" {
+		t.Errorf("plain upload should not send x-amz-checksum-sha256, got %q", v)
+	}
+	if v := state.lastHeaders.Get("x-amz-sdk-checksum-algorithm"); v != "" {
+		t.Errorf("plain upload should not send x-amz-sdk-checksum-algorithm, got %q", v)
+	}
+	t.Logf("integration/o4.3: no checksum headers on plain upload ✓")
+}
+
 // TestIntegration_ObjectLock_NoFlags_NoHeaders is a regression guard: without
 // --object-lock-mode, none of the x-amz-object-lock-* headers must appear.
 func TestIntegration_ObjectLock_NoFlags_NoHeaders(t *testing.T) {

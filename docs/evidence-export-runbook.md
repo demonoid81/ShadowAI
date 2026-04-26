@@ -313,20 +313,31 @@ kubectl -n <namespace> patch cronjob shadowai-evidence-export \
   -p '{"spec":{"suspend":false}}'
 ```
 
-### EvidenceBundleVerifyFailed
+### Bundle Verify Failure (suspected tampering)
 
-This is the most critical alert. It means `audit-verify --bundle` returned non-zero,
-which indicates:
-- Tampered bundle files (SHA256 mismatch)
-- Forged Merkle proofs (root mismatch)
-- Invalid anchor signatures (key mismatch or canonical format change)
+> **Note:** `EvidenceBundleVerifyFailed` was removed as a separate alert — it used the
+> same `kube_job_status_failed` expression as `EvidenceExportJobFailed`, making it
+> indistinguishable from DB outages, disk full, or config errors.
+> `EvidenceExportJobFailed` is the canonical alert for any CronJob exit != 0.
+
+When logs show `audit-verify --bundle` returned non-zero (lines starting with
+`bundle … FAIL` or `tenant bundle … FAIL`), treat it as a potential tamper incident:
 
 **Immediate actions:**
 1. Do NOT delete the failed bundle.
-2. Copy it to a secure location.
-3. Run `audit-verify --bundle <dir> --verbose` and capture full output.
+2. Copy it to a secure location before any remediation.
+3. Run `audit-verify --bundle <dir> --verbose` locally and capture full output.
 4. Escalate to security team and compliance officer.
 5. Run `audit-verify --include-anchors --table all` against live DB to check DB integrity.
+
+**Distinguishing verify failure from other causes in the Job log:**
+
+```bash
+kubectl -n <namespace> logs job/<failed-job-name> | grep -E "FAIL|error|ERROR"
+# Verify failure → lines like: "bundle file_integrity FAIL checked=5 fails=2"
+# DB connectivity → lines like: "dial tcp: connection refused"
+# Disk full       → lines like: "write /exports/...: no space left on device"
+```
 
 ---
 
