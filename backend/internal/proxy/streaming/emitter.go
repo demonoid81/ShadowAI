@@ -39,9 +39,26 @@ import (
 //      Это требование real-time UX из RFC §7.1.
 type Emitter interface {
 	// Emit пишет Event в w. По умолчанию — identity (RawBytes).
-	// sanitize mode активируется в F7.2 через отдельный call path
-	// (или расширение этого метода); в F7.1 Emit всегда identity.
+	// Все non-sanitized events идут через этот путь.
 	Emit(ctx context.Context, w io.Writer, ev Event) error
+
+	// EmitSanitized пишет EventDeltaText с заменённым текстом.
+	// PR-F7.5: adapter обязан пересобрать frame в том же wire format,
+	// сохранив все non-text поля (event name, id, model, finish_reason,
+	// usage и любые provider-specific fields). Только
+	// choices[*].delta.content (OpenAI) или эквивалент заменяется на
+	// sanitizedText.
+	//
+	// Инварианты:
+	//   - Вызывается ТОЛЬКО для EventDeltaText events. Для любых других
+	//     типов adapter должен эмитить identity (RawBytes) — это
+	//     safety-critical: usage/stop/unknown frames нельзя модифицировать.
+	//   - Если adapter не поддерживает sanitize re-encoding для данного
+	//     event → возвращает error. Caller обязан трактовать это как
+	//     transport failure (блокировать, не silent-allow).
+	//   - Если re-encoding завершился ошибкой (malformed RawBytes,
+	//     JSON parse fail) → возвращает error. НЕ пишет исходные bytes.
+	EmitSanitized(ctx context.Context, w io.Writer, ev Event, sanitizedText string) error
 
 	// EmitError пишет terminal error frame. code — machine-readable
 	// идентификатор ошибки (например, "blocked", "upstream_error"),

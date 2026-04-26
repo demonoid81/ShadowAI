@@ -11,23 +11,24 @@ import (
 
 // incrementalVerdict — результат одной chunk-level оценки. Поля
 // flag'ами (не enum), чтобы caller мог независимо накапливать flag
-// состояние и при этом видеть terminal block.
-//
-// PR-F7.2 ограничение scope'а: sanitize НЕ поддерживается. Если
-// inspector возвращает ActionSanitize, engine трактует его как flag
-// (stream продолжается без модификации, audit получает flag).
-// Sanitize вернётся в F7.3/F7.4 после доказанной корректности.
+// состояние и при этом видеть terminal block или sanitize.
 type incrementalVerdict struct {
 	// Block — inspector велел прервать stream. Caller должен:
 	//   1) emitter.EmitError(...)
 	//   2) upstream cancel (resp.Body.Close / context cancel)
 	//   3) audit с PolicyAction=streaming_blocked_midflight.
 	Block bool
+	// Sanitize — PR-F7.5: inspector потребовал замену текста delta.
+	// SanitizedText содержит очищенную версию. Caller вызывает
+	// emitter.EmitSanitized вместо обычного Emit.
+	// Sanitize и Block взаимоисключаются — Block имеет приоритет.
+	Sanitize      bool
+	SanitizedText string
 	// Flag — inspector пометил chunk как подозрительный; stream
 	// продолжается. Caller накапливает в stream-level flag состояние.
 	Flag bool
 	// InspectorName — имя inspector'а, принявшего решение. Для
-	// Block/Flag. Empty при Allow.
+	// Block/Sanitize/Flag. Empty при Allow.
 	InspectorName string
 	// Reason — человекочитаемая причина (для audit / error frame).
 	Reason string
@@ -62,8 +63,13 @@ type incrementalEngine struct {
 	// flagged — stream-level flag persistence. Если один delta был
 	// flagged, вся audit-запись остаётся flagged (соответствует
 	// buffered поведению).
-	flagged           bool
-	flaggedInspector  string
+	flagged          bool
+	flaggedInspector string
+
+	// sanitized — PR-F7.5: stream-level sanitize persistence.
+	// Если хотя бы один delta был sanitized, audit PolicyAction=sanitized.
+	sanitized          bool
+	sanitizedInspector string
 }
 
 // newIncrementalEngine создаёт engine с default inspection window.
@@ -137,9 +143,24 @@ func (e *incrementalEngine) EvaluateDelta(ctx context.Context, delta string) inc
 					e.flaggedInspector = decision.InspectorName
 				}
 			case firewall.ActionSanitize:
-				// F7.2 scope limit: sanitize НЕ поддерживается mid-stream.
-				// Downgrade до flag — stream продолжается без
-				// модификации, audit отражает flag.
+				// PR-F7.5: sanitize the current DELTA (not the window).
+				// The window triggered the pattern but we replace only
+				// the current delta content in the emitted frame.
+				// Cross-chunk PII spanning multiple deltas → F7.6 scope.
+				if e.dlpSvc != nil {
+					deltaFindings := pii.Scan(delta)
+					sanitizedDelta := e.dlpSvc.Sanitize(delta, deltaFindings)
+					e.sanitized = true
+					if e.sanitizedInspector == "" {
+						e.sanitizedInspector = decision.InspectorName
+					}
+					return incrementalVerdict{
+						Sanitize:      true,
+						SanitizedText: sanitizedDelta,
+						InspectorName: decision.InspectorName,
+					}
+				}
+				// No DLP service: downgrade to flag (can't re-encode without sanitizer).
 				e.flagged = true
 				if e.flaggedInspector == "" {
 					e.flaggedInspector = decision.InspectorName
@@ -160,12 +181,17 @@ func (e *incrementalEngine) EvaluateDelta(ctx context.Context, delta string) inc
 				Reason:        dec.Reason,
 			}
 		case dlp.DLPActionSanitize:
-			// Downgrade до flag (см. выше). В dlp.Service нет
-			// отдельного DLPActionFlag — sanitize это ближайший
-			// "мягкий" сигнал.
-			e.flagged = true
-			if e.flaggedInspector == "" {
-				e.flaggedInspector = "dlp"
+			// PR-F7.5: sanitize the current delta.
+			deltaFindings := pii.Scan(delta)
+			sanitizedDelta := e.dlpSvc.Sanitize(delta, deltaFindings)
+			e.sanitized = true
+			if e.sanitizedInspector == "" {
+				e.sanitizedInspector = "dlp"
+			}
+			return incrementalVerdict{
+				Sanitize:      true,
+				SanitizedText: sanitizedDelta,
+				InspectorName: "dlp",
 			}
 		}
 	}
@@ -190,6 +216,14 @@ func (e *incrementalEngine) Flagged() bool {
 func (e *incrementalEngine) FlaggedInspector() string {
 	return e.flaggedInspector
 }
+
+// Sanitized возвращает true если хотя бы один delta был sanitized
+// (PR-F7.5).
+func (e *incrementalEngine) Sanitized() bool { return e.sanitized }
+
+// SanitizedInspector возвращает имя первого inspector'а, который
+// вернул sanitize verdict. Empty если Sanitized()==false.
+func (e *incrementalEngine) SanitizedInspector() string { return e.sanitizedInspector }
 
 // Accumulated возвращает всё, что было пропущено через window, для
 // post-stream audit (подпрограммы, которые хотят scan полного текста

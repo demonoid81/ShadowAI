@@ -3,6 +3,7 @@ package streaming
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -201,6 +202,133 @@ func TestRoundTrip_Malformed_EmitsUnknownChunk(t *testing.T) {
 	}
 	// И round-trip identity всё равно должен сохраниться — это
 	// проверяется в TestRoundTrip_BytesIdentity.
+}
+
+// ---------------------------------------------------------------------------
+// PR-F7.5: EmitSanitized tests
+// ---------------------------------------------------------------------------
+
+// TestEmitSanitized_OpenAI_DeltaText_ReplacesContent — основной тест F7.5.
+// Входной SSE delta frame с исходным текстом; EmitSanitized должен выдать
+// валидный SSE frame с заменённым content, сохранив все прочие поля.
+func TestEmitSanitized_OpenAI_DeltaText_ReplacesContent(t *testing.T) {
+	original := []byte(`data: {"id":"c-1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"call user@example.com"},"finish_reason":null}]}` + "\n\n")
+	sanitized := "[redacted:email]"
+
+	// Decode to get the Event.
+	adapter := mustAdapter(t, "openai")
+	var events []Event
+	if err := adapter.Decoder.Decode(context.Background(), bytes.NewReader(original), func(ev Event) error {
+		events = append(events, ev)
+		return nil
+	}); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != EventDeltaText {
+		t.Fatalf("expected 1 delta_text event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := adapter.Emitter.EmitSanitized(context.Background(), &out, events[0], sanitized); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+
+	output := out.String()
+	// Must be valid SSE frame.
+	if !strings.HasPrefix(output, "data: ") {
+		t.Errorf("output not SSE frame: %q", output)
+	}
+	if !strings.HasSuffix(output, "\n\n") {
+		t.Errorf("output missing \\n\\n terminator: %q", output)
+	}
+	// Must contain sanitized text, not original.
+	if !strings.Contains(output, sanitized) {
+		t.Errorf("output does not contain sanitized text %q: %s", sanitized, output)
+	}
+	if strings.Contains(output, "user@example.com") {
+		t.Errorf("output still contains original PII: %s", output)
+	}
+	// Non-text fields must be preserved.
+	if !strings.Contains(output, `"id":"c-1"`) {
+		t.Errorf("output lost id field: %s", output)
+	}
+	if !strings.Contains(output, `"model":"gpt-4o"`) {
+		t.Errorf("output lost model field: %s", output)
+	}
+	t.Logf("EmitSanitized/openai: %s", output)
+}
+
+// TestEmitSanitized_OpenAI_UsageFrame_Identity — non-delta_text events
+// (usage, stop, unknown) must be emitted identity. Safety invariant:
+// usage/stop frames must NOT be modified even during a sanitize pass.
+func TestEmitSanitized_OpenAI_UsageFrame_Identity(t *testing.T) {
+	usageFrame := []byte(`data: {"id":"c-2","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}` + "\n\n")
+
+	adapter := mustAdapter(t, "openai")
+	var events []Event
+	adapter.Decoder.Decode(context.Background(), bytes.NewReader(usageFrame), func(ev Event) error { //nolint:errcheck
+		events = append(events, ev)
+		return nil
+	})
+	if len(events) == 0 {
+		t.Fatal("no events from usage frame")
+	}
+	usageEv := events[0]
+	if usageEv.Type != EventUsageUpdate {
+		t.Fatalf("expected EventUsageUpdate, got %s", usageEv.Type)
+	}
+
+	var out bytes.Buffer
+	if err := adapter.Emitter.EmitSanitized(context.Background(), &out, usageEv, "[SHOULD_NOT_APPEAR]"); err != nil {
+		t.Fatalf("EmitSanitized on usage frame: %v", err)
+	}
+	// Must be byte-identical to input (identity for non-delta_text).
+	if !bytes.Equal(out.Bytes(), usageFrame) {
+		t.Errorf("usage frame was mutated:\nwant %q\n got %q", usageFrame, out.Bytes())
+	}
+	if strings.Contains(out.String(), "SHOULD_NOT_APPEAR") {
+		t.Error("sanitized text leaked into non-delta_text frame — safety violation")
+	}
+	t.Logf("EmitSanitized/usage-identity: ok")
+}
+
+// TestEmitSanitized_OpenAI_StopFrame_Identity — [DONE] sentinel must be identity.
+func TestEmitSanitized_OpenAI_StopFrame_Identity(t *testing.T) {
+	doneFrame := []byte("data: [DONE]\n\n")
+	adapter := mustAdapter(t, "openai")
+	var events []Event
+	adapter.Decoder.Decode(context.Background(), bytes.NewReader(doneFrame), func(ev Event) error { //nolint:errcheck
+		events = append(events, ev)
+		return nil
+	})
+	stopEv := events[0]
+
+	var out bytes.Buffer
+	adapter.Emitter.EmitSanitized(context.Background(), &out, stopEv, "REPLACED") //nolint:errcheck
+	if !bytes.Equal(out.Bytes(), doneFrame) {
+		t.Errorf("stop frame was mutated: %q", out.Bytes())
+	}
+}
+
+// TestEmitSanitized_AllAdapters_NonDeltaText_Identity — regression guard:
+// all adapters must emit identity for non-delta_text events in EmitSanitized.
+func TestEmitSanitized_AllAdapters_NonDeltaText_Identity(t *testing.T) {
+	// A generic "unknown chunk" event with known RawBytes.
+	rawBytes := []byte(": keepalive\n\n")
+	ev := Event{Type: EventUnknownChunk, RawBytes: rawBytes}
+
+	for _, name := range SupportedProviders() {
+		t.Run(name, func(t *testing.T) {
+			adapter := mustAdapter(t, name)
+			var out bytes.Buffer
+			if err := adapter.Emitter.EmitSanitized(context.Background(), &out, ev, "MUTATED"); err != nil {
+				t.Fatalf("EmitSanitized error: %v", err)
+			}
+			if bytes.Contains(out.Bytes(), []byte("MUTATED")) {
+				t.Errorf("%s: sanitized text leaked into non-delta_text frame", name)
+			}
+		})
+	}
 }
 
 // roundTrip — helper: decode → собрать events → emit всё в buffer.

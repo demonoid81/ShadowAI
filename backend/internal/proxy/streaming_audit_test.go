@@ -7,41 +7,46 @@ import (
 
 func TestIncrementalSecurityVerdict(t *testing.T) {
 	cases := []struct {
-		name     string
-		original string
-		blocked  bool
-		flagged  bool
-		want     string
+		name      string
+		original  string
+		blocked   bool
+		sanitized bool // PR-F7.5
+		flagged   bool
+		want      string
 	}{
-		// Block beats flag, block beats original.
-		{"blocked_only", "allowed", true, false, "blocked"},
-		{"blocked_beats_flag", "allowed", true, true, "blocked"},
-		{"blocked_preserves_original_on_override", "sanitized", true, false, "blocked"},
+		// Block beats everything.
+		{"blocked_only", "allowed", true, false, false, "blocked"},
+		{"blocked_beats_flag", "allowed", true, false, true, "blocked"},
+		{"blocked_beats_sanitize", "allowed", true, true, false, "blocked"},
+		{"blocked_preserves_original_on_override", "sanitized", true, false, false, "blocked"},
+
+		// Sanitize beats flag but not block (PR-F7.5).
+		{"sanitize_on_allow", "allowed", false, true, false, "sanitized"},
+		{"sanitize_beats_flag", "allowed", false, true, true, "sanitized"},
+		{"sanitize_when_original_sanitized", "sanitized", false, true, false, "sanitized"},
 
 		// Flag when original is allow → canonical "warned".
-		{"flag_on_allow", "allowed", false, true, canonicalFlaggedPolicyAction},
+		{"flag_on_allow", "allowed", false, false, true, canonicalFlaggedPolicyAction},
 
 		// Flag when original is already warned/blocked/sanitized → original unchanged.
-		{"flag_on_warned", "warned", false, true, "warned"},
-		{"flag_on_blocked", "blocked", false, true, "blocked"},
-		{"flag_on_sanitized", "sanitized", false, true, "sanitized"},
+		{"flag_on_warned", "warned", false, false, true, "warned"},
+		{"flag_on_blocked", "blocked", false, false, true, "blocked"},
+		{"flag_on_sanitized_original", "sanitized", false, false, true, "sanitized"},
 
-		// Neither block nor flag → original unchanged.
-		{"no_signal_allow", "allowed", false, false, "allowed"},
-		{"no_signal_warned", "warned", false, false, "warned"},
+		// Neither block/sanitize/flag → original unchanged.
+		{"no_signal_allow", "allowed", false, false, false, "allowed"},
+		{"no_signal_warned", "warned", false, false, false, "warned"},
 
-		// Key regression: transport_error path — even though outcome will be
-		// stream_transport_error, security verdict should NOT be lost.
-		// (Callers pass blocked=false, flagged=true when flag was observed
-		// before transport failed; verdict should still say "warned".)
-		{"flagged_then_transport_error", "allowed", false, true, canonicalFlaggedPolicyAction},
+		// Regression: transport_error path — security verdict must not be lost.
+		{"flagged_then_transport_error", "allowed", false, false, true, canonicalFlaggedPolicyAction},
+		{"sanitized_then_transport_error", "allowed", false, true, false, "sanitized"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := incrementalSecurityVerdict(c.original, c.blocked, c.flagged)
+			got := incrementalSecurityVerdict(c.original, c.blocked, c.sanitized, c.flagged)
 			if got != c.want {
-				t.Errorf("incrementalSecurityVerdict(%q, blocked=%v, flagged=%v) = %q, want %q",
-					c.original, c.blocked, c.flagged, got, c.want)
+				t.Errorf("incrementalSecurityVerdict(%q, blocked=%v, sanitized=%v, flagged=%v) = %q, want %q",
+					c.original, c.blocked, c.sanitized, c.flagged, got, c.want)
 			}
 		})
 	}

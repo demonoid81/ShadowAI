@@ -148,6 +148,12 @@ func normalizeOllama(of ollamaFrame, raw []byte) Event {
 // OllamaEmitter — identity NDJSON emitter.
 type OllamaEmitter struct{}
 
+// EmitSanitized — PR-F7.5 stub. Identity passthrough; full sanitize
+// re-encoding for Ollama NDJSON is planned for F7.6+.
+func (e OllamaEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, _ string) error {
+	return e.Emit(ctx, w, ev)
+}
+
 func (OllamaEmitter) Emit(ctx context.Context, w io.Writer, ev Event) error {
 	if err := ctx.Err(); err != nil {
 		return err

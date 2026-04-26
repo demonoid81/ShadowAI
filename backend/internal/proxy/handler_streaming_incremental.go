@@ -43,19 +43,23 @@ var errMidstreamBlock = errors.New("streaming: mid-stream block")
 
 // incrementalTransportResult — возвращаемое значение
 // runIncrementalStreamTransport v2. Объединяет accumulated bytes,
-// состояние blocked/flagged и transport error в одну структуру,
-// чтобы caller мог принять решение об audit StatusCode/PolicyAction.
+// состояние blocked/flagged/sanitized и transport error в одну
+// структуру, чтобы caller мог принять решение об audit.
 type incrementalTransportResult struct {
 	Accumulated []byte
 	// Blocked — inspector mid-stream вернул block (EmitError уже
 	// вызван внутри транспорта).
-	Blocked       bool
+	Blocked        bool
 	BlockInspector string
 	BlockReason    string
 	// Flagged — incremental engine накопил flag (любой из delta был
 	// flagged). Stream прошёл до EOF.
 	Flagged          bool
 	FlaggedInspector string
+	// Sanitized — PR-F7.5: хотя бы один delta был sanitized.
+	// Stream прошёл до EOF; emitted bytes содержат sanitized text.
+	Sanitized          bool
+	SanitizedInspector string
 	// TransportErr — non-cancel error от decoder/emitter. nil при
 	// успешном пропуске или при normal block. Обработка в caller
 	// (audit StatusCode=502 + streaming_transport_error marker).
@@ -115,9 +119,11 @@ func (h *Handler) runIncrementalStreamTransport(
 	teed := io.TeeReader(upstream, &buf)
 
 	var (
-		blocked        bool
-		blockInspector string
-		blockReason    string
+		blocked            bool
+		blockInspector     string
+		blockReason        string
+		sanitized          bool   // PR-F7.5
+		sanitizedInspector string // PR-F7.5
 	)
 
 	decErr := adapter.Decoder.Decode(ctx, teed, func(ev streaming.Event) error {
@@ -149,6 +155,20 @@ func (h *Handler) runIncrementalStreamTransport(
 			}
 			// v.Flag накапливается в engine; отдельной обработки
 			// здесь не требуется.
+
+			// PR-F7.5: sanitize path — replace delta content in emitted frame.
+			if v.Sanitize {
+				metrics.RecordStreamingSanitize(providerName, v.InspectorName)
+				if emitErr := adapter.Emitter.EmitSanitized(ctx, w, ev, v.SanitizedText); emitErr != nil {
+					metrics.RecordStreamingEmitFail(providerName)
+					return fmt.Errorf("%w: %w", errTransportEmit, emitErr)
+				}
+				if !sanitized {
+					sanitized = true
+					sanitizedInspector = v.InspectorName
+				}
+				return nil // sanitized frame emitted; skip identity Emit below
+			}
 		}
 
 		if emitErr := adapter.Emitter.Emit(ctx, w, ev); emitErr != nil {
@@ -159,10 +179,12 @@ func (h *Handler) runIncrementalStreamTransport(
 	})
 
 	res := incrementalTransportResult{
-		Accumulated:      buf.Bytes(),
-		Blocked:          blocked,
-		BlockInspector:   blockInspector,
-		BlockReason:      blockReason,
+		Accumulated:        buf.Bytes(),
+		Blocked:            blocked,
+		BlockInspector:     blockInspector,
+		BlockReason:        blockReason,
+		Sanitized:          sanitized,
+		SanitizedInspector: sanitizedInspector,
 	}
 	if engine != nil {
 		res.Flagged = engine.Flagged()
@@ -222,6 +244,39 @@ func (h *Handler) shouldUseIncrementalStream(providerName string) (streaming.Ada
 	return a, true, ""
 }
 
+// ---------------------------------------------------------------------------
+// PR-F7.5: STREAMING_ALLOW_INCREMENTAL_IN_PROD — promotion criteria
+// ---------------------------------------------------------------------------
+//
+// The STREAMING_ALLOW_INCREMENTAL_IN_PROD gate remains active after F7.5.
+// It exists to prevent accidental production opt-in before the incremental
+// path has proven sufficient stability. Do NOT remove or bypass this gate
+// until ALL of the following criteria are met:
+//
+//  1. Error budget: streaming_emit_fail_total + streaming_decoder_fatal_total
+//     rate(1h) < 0.1% of total streaming requests for ≥ 30 consecutive days.
+//
+//  2. Fallback rate: streaming_fallback_total (reason=unsupported_provider)
+//     is zero or negligible for all target providers.
+//
+//  3. Sanitize correctness: shadowai_streaming_midstream_sanitize_total
+//     monitored in shadow mode for ≥ 30 days; zero false-positive sanitize
+//     events on non-PII content confirmed by audit sample review.
+//
+//  4. Bytes-identity verification: TestRoundTrip_BytesIdentity passes in
+//     CI on the exact version being promoted; no adapter regression.
+//
+//  5. Provider coverage: all providers used in production have a full
+//     (not stub) EmitSanitized implementation, OR incremental is limited
+//     to OpenAI-compat providers only via config.
+//
+//  6. Operator sign-off: security team and platform lead have reviewed
+//     streaming sanitize audit samples from shadow mode.
+//
+// Current F7.5 status: criteria 5 is NOT fully met (Anthropic/Gemini/Ollama
+// use identity-stub EmitSanitized). Production rollout for those providers
+// requires F7.6+ full implementation.
+//
 // composeBufferedFallbackMarker: удалён в PR-F7.3. Заменён на
 // structured outcome/fallback_reason fields в domain.AuditLog
 // (см. streaming_audit.go Outcome* + classifyBufferedOutcome).

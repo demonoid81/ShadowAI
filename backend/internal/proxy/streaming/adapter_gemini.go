@@ -124,6 +124,12 @@ func (GeminiDecoder) Decode(ctx context.Context, r io.Reader, emit func(Event) e
 // GeminiEmitter — identity.
 type GeminiEmitter struct{}
 
+// EmitSanitized — PR-F7.5 stub. Identity passthrough; full sanitize
+// re-encoding for Gemini SSE is planned for F7.6+.
+func (e GeminiEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, _ string) error {
+	return e.Emit(ctx, w, ev)
+}
+
 func (GeminiEmitter) Emit(ctx context.Context, w io.Writer, ev Event) error {
 	if err := ctx.Err(); err != nil {
 		return err

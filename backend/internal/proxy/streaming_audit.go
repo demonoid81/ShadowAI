@@ -187,17 +187,21 @@ const canonicalFlaggedPolicyAction = "warned"
 
 // incrementalSecurityVerdict вычисляет policy_action для incremental
 // path. Вызывается ДО transport-outcome classification, чтобы
-// transport error не подавил already-observed flag/block:
+// transport error не подавил already-observed flag/block/sanitize:
 //
-//   block → "blocked" (highest priority)
+//   block    → "blocked"                   (highest priority)
+//   sanitize → "sanitized"                 (PR-F7.5)
 //   flagged && original==allow → canonicalFlaggedPolicyAction ("warned")
 //   otherwise → original (request-side policyAction)
 //
 // F7.3 invariant: policy_action = security verdict independent of
 // transport result. outcome field несёт transport-side story.
-func incrementalSecurityVerdict(original string, blocked, flagged bool) string {
+func incrementalSecurityVerdict(original string, blocked, sanitized, flagged bool) string {
 	if blocked {
 		return "blocked"
+	}
+	if sanitized {
+		return "sanitized"
 	}
 	if flagged && original == "allowed" {
 		return canonicalFlaggedPolicyAction

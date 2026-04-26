@@ -585,7 +585,7 @@ func (h *Handler) ProxyChat(w http.ResponseWriter, r *http.Request) {
 			// F7.3 invariant: policy_action = security verdict, independent
 			// of transport outcome. Вычисляем ДО outcome branching, чтобы
 			// transport error не подавил already-observed flag/block.
-			auditPolicyAction := incrementalSecurityVerdict(policyAction, res.Blocked, res.Flagged)
+			auditPolicyAction := incrementalSecurityVerdict(policyAction, res.Blocked, res.Sanitized, res.Flagged)
 			// StatusCode: transport-side (может расходиться с client HTTP
 			// status — например, 403 в audit при client-500 incremental block).
 			auditStatus := resp.StatusCode
@@ -1756,7 +1756,7 @@ func (h *Handler) UnifiedChat(w http.ResponseWriter, r *http.Request) {
 				}
 				auditOutcome := classifyIncrementalOutcome(res.Blocked, res.TransportErr != nil, parseErr, overBudget, res.Flagged)
 				// F7.3 invariant — симметрично ProxyChat.
-				auditPolicyAction := incrementalSecurityVerdict(policyAction, res.Blocked, res.Flagged)
+				auditPolicyAction := incrementalSecurityVerdict(policyAction, res.Blocked, res.Sanitized, res.Flagged)
 				auditStatus := resp.StatusCode
 				if res.Blocked {
 					auditStatus = http.StatusForbidden

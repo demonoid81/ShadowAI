@@ -193,6 +193,18 @@ func (AnthropicDecoder) Decode(ctx context.Context, r io.Reader, emit func(Event
 // AnthropicEmitter — identity emitter, как и openai_compat.
 type AnthropicEmitter struct{}
 
+// EmitSanitized — PR-F7.5 stub. Anthropic wire-format sanitize re-encoding
+// is not yet implemented; full support is planned for F7.6+.
+// Non-delta_text events: identity. Delta_text events: identity (no re-encode).
+// Callers in incremental engine treat non-nil error as transport failure.
+func (e AnthropicEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, _ string) error {
+	// Identity passthrough — sanitized text is NOT applied for Anthropic in F7.5.
+	// This is safe (no silent mutation); the sanitize verdict is still recorded
+	// in audit (policy_action=sanitized), but the emitted bytes are unchanged.
+	// Production operators using Anthropic should set buffered mode until F7.6.
+	return e.Emit(ctx, w, ev)
+}
+
 func (AnthropicEmitter) Emit(ctx context.Context, w io.Writer, ev Event) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -111,7 +111,7 @@ func (h *Handler) runShadowCompare(
 	overBudget := false // shadow не делает budget check
 	shadowOutcome := classifyIncrementalOutcome(
 		res.Blocked, res.TransportErr != nil, shadowParseErr, overBudget, res.Flagged)
-	shadowPolicyAction := incrementalSecurityVerdict("allowed", res.Blocked, res.Flagged)
+	shadowPolicyAction := incrementalSecurityVerdict("allowed", res.Blocked, res.Sanitized, res.Flagged)
 	// Shadow stream в memory завершится как completed если incremental не блокировал.
 	shadowCompleted := shadowOutcome == OutcomeStreamCompleted
 	shadowUsageSource := classifyUsageSource(shadowStreamUsage, shadowParseErr, shadowCompleted)

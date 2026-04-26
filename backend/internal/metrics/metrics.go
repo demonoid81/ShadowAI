@@ -154,6 +154,13 @@ var (
 		Help: "Streaming mid-stream block events by provider and inspector.",
 	}, []string{"provider", "inspector"})
 
+	// StreamingMidstreamSanitizeTotal — PR-F7.5: incremental inspector
+	// вернул ActionSanitize на delta; frame заменён sanitized текстом.
+	StreamingMidstreamSanitizeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_streaming_midstream_sanitize_total",
+		Help: "Streaming mid-stream sanitize events by provider and inspector.",
+	}, []string{"provider", "inspector"})
+
 	// --- LLM-as-Judge observability ---
 	//
 	// Cardinality constraint: label provider+threat_type даёт умеренный
@@ -329,6 +336,12 @@ func RecordStreamingDecoderFatal(provider string) {
 // вернул ActionBlock на delta, stream прерван.
 func RecordStreamingMidstreamBlock(provider, inspector string) {
 	StreamingMidstreamBlockTotal.WithLabelValues(provider, inspector).Inc()
+}
+
+// RecordStreamingSanitize — PR-F7.5: incremental inspector вернул
+// ActionSanitize на delta; frame заменён sanitized текстом.
+func RecordStreamingSanitize(provider, inspector string) {
+	StreamingMidstreamSanitizeTotal.WithLabelValues(provider, inspector).Inc()
 }
 
 // RecordStreamingShadowCompare — shadow compare outcome ("match"/"mismatch").

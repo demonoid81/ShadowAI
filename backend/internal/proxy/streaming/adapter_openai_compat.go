@@ -160,6 +160,99 @@ func (OpenAICompatEmitter) Emit(ctx context.Context, w io.Writer, ev Event) erro
 	return nil
 }
 
+// EmitSanitized — PR-F7.5. Для EventDeltaText заменяет choices[*].delta.content
+// на sanitizedText, сохраняя все остальные JSON-поля (id, model, finish_reason,
+// usage и provider-specific поля) через json.RawMessage round-trip.
+//
+// Для любых non-delta_text событий (usage, stop, unknown, error) эмитит
+// identity RawBytes — safety invariant: эти frames нельзя модифицировать.
+//
+// Если JSON re-encoding упал → возвращает error (NOT silent identity).
+// Caller трактует это как transport failure.
+func (e OpenAICompatEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, sanitizedText string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Non-delta_text events: emit identity (must not modify usage/stop/unknown).
+	if ev.Type != EventDeltaText || len(ev.RawBytes) == 0 {
+		return e.Emit(ctx, w, ev)
+	}
+
+	// Extract JSON from SSE frame: "data: {...}\n\n" → "{...}"
+	payload := bytes.TrimPrefix(ev.RawBytes, []byte("data: "))
+	payload = bytes.TrimRight(payload, "\n\r")
+	// Guard: [DONE] sentinel is MessageStop, not DeltaText — defensive check.
+	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+		return e.Emit(ctx, w, ev)
+	}
+
+	// Parse outer JSON, preserving all unknown fields via map[string]json.RawMessage.
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &outer); err != nil {
+		return fmt.Errorf("streaming: openai_compat sanitize: unmarshal outer: %w", err)
+	}
+
+	// Replace choices[*].delta.content if present.
+	if choicesRaw, ok := outer["choices"]; ok && len(choicesRaw) > 0 {
+		var choices []json.RawMessage
+		if err := json.Unmarshal(choicesRaw, &choices); err != nil {
+			return fmt.Errorf("streaming: openai_compat sanitize: unmarshal choices: %w", err)
+		}
+		for i, choiceRaw := range choices {
+			var choice map[string]json.RawMessage
+			if err := json.Unmarshal(choiceRaw, &choice); err != nil {
+				return fmt.Errorf("streaming: openai_compat sanitize: unmarshal choice %d: %w", i, err)
+			}
+			deltaRaw, hasDelta := choice["delta"]
+			if !hasDelta {
+				continue
+			}
+			var delta map[string]json.RawMessage
+			if err := json.Unmarshal(deltaRaw, &delta); err != nil {
+				return fmt.Errorf("streaming: openai_compat sanitize: unmarshal delta %d: %w", i, err)
+			}
+			if _, hasContent := delta["content"]; !hasContent {
+				continue // no content field: role-only first delta — skip
+			}
+			sanitizedJSON, err := json.Marshal(sanitizedText)
+			if err != nil {
+				return fmt.Errorf("streaming: openai_compat sanitize: marshal content: %w", err)
+			}
+			delta["content"] = sanitizedJSON
+			newDelta, err := json.Marshal(delta)
+			if err != nil {
+				return fmt.Errorf("streaming: openai_compat sanitize: marshal delta %d: %w", i, err)
+			}
+			choice["delta"] = newDelta
+			newChoice, err := json.Marshal(choice)
+			if err != nil {
+				return fmt.Errorf("streaming: openai_compat sanitize: marshal choice %d: %w", i, err)
+			}
+			choices[i] = newChoice
+		}
+		newChoices, err := json.Marshal(choices)
+		if err != nil {
+			return fmt.Errorf("streaming: openai_compat sanitize: marshal choices: %w", err)
+		}
+		outer["choices"] = newChoices
+	}
+
+	newPayload, err := json.Marshal(outer)
+	if err != nil {
+		return fmt.Errorf("streaming: openai_compat sanitize: marshal outer: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("data: ")
+	buf.Write(newPayload)
+	buf.WriteString("\n\n")
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	flushIfPossible(w)
+	return nil
+}
+
 // EmitError пишет SSE `event: error\ndata: {...}\n\n`. В отличие от
 // data-only frame'ов OpenAI, используем именованный event type,
 // чтобы клиент мог отличить streaming-level error от content.
