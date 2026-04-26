@@ -103,7 +103,11 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	orgBudgetHandler := orgbudget.NewHandler(orgBudgetSvc)
 
 	// Provider/Model Governance (PR-G1). Singleton via migration 012.
-	governanceRepo := governance.NewPGRepository(deps.DB)
+	// PR-G2.2: CachingRepository wraps PGRepository to keep the proxy hot path
+	// DB-free. First Evaluate per org loads from DB; subsequent calls hit the
+	// in-process snapshot. Upsert writes through immediately. TTL fallback (60s)
+	// handles multi-replica deployments where another replica updated the policy.
+	governanceRepo := governance.NewCachingRepository(governance.NewPGRepository(deps.DB))
 	governanceSvc := governance.NewService(governanceRepo)
 	governanceHandler := governance.NewHandler(governanceSvc, adminAuditRecorder)
 
