@@ -39,8 +39,17 @@ spec:
 
         # Alert: evidence-export CronJob has not run within 2× its expected interval.
         # Detects CronJob suspensions, misconfigured schedules, or controller issues.
+        # absent() OR ensures the alert fires even when the metric series is absent
+        # (first deployment, kube-state-metrics restart, label selector mismatch).
         - alert: EvidenceExportJobMissing
           expr: |
+            absent(
+              kube_cronjob_status_last_schedule_time{
+                namespace="{{ .Release.Namespace }}",
+                cronjob="{{ include "shadowai.fullname" . }}-evidence-export"
+              }
+            )
+            OR
             (
               time()
               - kube_cronjob_status_last_schedule_time{
@@ -62,26 +71,10 @@ spec:
               Check CronJob suspension status and controller logs.
             runbook: "https://docs.shadowai.internal/runbooks/evidence-export#job-missing"
 
-        # Alert: audit-verify --bundle reported verification failure.
-        # Tracked via the shadowai_evidence_bundle_verify_failed metric emitted by
-        # the export script (requires shadowed metric scraping or Job log analysis).
-        # Simplified: relies on Job failure (EvidenceExportJobFailed covers verify exit != 0).
-        # This separate alert catches cases where verify fails but job retry logic masks it.
-        - alert: EvidenceBundleVerifyFailed
-          expr: |
-            kube_job_status_failed{
-              namespace="{{ .Release.Namespace }}",
-              job_name=~"{{ include "shadowai.fullname" . }}-evidence-export-.*"
-            } > 0
-          for: 0m
-          labels:
-            severity: critical
-            team: compliance
-          annotations:
-            summary: "ShadowAI evidence bundle verification failed"
-            description: >-
-              Evidence bundle verification (audit-verify --bundle) failed for the
-              {{ include "shadowai.fullname" . }}-evidence-export Job.
-              This may indicate tampered or incomplete evidence. Investigate immediately.
-            runbook: "https://docs.shadowai.internal/runbooks/evidence-export#verify-failed"
+        # Note: EvidenceBundleVerifyFailed was removed — it used the same
+        # kube_job_status_failed expression as EvidenceExportJobFailed, making it
+        # indistinguishable from DB outages, PVC full, or config errors.
+        # EvidenceExportJobFailed (above) is the canonical alert for any Job exit != 0.
+        # To distinguish verify failures from export failures, instrument the
+        # export script with a custom metric or structured exit code (O4.2 scope).
 {{- end }}

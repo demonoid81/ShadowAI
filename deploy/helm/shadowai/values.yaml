@@ -185,8 +185,11 @@ evidenceExport:
   # zip: create <output>.zip archive after export.
   zip: false
 
-  # chainSecret: set true when AUDIT_CHAIN_SECRET is in the K8s Secret
-  # (enables W2 chain verification in audit-verify).
+  # chainSecret: set true when AUDIT_CHAIN_SECRET is in the K8s Secret.
+  # When true, the CronJob runs an additional live audit-verify --include-anchors
+  # step after bundle export+verify. This performs W2 HMAC chain verification
+  # against the source DB (not the bundle). Bundle-mode verify never uses
+  # AUDIT_CHAIN_SECRET — the live step is separate and complementary.
   chainSecret: false
 
   # pubKeyFile: path inside the container to the Ed25519 public key.

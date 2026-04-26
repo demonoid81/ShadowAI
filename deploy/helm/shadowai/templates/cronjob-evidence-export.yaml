@@ -1,4 +1,15 @@
 {{- if .Values.evidenceExport.enabled }}
+{{- $validModes := list "global" "tenants" }}
+{{- if not (has .Values.evidenceExport.mode $validModes) }}
+{{- fail (printf "evidenceExport.mode must be one of %v, got %q" $validModes .Values.evidenceExport.mode) }}
+{{- end }}
+{{- $validStorage := list "pvc" }}
+{{- if not (has .Values.evidenceExport.storage $validStorage) }}
+{{- fail (printf "evidenceExport.storage must be one of %v, got %q (s3 support is deferred to O4.2)" $validStorage .Values.evidenceExport.storage) }}
+{{- end }}
+{{- if and (eq .Values.evidenceExport.mode "tenants") (empty .Values.evidenceExport.orgIDs) }}
+{{- fail "evidenceExport.orgIDs must not be empty when mode=tenants" }}
+{{- end }}
 # PR-O4.1: Scheduled evidence bundle export + offline verification.
 #
 # Each run:
@@ -58,6 +69,11 @@ spec:
                   set -eu
                   TS=$(date -u +%Y%m%d-%H%M%S)
                   echo "[evidence-export] run started at ${TS}"
+                  # Runtime guard: Helm validation above prevents reaching here with invalid
+                  # mode/storage, but explicit check defends against --set bypasses.
+                  MODE="{{ .Values.evidenceExport.mode }}"
+                  case "${MODE}" in global|tenants) ;; *)
+                    echo "[evidence-export] ERROR: unknown mode=${MODE}" >&2; exit 2 ;; esac
 
                   {{- if eq .Values.evidenceExport.mode "global" }}
                   # Global export — single bundle for all orgs.
@@ -102,11 +118,20 @@ spec:
                   {{- end }}
                   {{- end }}
 
+                  {{- if .Values.evidenceExport.chainSecret }}
+                  # Live chain + anchor verification (W2+W3) using AUDIT_CHAIN_SECRET.
+                  # This is a separate live-DB check (not bundle-based) that catches
+                  # chain breaks in the source DB regardless of what was exported.
+                  echo "[evidence-export] live chain verify (W2+W3) — requires AUDIT_CHAIN_SECRET"
+                  audit-verify --include-anchors --table all --verbose
+                  {{- end }}
+
                   # Cleanup bundles older than retentionDays.
                   RETENTION={{ .Values.evidenceExport.retentionDays | default 90 }}
                   echo "[evidence-export] cleaning exports older than ${RETENTION} days"
-                  find /exports -maxdepth 1 -type d -mtime +${RETENTION} -exec rm -rf {} + || true
-                  find /exports -maxdepth 1 -name "*.zip" -mtime +${RETENTION} -delete || true
+                  # -mindepth 1 prevents matching the /exports mountpoint itself.
+                  find /exports -mindepth 1 -maxdepth 1 -type d -mtime +${RETENTION} -exec rm -rf {} + || true
+                  find /exports -mindepth 1 -maxdepth 1 -name "*.zip" -mtime +${RETENTION} -delete || true
                   echo "[evidence-export] run complete"
 
               env:
