@@ -74,3 +74,29 @@ affinity:
           matchLabels:
             app.kubernetes.io/name: shadowai
         topologyKey: kubernetes.io/hostname
+
+# PR-O4.1: Evidence export automation — enabled in production.
+evidenceExport:
+  enabled: true
+  schedule: "0 2 * * *"   # nightly at 02:00 UTC
+  mode: global             # export all orgs; switch to tenants for per-org bundles
+  retentionDays: 90
+  storage: pvc
+  pvc:
+    size: 20Gi
+  chainSecret: true        # AUDIT_CHAIN_SECRET available in prod secret
+  zip: true                # archive bundles to save space
+  deadlineSeconds: 7200    # 2h hard deadline for large deployments
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  alerts:
+    enabled: true
+    severity: critical
+    missingAfterSeconds: 172800   # 48h = 2× daily schedule
+    ruleLabels:
+      prometheus: kube-prometheus  # adjust to match your Prometheus operator selector

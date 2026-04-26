@@ -151,6 +151,73 @@ auditVerifyCron:
   verbose: false
   chainSecret: false      # set true if AUDIT_CHAIN_SECRET is in the K8s Secret
 
+# PR-O4.1: Automated evidence bundle export + offline verification CronJob.
+# Exports WORM evidence bundles on a schedule, verifies them offline, and alerts
+# on failure. Use in conjunction with auditVerifyCron for full compliance coverage.
+evidenceExport:
+  enabled: false
+
+  # Cron schedule (default: nightly at 02:00 UTC).
+  schedule: "0 2 * * *"
+
+  # mode: global | tenants
+  #   global  — exports all orgs as a single global bundle (--global flag).
+  #   tenants — exports one bundle per org_id listed in orgIDs.
+  mode: global
+
+  # orgIDs: required when mode=tenants. List of org UUIDs to export.
+  orgIDs: []
+  # orgIDs:
+  #   - "00000000-0000-0000-0000-000000000001"
+  #   - "aaaaaaaa-0000-4000-8000-000000000001"
+
+  # retentionDays: delete bundles older than N days from /exports.
+  retentionDays: 90
+
+  # storage: pvc | (s3 deferred to O4.2)
+  storage: pvc
+
+  # pvc: PVC configuration when storage=pvc.
+  pvc:
+    size: 10Gi
+    storageClass: ""   # leave empty for cluster default
+
+  # zip: create <output>.zip archive after export.
+  zip: false
+
+  # chainSecret: set true when AUDIT_CHAIN_SECRET is in the K8s Secret
+  # (enables W2 chain verification in audit-verify).
+  chainSecret: false
+
+  # pubKeyFile: path inside the container to the Ed25519 public key.
+  # When set, the key is mounted from existingSecret.anchorPubKey.
+  pubKeyFile: ""  # e.g. /etc/shadowai/anchor-pubkey.b64
+
+  # deadlineSeconds: hard deadline for the Job (default 60 min).
+  deadlineSeconds: 3600
+
+  # resources for the evidence-export container.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # alerts: PrometheusRule configuration.
+  alerts:
+    enabled: false
+    severity: critical
+    evaluationInterval: 1m
+    # missingAfterSeconds: fire EvidenceExportJobMissing after this many seconds
+    # since the last successful schedule. Default: 48h (2 days = 2× daily schedule).
+    missingAfterSeconds: 172800
+    # ruleLabels: extra labels applied to the PrometheusRule (for routing/matching).
+    ruleLabels: {}
+    # ruleLabels:
+    #   prometheus: kube-prometheus
+
 serviceAccount:
   create: true
   annotations: {}

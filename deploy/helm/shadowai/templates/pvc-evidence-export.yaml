@@ -1,0 +1,19 @@
+{{- if and .Values.evidenceExport.enabled (eq .Values.evidenceExport.storage "pvc") }}
+# PR-O4.1: PVC for evidence bundles produced by the evidence-export CronJob.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "shadowai.fullname" . }}-evidence-exports
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: evidence-export
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.evidenceExport.pvc.size | default "10Gi" }}
+  {{- with .Values.evidenceExport.pvc.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

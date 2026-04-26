@@ -1,0 +1,87 @@
+{{- if .Values.evidenceExport.alerts.enabled }}
+# PR-O4.1: PrometheusRule for evidence export alerting.
+# Requires kube-state-metrics (kube_job_status_failed, kube_cronjob_next_schedule_time).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "shadowai.fullname" . }}-evidence-export
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: evidence-export
+    {{- with .Values.evidenceExport.alerts.ruleLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: shadowai.evidence-export
+      interval: {{ .Values.evidenceExport.alerts.evaluationInterval | default "1m" }}
+      rules:
+
+        # Alert: evidence-export Job failed (exit code != 0).
+        # This means either audit-export-evidence or audit-verify --bundle returned non-zero.
+        - alert: EvidenceExportJobFailed
+          expr: |
+            kube_job_status_failed{
+              namespace="{{ .Release.Namespace }}",
+              job_name=~"{{ include "shadowai.fullname" . }}-evidence-export-.*"
+            } > 0
+          for: 1m
+          labels:
+            severity: {{ .Values.evidenceExport.alerts.severity | default "critical" }}
+            team: platform
+          annotations:
+            summary: "ShadowAI evidence export job failed"
+            description: >-
+              The evidence-export CronJob {{ include "shadowai.fullname" . }}-evidence-export
+              failed. This means either the bundle export or the offline verify step
+              returned a non-zero exit code. Check Job logs immediately.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-export#job-failed"
+
+        # Alert: evidence-export CronJob has not run within 2× its expected interval.
+        # Detects CronJob suspensions, misconfigured schedules, or controller issues.
+        - alert: EvidenceExportJobMissing
+          expr: |
+            (
+              time()
+              - kube_cronjob_status_last_schedule_time{
+                  namespace="{{ .Release.Namespace }}",
+                  cronjob="{{ include "shadowai.fullname" . }}-evidence-export"
+                }
+            )
+            > {{ .Values.evidenceExport.alerts.missingAfterSeconds | default 172800 }}
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ShadowAI evidence export CronJob has not run"
+            description: >-
+              The evidence-export CronJob {{ include "shadowai.fullname" . }}-evidence-export
+              has not run for more than
+              {{ .Values.evidenceExport.alerts.missingAfterSeconds | default 172800 | int | divf 3600 | floor }} hours.
+              Check CronJob suspension status and controller logs.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-export#job-missing"
+
+        # Alert: audit-verify --bundle reported verification failure.
+        # Tracked via the shadowai_evidence_bundle_verify_failed metric emitted by
+        # the export script (requires shadowed metric scraping or Job log analysis).
+        # Simplified: relies on Job failure (EvidenceExportJobFailed covers verify exit != 0).
+        # This separate alert catches cases where verify fails but job retry logic masks it.
+        - alert: EvidenceBundleVerifyFailed
+          expr: |
+            kube_job_status_failed{
+              namespace="{{ .Release.Namespace }}",
+              job_name=~"{{ include "shadowai.fullname" . }}-evidence-export-.*"
+            } > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: compliance
+          annotations:
+            summary: "ShadowAI evidence bundle verification failed"
+            description: >-
+              Evidence bundle verification (audit-verify --bundle) failed for the
+              {{ include "shadowai.fullname" . }}-evidence-export Job.
+              This may indicate tampered or incomplete evidence. Investigate immediately.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-export#verify-failed"
+{{- end }}

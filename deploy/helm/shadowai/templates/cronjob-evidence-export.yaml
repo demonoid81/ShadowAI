@@ -1,0 +1,165 @@
+{{- if .Values.evidenceExport.enabled }}
+# PR-O4.1: Scheduled evidence bundle export + offline verification.
+#
+# Each run:
+#   1. Creates a timestamped output directory under /exports.
+#   2. Runs audit-export-evidence (global or per-tenant depending on mode).
+#   3. Runs audit-verify --bundle on the output.
+#   4. Optionally zips the bundle.
+#   5. Removes bundles older than retentionDays.
+#
+# exit code != 0 → Job fails → kube_job_status_failed alert fires.
+#
+# Mode options:
+#   global  — exports all tables as a global bundle (--global flag).
+#   tenants — exports one bundle per org in evidenceExport.orgIDs list.
+#
+# Storage options:
+#   pvc — mounts the evidence-exports PVC at /exports.
+#   (s3 deferred to O4.2)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "shadowai.fullname" . }}-evidence-export
+  labels:
+    {{- include "shadowai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: evidence-export
+spec:
+  schedule: {{ .Values.evidenceExport.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0   # no retry — failure may indicate tampered evidence
+      activeDeadlineSeconds: {{ .Values.evidenceExport.deadlineSeconds | default 3600 }}
+      template:
+        metadata:
+          labels:
+            {{- include "shadowai.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: evidence-export
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          {{- with .Values.evidenceExport.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: evidence-export
+              image: {{ include "shadowai.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  TS=$(date -u +%Y%m%d-%H%M%S)
+                  echo "[evidence-export] run started at ${TS}"
+
+                  {{- if eq .Values.evidenceExport.mode "global" }}
+                  # Global export — single bundle for all orgs.
+                  OUT="/exports/global-${TS}"
+                  echo "[evidence-export] global export → ${OUT}"
+                  audit-export-evidence \
+                    --output "${OUT}" \
+                    --global \
+                    {{- if .Values.evidenceExport.pubKeyFile }}
+                    --pubkey-file {{ .Values.evidenceExport.pubKeyFile }} \
+                    {{- end }}
+                    {{- if .Values.evidenceExport.zip }}
+                    --zip \
+                    {{- end }}
+                    --table all
+                  echo "[evidence-export] verifying global bundle ${OUT}"
+                  audit-verify --bundle "${OUT}" --verbose
+
+                  {{- else if eq .Values.evidenceExport.mode "tenants" }}
+                  # Per-tenant export — one bundle per org_id.
+                  {{- if empty .Values.evidenceExport.orgIDs }}
+                  echo "[evidence-export] ERROR: mode=tenants requires non-empty evidenceExport.orgIDs" >&2
+                  exit 2
+                  {{- else }}
+                  {{- range .Values.evidenceExport.orgIDs }}
+                  ORG_ID="{{ . }}"
+                  OUT="/exports/tenant-${ORG_ID}-${TS}"
+                  echo "[evidence-export] tenant export org=${ORG_ID} → ${OUT}"
+                  audit-export-evidence \
+                    --output "${OUT}" \
+                    --org-id "${ORG_ID}" \
+                    {{- if $.Values.evidenceExport.pubKeyFile }}
+                    --pubkey-file {{ $.Values.evidenceExport.pubKeyFile }} \
+                    {{- end }}
+                    {{- if $.Values.evidenceExport.zip }}
+                    --zip \
+                    {{- end }}
+                    --table all
+                  echo "[evidence-export] verifying tenant bundle ${OUT}"
+                  audit-verify --bundle "${OUT}" --verbose
+                  {{- end }}
+                  {{- end }}
+                  {{- end }}
+
+                  # Cleanup bundles older than retentionDays.
+                  RETENTION={{ .Values.evidenceExport.retentionDays | default 90 }}
+                  echo "[evidence-export] cleaning exports older than ${RETENTION} days"
+                  find /exports -maxdepth 1 -type d -mtime +${RETENTION} -exec rm -rf {} + || true
+                  find /exports -maxdepth 1 -name "*.zip" -mtime +${RETENTION} -delete || true
+                  echo "[evidence-export] run complete"
+
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.existingSecret }}
+                      key: databaseUrl
+                {{- if .Values.evidenceExport.chainSecret }}
+                - name: AUDIT_CHAIN_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.existingSecret }}
+                      key: auditChainSecret
+                {{- end }}
+
+              resources:
+                requests:
+                  cpu: {{ .Values.evidenceExport.resources.requests.cpu | default "100m" }}
+                  memory: {{ .Values.evidenceExport.resources.requests.memory | default "128Mi" }}
+                limits:
+                  cpu: {{ .Values.evidenceExport.resources.limits.cpu | default "500m" }}
+                  memory: {{ .Values.evidenceExport.resources.limits.memory | default "512Mi" }}
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false  # writes to /exports mount
+                capabilities:
+                  drop: [ALL]
+
+              volumeMounts:
+                - name: exports
+                  mountPath: /exports
+                {{- if .Values.evidenceExport.pubKeyFile }}
+                - name: pubkey
+                  mountPath: {{ .Values.evidenceExport.pubKeyFile | dir }}
+                  readOnly: true
+                {{- end }}
+
+          volumes:
+            - name: exports
+              {{- if eq .Values.evidenceExport.storage "pvc" }}
+              persistentVolumeClaim:
+                claimName: {{ include "shadowai.fullname" . }}-evidence-exports
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            {{- if .Values.evidenceExport.pubKeyFile }}
+            - name: pubkey
+              secret:
+                secretName: {{ .Values.existingSecret }}
+                items:
+                  - key: anchorPubKey
+                    path: {{ .Values.evidenceExport.pubKeyFile | base }}
+            {{- end }}
+{{- end }}
