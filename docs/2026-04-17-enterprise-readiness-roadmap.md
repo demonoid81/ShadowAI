@@ -100,38 +100,25 @@
 
 ## Next 0-30 Days
 
-### PR-G2.2: Governance Policy Cache
+### ~~PR-G2.2: Governance Policy Cache~~ ✅
 
-**Цель:** убрать DB dependency из proxy hot path для high-traffic deployments.
+Закрыто 2026-04-26: `CachingRepository` с per-org in-process snapshot,
+write-through Upsert, TTL fallback (60s), fail-closed на reload error,
+Prometheus metrics `shadowai_governance_cache_*`, go test -race зелёный.
 
-Scope:
-
-- Immutable active policy snapshot per org.
-- Refresh/invalidate on policy upsert.
-- TTL fallback reload.
-- Metrics: cache hit, miss, stale, reload error.
-- Fail-closed если policy snapshot corrupted или missing в enforce mode.
-
-Acceptance criteria:
-
-- `Evaluate` не требует DB read на каждый запрос.
-- Policy update становится видимым в bounded time.
-- Tests покрывают stale policy, reload error, per-org isolation.
-
-### PR-SOC1: Controls Mapping v1
+### PR-SOC1: Controls Mapping v1 ← **current**
 
 **Цель:** превратить технический readiness в audit-ready material для sales/security review.
 
-Scope:
+**Документ:** [`docs/compliance/soc2-iso-control-mapping.md`](compliance/soc2-iso-control-mapping.md)
 
-- Таблица controls: access control, audit logging, retention, WORM evidence, incident response, tenant isolation.
-- Для каждого control: owner, implementation, evidence artifact, cadence, alert/runbook.
-- Gap table: что не покрыто и почему.
-
-Acceptance criteria:
-
-- Security questionnaire можно отвечать ссылками на конкретные controls/evidence.
-- Compliance gaps отделены от product gaps.
+Закрыто 2026-04-26. Содержит:
+- Mapping на SOC 2 TSC и ISO 27001:2022 по 10 категориям controls.
+- Для каждого control: objective, implementation, evidence artifact, owner, cadence, residual gap.
+- Раздел «Current Gaps / Not Covered» с явными честными gaps.
+- Раздел «How to Use in Security Questionnaire».
+- Evidence Artifact Quick Reference.
+- Disclaimer: not a certification / not legal attestation.
 
 ---
 
@@ -225,8 +212,8 @@ Acceptance criteria:
 ## Current Priority Order
 
 1. ~~**O4.4.1 — Evidence audit report docs cleanup**~~ ✅
-2. **G2.2 — Governance policy cache**
-3. **SOC1 — SOC 2 / ISO control mapping**
+2. ~~**G2.2 — Governance policy cache**~~ ✅
+3. ~~**SOC1 — SOC 2 / ISO control mapping**~~ ✅ → `docs/compliance/soc2-iso-control-mapping.md`
 4. **F7.5 — Streaming Stage 2**
 5. **W7 — Key rotation + restore automation**
 6. **L5 — Legal hold advanced workflow**
@@ -240,7 +227,7 @@ Acceptance criteria:
 Главный принцип теперь:
 
 - **До enterprise pilot:** фундаментальные blockers закрыты; нужен только deployment-specific checklist и clean docs.
-- **До signed production:** governance cache, evidence/docs polish, controls mapping.
+- **До signed production:** ✅ governance cache, evidence/docs polish, controls mapping — закрыты.
 - **До broader GA:** key rotation, streaming Stage 2, BYOK/KMS, scale validation.
 
-Следующий recommended work item: **G2.2 governance policy cache**.
+Следующий recommended work item: **F7.5 — Streaming Stage 2** или **W7 — Key rotation**.
