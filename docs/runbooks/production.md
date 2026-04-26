@@ -22,6 +22,7 @@ and pre-launch checklist.
 | SIEM delivery failing | [deploy-rollback.md#siem-failure](deploy-rollback.md#siem-failure) |
 | SA_v2 embedder degraded | [deploy-rollback.md#semantic-v2-degraded](deploy-rollback.md#semantic-v2-degraded) |
 | Evidence export / WORM / Object Lock | [evidence-export-runbook.md](../evidence-export-runbook.md) |
+| Quarterly compliance evidence collection | [evidence-collection.md](evidence-collection.md) |
 
 ---
 

@@ -63,6 +63,12 @@ RUN CGO_ENABLED=0 go build \
     -o /audit-evidence-report \
     ./cmd/audit-evidence-report
 
+# Build audit-collect-evidence CLI (PR-SOC2.1: quarterly compliance evidence package).
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /audit-collect-evidence \
+    ./cmd/audit-collect-evidence
+
 # ---------------------------------------------------------------------------
 # Runtime image
 # ---------------------------------------------------------------------------
@@ -79,7 +85,8 @@ COPY --from=builder /migrate                /usr/local/bin/migrate
 COPY --from=builder /audit-verify           /usr/local/bin/audit-verify
 COPY --from=builder /audit-export-evidence  /usr/local/bin/audit-export-evidence
 COPY --from=builder /evidence-upload        /usr/local/bin/evidence-upload
-COPY --from=builder /audit-evidence-report  /usr/local/bin/audit-evidence-report
+COPY --from=builder /audit-evidence-report   /usr/local/bin/audit-evidence-report
+COPY --from=builder /audit-collect-evidence /usr/local/bin/audit-collect-evidence
 
 # SQL migrations baked into the image so the migrate init container
 # doesn't need a volume mount.

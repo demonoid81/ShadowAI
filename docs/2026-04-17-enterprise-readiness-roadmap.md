@@ -219,7 +219,8 @@ Acceptance criteria:
 6. ~~**L5 — Legal hold advanced workflow**~~ ✅
 7. ~~**BYOK1 — KMS / BYOK design**~~ ✅ → `docs/rfcs/2026-04-pr-byok1-kms-byok-design.md`
 8. ~~**GA1 — Hardened default / scale pass**~~ ✅ → `docs/production-hardening.md`
-9. **F7.6 — Streaming production proof window** ← current → `docs/runbooks/streaming-production-proof.md`
+9. ~~**F7.6 — Streaming production proof window**~~ ✅ → `docs/runbooks/streaming-production-proof.md`
+10. **SOC2.1 — Evidence collection automation** ← current → `docs/runbooks/evidence-collection.md`
 
 ---
 
