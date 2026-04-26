@@ -74,6 +74,25 @@ func TestKeyConstruction(t *testing.T) {
 	}
 }
 
+func TestRun_InvalidSSE(t *testing.T) {
+	stdout := os.NewFile(0, "stdout")
+	stderr := os.NewFile(2, "stderr")
+	code := run([]string{"--file", "/tmp/x.zip", "--bucket", "b", "--key", "k", "--sse", "bad-value"}, stdout, stderr)
+	if code != exitConfig {
+		t.Errorf("invalid --sse: exit=%d, want %d", code, exitConfig)
+	}
+}
+
+func TestRun_SSENone_ValidConfig(t *testing.T) {
+	// sse=none is valid (for MinIO) — should pass flag validation; fails at file-not-found
+	stdout := os.NewFile(0, "stdout")
+	stderr := os.NewFile(2, "stderr")
+	code := run([]string{"--file", "/nonexistent-bundle.zip", "--bucket", "b", "--key", "k", "--sse", "none"}, stdout, stderr)
+	if code != exitConfig {
+		t.Errorf("sse=none, missing file: exit=%d, want exitConfig(%d)", code, exitConfig)
+	}
+}
+
 // TestWriteAndReadBundle verifies the file is opened correctly (integration path).
 func TestOpenFile_Valid(t *testing.T) {
 	dir := t.TempDir()

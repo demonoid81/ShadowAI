@@ -57,6 +57,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		region         = fs.String("region", "us-east-1", "AWS region")
 		endpoint       = fs.String("endpoint", "", "Custom S3 endpoint URL (MinIO, GCS, etc.)")
 		forcePathStyle = fs.Bool("force-path-style", false, "Use path-style addressing (required for many MinIO installs)")
+		sse            = fs.String("sse", "AES256", `Server-Side Encryption: "AES256" (default, AWS S3) or "none" (MinIO/custom S3)`)
 		timeout        = fs.Int("timeout", 300, "Upload timeout in seconds")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -80,6 +81,11 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	if *key == "" {
 		return cfgErr("--key is required")
+	}
+	switch *sse {
+	case "AES256", "none":
+	default:
+		return cfgErr("--sse must be AES256 or none, got %q", *sse)
 	}
 
 	f, err := os.Open(*file)
@@ -132,18 +138,24 @@ func run(args []string, stdout, stderr *os.File) int {
 	fmt.Fprintf(stdout, "[evidence-upload] uploading %s → s3://%s/%s (%d bytes)\n",
 		*file, *bucket, *key, stat.Size())
 
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:               aws.String(*bucket),
-		Key:                  aws.String(*key),
-		Body:                 f,
-		ContentLength:        aws.Int64(stat.Size()),
-		ContentType:          aws.String("application/zip"),
-		ServerSideEncryption: types.ServerSideEncryptionAes256,
+	putInput := &s3.PutObjectInput{
+		Bucket:        aws.String(*bucket),
+		Key:           aws.String(*key),
+		Body:          f,
+		ContentLength: aws.Int64(stat.Size()),
+		ContentType:   aws.String("application/zip"),
 		Metadata: map[string]string{
 			"shadowai-component": "evidence-bundle",
 			"upload-timestamp":   time.Now().UTC().Format(time.RFC3339),
 		},
-	})
+	}
+	if *sse == "AES256" {
+		putInput.ServerSideEncryption = types.ServerSideEncryptionAes256
+	}
+	// sse=none: omit the SSE header — required for MinIO and some custom S3 targets
+	// that reject or ignore AES256 depending on server configuration.
+
+	_, err = client.PutObject(ctx, putInput)
 	if err != nil {
 		return uploadErr("PutObject s3://%s/%s: %v", *bucket, *key, err)
 	}

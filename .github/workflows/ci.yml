@@ -145,7 +145,7 @@ jobs:
         run: |
           TAGS=""
           [ "${{ matrix.variant }}" = "enterprise" ] && TAGS="-tags enterprise"
-          for cmd in audit-verify audit-export-evidence migrate; do
+          for cmd in audit-verify audit-export-evidence evidence-upload migrate; do
             echo "Building $cmd..."
             CGO_ENABLED=0 go build $TAGS -ldflags="-w -s" -o /dev/null ./cmd/$cmd
           done

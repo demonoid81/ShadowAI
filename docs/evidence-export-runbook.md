@@ -1,18 +1,25 @@
 # Evidence Export & Restore Drill — Operator Runbook
 
-**PR-O4.1** · Last updated: 2026-04-26
+**PR-O4.1 + O4.2** · Last updated: 2026-04-26
 
 ---
 
 ## Overview
 
-The automated evidence pipeline:
+The automated evidence pipeline (O4.1: PVC, O4.2: S3-compatible):
 
 ```
-CronJob (nightly) → audit-export-evidence → bundle on PVC
-                  → audit-verify --bundle → exit 0 or fail Job
-                  → alert on failure (EvidenceExportJobFailed)
+CronJob (nightly)
+  → audit-export-evidence --global | --org-id    (local temp or PVC)
+  → audit-verify --bundle                         (offline Merkle proof verification)
+  → [storage=s3] evidence-upload → S3/MinIO       (upload only after successful verify)
+  → [storage=pvc] retain on PVC, cleanup old
+  → exit 0 or fail Job → EvidenceExportJobFailed alert
 ```
+
+Storage backends:
+- **`storage: pvc`** (O4.1 default) — bundles stored on a PVC at `/exports`.
+- **`storage: s3`** (O4.2) — bundles staged locally, verified, uploaded to S3/MinIO, then deleted from local disk.
 
 Evidence bundles are cryptographic compliance artifacts: signed Merkle anchors,
 chain inventory (or Merkle proofs for tenant bundles), and SHA256 file manifests.

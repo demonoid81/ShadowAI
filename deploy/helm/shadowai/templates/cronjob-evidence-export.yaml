@@ -108,6 +108,7 @@ spec:
                       --bucket "{{ .Values.evidenceExport.s3.bucket }}" \
                       --key "${S3_KEY}" \
                       --region "{{ .Values.evidenceExport.s3.region | default "us-east-1" }}" \
+                      --sse "{{ .Values.evidenceExport.s3.sse | default "AES256" }}" \
                       {{- if .Values.evidenceExport.s3.endpoint }}
                       --endpoint "{{ .Values.evidenceExport.s3.endpoint }}" \
                       {{- end }}
@@ -179,7 +180,12 @@ spec:
 
               securityContext:
                 allowPrivilegeEscalation: false
-                readOnlyRootFilesystem: false
+                # storage=s3: readOnlyRootFilesystem=true — all writes go to the
+                # explicit /tmp/evidence emptyDir mount; root FS is never written.
+                # storage=pvc: set false because the /exports PVC mount is owned by
+                # the volume driver, not the container root FS, but some CRI
+                # implementations still require writable root for PVC mounts.
+                readOnlyRootFilesystem: {{ eq .Values.evidenceExport.storage "s3" | ternary "true" "false" }}
                 capabilities:
                   drop: [ALL]
 
@@ -187,6 +193,12 @@ spec:
                 {{- if eq .Values.evidenceExport.storage "pvc" }}
                 - name: exports
                   mountPath: /exports
+                {{- end }}
+                {{- if eq .Values.evidenceExport.storage "s3" }}
+                # emptyDir for S3 staging: safe in read-only root FS environments
+                # and restricted PodSecurityPolicy / securityContext configurations.
+                - name: evidence-staging
+                  mountPath: /tmp/evidence
                 {{- end }}
                 {{- if .Values.evidenceExport.pubKeyFile }}
                 - name: pubkey
@@ -199,6 +211,11 @@ spec:
             - name: exports
               persistentVolumeClaim:
                 claimName: {{ include "shadowai.fullname" . }}-evidence-exports
+            {{- end }}
+            {{- if eq .Values.evidenceExport.storage "s3" }}
+            - name: evidence-staging
+              emptyDir:
+                sizeLimit: {{ .Values.evidenceExport.s3.stagingSize | default "2Gi" }}
             {{- end }}
             {{- if .Values.evidenceExport.pubKeyFile }}
             - name: pubkey

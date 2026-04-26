@@ -205,6 +205,10 @@ evidenceExport:
     accessKeyIDKey: s3AccessKeyID
     # secretAccessKeyKey: Secret key for AWS_SECRET_ACCESS_KEY.
     secretAccessKeyKey: s3SecretAccessKey
+    # stagingSize: emptyDir size limit for local bundle staging before S3 upload.
+    stagingSize: "2Gi"
+    # sse: Server-Side Encryption. "AES256" (default, AWS S3) or "none" (MinIO/custom S3).
+    sse: "AES256"
 
   # zip: create <output>.zip archive after export.
   zip: false

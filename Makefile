@@ -70,7 +70,14 @@ build:
 build-enterprise:
 	cd backend && CGO_ENABLED=0 go build -tags enterprise -ldflags="-w -s" ./...
 
-build-all: build build-enterprise
+# Explicit CLI build gate — these binaries are all baked into the runtime image.
+build-cli:
+	cd backend && for cmd in audit-verify audit-export-evidence evidence-upload migrate; do \
+		echo "Building $$cmd..."; \
+		CGO_ENABLED=0 go build -ldflags="-w -s" -o /dev/null ./cmd/$$cmd; \
+	done
+
+build-all: build build-enterprise build-cli
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Code quality
