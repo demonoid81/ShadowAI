@@ -117,6 +117,52 @@ func TestCheckCompliance_MultipleViolations(t *testing.T) {
 	}
 }
 
+// Fix 2: manifest_read_error must survive checkCompliance (no reset).
+func TestCheckCompliance_PreservesExistingViolations(t *testing.T) {
+	future := time.Now().UTC().Add(100 * 24 * time.Hour)
+	rec := BundleRecord{
+		Key:        "k.zip",
+		LockMode:   "COMPLIANCE",
+		RetainUntil: ptrTime(future),
+		// Pre-existing violation from fetchManifest.
+		Violations: []string{"manifest_read_error(parse zip: not a zip)"},
+	}
+	checkCompliance(&rec, true, 90)
+	if rec.Compliant {
+		t.Error("pre-existing manifest_read_error: want non-compliant")
+	}
+	found := false
+	for _, v := range rec.Violations {
+		if strings.Contains(v, "manifest_read_error") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("manifest_read_error wiped by checkCompliance: violations=%v", rec.Violations)
+	}
+}
+
+// Fix 3: minRetentionDays with nil RetainUntil → missing_retention violation.
+func TestCheckCompliance_MinRetentionDays_NilRetainUntil(t *testing.T) {
+	rec := BundleRecord{Key: "k.zip", LockMode: "COMPLIANCE"} // RetainUntil is nil
+	checkCompliance(&rec, false, 90)
+	if rec.Compliant {
+		t.Error("nil retain_until with min_retention_days=90: want violation")
+	}
+	if len(rec.Violations) == 0 || !strings.Contains(rec.Violations[0], "missing_retention") {
+		t.Errorf("want missing_retention violation, got %v", rec.Violations)
+	}
+}
+
+// Fix 3: minRetentionDays=0 with nil RetainUntil → compliant (policy disabled).
+func TestCheckCompliance_ZeroMinRetention_NilRetainUntil(t *testing.T) {
+	rec := BundleRecord{Key: "k.zip", LockMode: "COMPLIANCE"}
+	checkCompliance(&rec, false, 0)
+	if !rec.Compliant {
+		t.Errorf("min_retention_days=0, nil retain_until: want compliant, got %v", rec.Violations)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildReport
 // ---------------------------------------------------------------------------

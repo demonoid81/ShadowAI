@@ -72,14 +72,22 @@ func parseKeyInfo(key string) (bundleType, orgID string) {
 	return "unknown", ""
 }
 
-// checkCompliance sets Compliant and Violations on rec based on the policy.
+// checkCompliance appends policy violations to rec.Violations and sets Compliant.
+// It does NOT reset rec.Violations so that pre-existing errors (e.g. manifest_read_error
+// from fetchManifest) are preserved and always produce a non-compliant result.
 func checkCompliance(rec *BundleRecord, requireLock bool, minRetentionDays int) {
 	now := time.Now().UTC()
-	rec.Violations = nil
 
 	if requireLock && rec.LockMode == "" {
 		rec.Violations = append(rec.Violations, "missing_object_lock")
 	}
+
+	// Fix 3: when a minimum retention policy is set, absent retain_until is itself
+	// a violation — the object has no WORM protection of any kind.
+	if minRetentionDays > 0 && rec.RetainUntil == nil {
+		rec.Violations = append(rec.Violations, "missing_retention")
+	}
+
 	if rec.RetainUntil != nil {
 		if rec.RetainUntil.Before(now) {
 			rec.Violations = append(rec.Violations,

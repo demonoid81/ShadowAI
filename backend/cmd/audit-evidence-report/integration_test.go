@@ -588,3 +588,96 @@ func TestIntegration_Report_JSONFields(t *testing.T) {
 	}
 	t.Logf("integration/o4.4: JSON fields verified ✓")
 }
+
+// TestIntegration_Report_CorruptZip_ManifestError is a regression guard for Fix 2:
+// when --read-manifest is used and the zip is corrupt/not-a-zip, the manifest_read_error
+// must persist through checkCompliance and produce exit 1 (not silently exit 0).
+func TestIntegration_Report_CorruptZip_ManifestError(t *testing.T) {
+	setFakeCredentials(t)
+
+	// Serve non-zip content — simulates a bundle that was truncated or corrupted.
+	retain := time.Now().UTC().Add(100 * 24 * time.Hour)
+	objects := []s3Object{
+		{
+			key:          "shadowai/evidence/2026/04/26/global-20260426-020001.zip",
+			size:         12,
+			etag:         "corrupt",
+			lastModified: time.Date(2026, 4, 26, 2, 0, 0, 0, time.UTC),
+			lockMode:     "COMPLIANCE",
+			retainUntil:  &retain,
+			content:      []byte("not-a-zip!!"),
+		},
+	}
+	srv, _ := newFakeReporter(objects)
+	defer srv.Close()
+
+	var out, errBuf bytes.Buffer
+	code := run([]string{
+		"--bucket", "test-bucket",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--read-manifest",
+		"--format", "json",
+		"--timeout", "30",
+		// No --require-lock, no --min-retention-days: only violation is manifest error.
+	}, &out, &errBuf)
+
+	if code != exitViolation {
+		t.Fatalf("corrupt zip: exit=%d, want exitViolation(%d)\nstderr: %s\nstdout: %s",
+			code, exitViolation, errBuf.String(), out.String())
+	}
+
+	var report Report
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	if report.ViolationCount != 1 {
+		t.Errorf("ViolationCount=%d, want 1", report.ViolationCount)
+	}
+	viols := strings.Join(report.Bundles[0].Violations, ",")
+	if !strings.Contains(viols, "manifest_read_error") {
+		t.Errorf("manifest_read_error missing from violations: %q", viols)
+	}
+	t.Logf("integration/o4.4: corrupt zip → manifest_read_error preserved → exit 1 ✓")
+}
+
+// TestIntegration_Report_MissingRetention_MinRetentionDays is a regression guard for Fix 3:
+// a bundle with Object Lock mode but no retain_until must fail when --min-retention-days is set.
+func TestIntegration_Report_MissingRetention_MinRetentionDays(t *testing.T) {
+	setFakeCredentials(t)
+
+	objects := []s3Object{
+		{
+			key:          "shadowai/evidence/2026/04/26/global-20260426-020001.zip",
+			size:         1000,
+			etag:         "noretain",
+			lastModified: time.Date(2026, 4, 26, 2, 0, 0, 0, time.UTC),
+			lockMode:     "GOVERNANCE",
+			// retainUntil intentionally nil — mode set but no date
+		},
+	}
+	srv, _ := newFakeReporter(objects)
+	defer srv.Close()
+
+	var out, errBuf bytes.Buffer
+	code := run([]string{
+		"--bucket", "test-bucket",
+		"--endpoint", srv.URL,
+		"--force-path-style",
+		"--min-retention-days", "90",
+		"--format", "json",
+		"--timeout", "30",
+	}, &out, &errBuf)
+
+	if code != exitViolation {
+		t.Fatalf("missing retain_until: exit=%d, want exitViolation(%d)", code, exitViolation)
+	}
+
+	var report Report
+	json.Unmarshal(out.Bytes(), &report) //nolint:errcheck
+	viols := strings.Join(report.Bundles[0].Violations, ",")
+	if !strings.Contains(viols, "missing_retention") {
+		t.Errorf("want missing_retention violation, got %q", viols)
+	}
+	t.Logf("integration/o4.4: nil retain_until + min_retention_days → missing_retention ✓")
+}

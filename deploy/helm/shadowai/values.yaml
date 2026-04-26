@@ -305,6 +305,16 @@ evidenceAuditReport:
       cpu: 200m
       memory: 128Mi
 
+  # alerts: PrometheusRule configuration for the audit-report CronJob.
+  # Rendered inside the same PrometheusRule as evidenceExport alerts.
+  # Requires evidenceExport.alerts.enabled=true OR standalone rule (see below).
+  alerts:
+    enabled: true
+    severity: warning
+    # missingAfterSeconds: fire after N seconds without a successful schedule.
+    # Default 7 days (1× weekly period) — fires if Monday's run is skipped.
+    missingAfterSeconds: 604800
+
 serviceAccount:
   create: true
   annotations: {}

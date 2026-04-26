@@ -1,10 +1,12 @@
-{{- if .Values.evidenceExport.alerts.enabled }}
-# PR-O4.1: PrometheusRule for evidence export alerting.
+{{- $exportAlerts := .Values.evidenceExport.alerts.enabled }}
+{{- $auditAlerts := and .Values.evidenceAuditReport.enabled .Values.evidenceAuditReport.alerts.enabled }}
+{{- if or $exportAlerts $auditAlerts }}
+# PR-O4.1/O4.4: PrometheusRule for evidence pipeline alerting.
 # Requires kube-state-metrics (kube_job_status_failed, kube_cronjob_next_schedule_time).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ include "shadowai.fullname" . }}-evidence-export
+  name: {{ include "shadowai.fullname" . }}-evidence
   labels:
     {{- include "shadowai.labels" . | nindent 4 }}
     app.kubernetes.io/component: evidence-export
@@ -13,6 +15,8 @@ metadata:
     {{- end }}
 spec:
   groups:
+
+    {{- if $exportAlerts }}
     - name: shadowai.evidence-export
       interval: {{ .Values.evidenceExport.alerts.evaluationInterval | default "1m" }}
       rules:
@@ -75,6 +79,66 @@ spec:
         # kube_job_status_failed expression as EvidenceExportJobFailed, making it
         # indistinguishable from DB outages, PVC full, or config errors.
         # EvidenceExportJobFailed (above) is the canonical alert for any Job exit != 0.
-        # To distinguish verify failures from export failures, instrument the
-        # export script with a custom metric or structured exit code (O4.2 scope).
+    {{- end }}
+
+    {{- if $auditAlerts }}
+    - name: shadowai.evidence-audit-report
+      interval: 1m
+      rules:
+
+        # Alert: evidence-audit-report Job failed (exit 1 = violations found, exit 2 = S3 error).
+        # Retention drift or S3 connectivity failure both surface here.
+        - alert: EvidenceAuditReportJobFailed
+          expr: |
+            kube_job_status_failed{
+              namespace="{{ .Release.Namespace }}",
+              job_name=~"{{ include "shadowai.fullname" . }}-evidence-audit-report-.*"
+            } > 0
+          for: 1m
+          labels:
+            severity: {{ .Values.evidenceAuditReport.alerts.severity | default "warning" }}
+            team: platform
+          annotations:
+            summary: "ShadowAI evidence retention audit report job failed"
+            description: >-
+              The evidence-audit-report CronJob
+              {{ include "shadowai.fullname" . }}-evidence-audit-report failed.
+              Exit 1 means one or more bundles violate the Object Lock retention policy.
+              Exit 2 means an S3 access or configuration error.
+              Check Job logs for violation details.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-export#audit-report-failed"
+
+        # Alert: evidence-audit-report CronJob has not run within the configured window.
+        - alert: EvidenceAuditReportJobMissing
+          expr: |
+            absent(
+              kube_cronjob_status_last_schedule_time{
+                namespace="{{ .Release.Namespace }}",
+                cronjob="{{ include "shadowai.fullname" . }}-evidence-audit-report"
+              }
+            )
+            OR
+            (
+              time()
+              - kube_cronjob_status_last_schedule_time{
+                  namespace="{{ .Release.Namespace }}",
+                  cronjob="{{ include "shadowai.fullname" . }}-evidence-audit-report"
+                }
+            )
+            > {{ .Values.evidenceAuditReport.alerts.missingAfterSeconds | default 604800 }}
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "ShadowAI evidence audit-report CronJob has not run"
+            description: >-
+              The evidence-audit-report CronJob
+              {{ include "shadowai.fullname" . }}-evidence-audit-report
+              has not run for more than
+              {{ .Values.evidenceAuditReport.alerts.missingAfterSeconds | default 604800 | int | divf 3600 | floor }} hours.
+              Check CronJob suspension status.
+            runbook: "https://docs.shadowai.internal/runbooks/evidence-export#audit-report-missing"
+    {{- end }}
+
 {{- end }}
