@@ -59,9 +59,12 @@ type Hold struct {
 	ReleasedBy *string
 	IsActive   bool
 	// L5 scope fields. Default: ScopeType="whole_user" (backward compat).
-	ScopeType     string
-	ScopeDateFrom *time.Time
-	ScopeDateTo   *time.Time
+	ScopeType         string
+	ScopeDateFrom     *time.Time
+	ScopeDateTo       *time.Time
+	ScopeQueryJSON    string
+	ScopeQueryHash    string
+	ScopeQueryVersion int
 }
 
 // BulkItemResult — результат одной операции в bulk approve/reject.

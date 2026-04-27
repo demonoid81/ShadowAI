@@ -71,14 +71,53 @@ type AdminEventRow struct {
 
 // LegalHoldEventRow — minimal read model for legal_hold_events.
 type LegalHoldEventRow struct {
-	ID        string
-	HoldID    string
-	Action    string
-	NewStatus string
-	ActorID   string
-	CreatedAt time.Time
-	SeqNo     int64
-	RowHash   []byte
+	ID                string
+	HoldID            string
+	Action            string
+	NewStatus         string
+	ActorID           string
+	CreatedAt         time.Time
+	SeqNo             int64
+	RowHash           []byte
+	CanonicalVersion  string
+	OrgID             string
+	ScopeType         string
+	ScopeQueryHash    string
+	ScopeQueryVersion string
+	ScopeDateFrom     *time.Time
+	ScopeDateTo       *time.Time
+}
+
+func canonicalLegalHoldEvent(r LegalHoldEventRow) string {
+	if r.CanonicalVersion == "v2" {
+		return CanonicalLegalHoldEventV2(
+			r.ID, r.HoldID, r.Action, r.NewStatus, r.ActorID,
+			r.CreatedAt.UTC().Unix(),
+			r.ScopeType, r.ScopeQueryHash, r.ScopeQueryVersion,
+			canonicalTimeString(r.ScopeDateFrom),
+			canonicalTimeString(r.ScopeDateTo),
+			r.OrgID,
+		)
+	}
+	return CanonicalLegalHoldEvent(
+		r.ID, r.HoldID, r.Action, r.NewStatus, r.ActorID,
+		r.CreatedAt.UTC().Unix(),
+	)
+}
+
+func nullTimePtr(v sql.NullTime) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t := v.Time
+	return &t
+}
+
+func canonicalTimeString(v *time.Time) string {
+	if v == nil {
+		return ""
+	}
+	return v.UTC().Format(time.RFC3339Nano)
 }
 
 // VerifyAuditLogs верифицирует chain integrity для audit_logs.
@@ -256,7 +295,14 @@ func VerifyLegalHoldEvents(ctx context.Context, db *sql.DB, secret []byte) (Veri
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, hold_id::text, action, new_status,
-		        coalesce(actor_id::text,''), created_at, seq_no, row_hash
+		        coalesce(actor_id::text,''), created_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001'),
+		        coalesce(scope_type,''),
+		        coalesce(scope_query_hash,''),
+		        coalesce(scope_query_version::text,''),
+		        scope_date_from,
+		        scope_date_to
 		 FROM legal_hold_events
 		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
 		 ORDER BY seq_no`)
@@ -270,12 +316,18 @@ func VerifyLegalHoldEvents(ctx context.Context, db *sql.DB, secret []byte) (Veri
 
 	for rows.Next() {
 		var r LegalHoldEventRow
+		var scopeFrom, scopeTo sql.NullTime
 		if err := rows.Scan(
 			&r.ID, &r.HoldID, &r.Action, &r.NewStatus,
 			&r.ActorID, &r.CreatedAt, &r.SeqNo, &r.RowHash,
+			&r.CanonicalVersion, &r.OrgID, &r.ScopeType,
+			&r.ScopeQueryHash, &r.ScopeQueryVersion,
+			&scopeFrom, &scopeTo,
 		); err != nil {
 			return res, fmt.Errorf("verify legal_hold_events: scan: %w", err)
 		}
+		r.ScopeDateFrom = nullTimePtr(scopeFrom)
+		r.ScopeDateTo = nullTimePtr(scopeTo)
 		res.RowCount++
 
 		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
@@ -284,10 +336,7 @@ func VerifyLegalHoldEvents(ctx context.Context, db *sql.DB, secret []byte) (Veri
 			}
 		}
 
-		canonical := CanonicalLegalHoldEvent(
-			r.ID, r.HoldID, r.Action, r.NewStatus, r.ActorID,
-			r.CreatedAt.UTC().Unix(),
-		)
+		canonical := canonicalLegalHoldEvent(r)
 		if !Verify(prevHash, canonical, secret, r.RowHash) {
 			res.Breaks = append(res.Breaks, ChainBreak{
 				SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash,
@@ -991,7 +1040,14 @@ func VerifyLegalHoldEventsWithKeyring(ctx context.Context, db *sql.DB, keyring *
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, hold_id::text, action, new_status,
-		        coalesce(actor_id::text,''), created_at, seq_no, row_hash
+		        coalesce(actor_id::text,''), created_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001'),
+		        coalesce(scope_type,''),
+		        coalesce(scope_query_hash,''),
+		        coalesce(scope_query_version::text,''),
+		        scope_date_from,
+		        scope_date_to
 		 FROM legal_hold_events
 		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
 		 ORDER BY seq_no`)
@@ -1004,12 +1060,18 @@ func VerifyLegalHoldEventsWithKeyring(ctx context.Context, db *sql.DB, keyring *
 	var prevSeqNo int64
 	for rows.Next() {
 		var r LegalHoldEventRow
+		var scopeFrom, scopeTo sql.NullTime
 		if err := rows.Scan(
 			&r.ID, &r.HoldID, &r.Action, &r.NewStatus,
 			&r.ActorID, &r.CreatedAt, &r.SeqNo, &r.RowHash,
+			&r.CanonicalVersion, &r.OrgID, &r.ScopeType,
+			&r.ScopeQueryHash, &r.ScopeQueryVersion,
+			&scopeFrom, &scopeTo,
 		); err != nil {
 			return res, fmt.Errorf("verify legal_hold_events (keyring): scan: %w", err)
 		}
+		r.ScopeDateFrom = nullTimePtr(scopeFrom)
+		r.ScopeDateTo = nullTimePtr(scopeTo)
 		res.RowCount++
 
 		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
@@ -1026,10 +1088,7 @@ func VerifyLegalHoldEventsWithKeyring(ctx context.Context, db *sql.DB, keyring *
 			continue
 		}
 
-		canonical := CanonicalLegalHoldEvent(
-			r.ID, r.HoldID, r.Action, r.NewStatus, r.ActorID,
-			r.CreatedAt.UTC().Unix(),
-		)
+		canonical := canonicalLegalHoldEvent(r)
 		if !Verify(prevHash, canonical, secret, r.RowHash) {
 			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
 		}

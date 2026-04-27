@@ -93,12 +93,33 @@ func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, 
 		actorArg = actorID
 	}
 	orgID := domain.DefaultOrgID
+	scopeType := ScopeWholeUser
+	scopeQueryHash := ""
+	var scopeQueryVersion sql.NullInt64
+	var scopeFrom sql.NullTime
+	var scopeTo sql.NullTime
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(org_id::text, $2) FROM legal_holds WHERE id = $1`,
-		holdID, domain.DefaultOrgID).Scan(&orgID); err != nil {
+		`SELECT COALESCE(org_id::text, $2),
+		        COALESCE(scope_type, 'whole_user'),
+		        COALESCE(scope_query_hash, ''),
+		        CASE
+		            WHEN scope_type = 'query_scope' THEN scope_query_version
+		            ELSE NULL
+		        END,
+		        scope_date_from,
+		        scope_date_to
+		   FROM legal_holds
+		  WHERE id = $1`,
+		holdID, domain.DefaultOrgID).Scan(
+		&orgID, &scopeType, &scopeQueryHash, &scopeQueryVersion, &scopeFrom, &scopeTo,
+	); err != nil {
 		return fmt.Errorf("legalhold: resolve event org: %w", err)
 	}
-	canonical := chain.CanonicalLegalHoldEvent(eventID, holdID, action, newStatus, actorID, createdAt.Unix())
+	canonical := chain.CanonicalLegalHoldEventV2(
+		eventID, holdID, action, newStatus, actorID, createdAt.Unix(),
+		scopeType, scopeQueryHash, scopeQueryVersionString(scopeQueryVersion),
+		scopeCanonicalTime(scopeFrom), scopeCanonicalTime(scopeTo), orgID,
+	)
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableLegalHoldEvents, "legal_hold_events", chain.SeqLegalHoldEvents,
 		canonical, r.chainSecret)
@@ -113,10 +134,51 @@ func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, 
 	}
 	// INSERT с явным created_at ($8) — совпадает с canonical.
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO legal_hold_events (id, hold_id, action, new_status, actor_id, created_at, seq_no, row_hash, org_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		eventID, holdID, action, newStatus, actorArg, createdAt, seqArg, hashArg, orgID)
+		`INSERT INTO legal_hold_events (
+		    id, hold_id, action, new_status, actor_id, created_at, seq_no, row_hash,
+		    org_id, canonical_version, scope_type, scope_query_hash, scope_query_version,
+		    scope_date_from, scope_date_to
+		 )
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'v2', $10, $11, $12, $13, $14)`,
+		eventID, holdID, action, newStatus, actorArg, createdAt, seqArg, hashArg,
+		orgID, scopeType, nullStringArg(scopeQueryHash), nullIntArg(scopeQueryVersion),
+		nullTimeArg(scopeFrom), nullTimeArg(scopeTo))
 	return err
+}
+
+func scopeQueryVersionString(v sql.NullInt64) string {
+	if !v.Valid {
+		return ""
+	}
+	return fmt.Sprintf("%d", v.Int64)
+}
+
+func scopeCanonicalTime(v sql.NullTime) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.Time.UTC().Format(time.RFC3339Nano)
+}
+
+func nullStringArg(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+func nullIntArg(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
+}
+
+func nullTimeArg(v sql.NullTime) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Time
 }
 
 // Create вставляет новую pending запись (L2.3: 4-eyes).
@@ -147,6 +209,9 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 	if h.ScopeType == "" {
 		h.ScopeType = ScopeWholeUser
 	}
+	if h.ScopeType == ScopeQuery && h.ScopeQueryVersion == 0 {
+		h.ScopeQueryVersion = 1
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: begin tx: %w", err)
@@ -159,8 +224,9 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 
 	const q = `INSERT INTO legal_holds
 	    (target_user_id, case_ref, reason, created_by, status, is_active, org_id,
-	     scope_type, scope_date_from, scope_date_to)
-	    VALUES ($1, $2, $3, $4, 'pending', false, $5, $6, $7, $8)
+	     scope_type, scope_date_from, scope_date_to,
+	     scope_query_json, scope_query_hash, scope_query_version)
+	    VALUES ($1, $2, $3, $4, 'pending', false, $5, $6, $7, $8, $9::jsonb, $10, $11)
 	    RETURNING id, created_at`
 	var (
 		id        string
@@ -170,9 +236,11 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 	if h.CreatedBy != nil && *h.CreatedBy != "" {
 		actor = *h.CreatedBy
 	}
+	scopeQueryJSON, scopeQueryHash, scopeQueryVersion := holdScopeQueryArgs(h)
 	if err := tx.QueryRowContext(ctx, q,
 		h.TargetUserID, h.CaseRef, h.Reason, actor, orgID,
-		h.ScopeType, h.ScopeDateFrom, h.ScopeDateTo).
+		h.ScopeType, h.ScopeDateFrom, h.ScopeDateTo,
+		scopeQueryJSON, scopeQueryHash, scopeQueryVersion).
 		Scan(&id, &createdAt); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyActive
@@ -196,6 +264,17 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 	h.Status = StatusPending
 	h.IsActive = false
 	return h, nil
+}
+
+func holdScopeQueryArgs(h *Hold) (any, any, int) {
+	if h.ScopeType != ScopeQuery {
+		return nil, nil, 1
+	}
+	version := h.ScopeQueryVersion
+	if version == 0 {
+		version = 1
+	}
+	return h.ScopeQueryJSON, h.ScopeQueryHash, version
 }
 
 func (r *PGRepository) PreviewQueryScope(ctx context.Context, orgID, targetUserID string, compiled legalholdselector.Compiled) (QueryScopePreviewStats, error) {
@@ -343,23 +422,29 @@ func (r *PGRepository) Approve(ctx context.Context, id, approverID string) (*Hol
 	    RETURNING target_user_id, case_ref, reason, created_by,
 	              created_at, approved_at, approved_by, released_at,
 	              released_by, status, is_active,
-	              scope_type, scope_date_from, scope_date_to`
+	              scope_type, scope_date_from, scope_date_to,
+	              COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+	              COALESCE(scope_query_version,0)`
 	var (
-		h          Hold
-		createdBy2 sql.NullString
-		approvedAt sql.NullTime
-		approvedBy sql.NullString
-		releasedAt sql.NullTime
-		releasedBy sql.NullString
-		scopeType  sql.NullString
-		scopeFrom  sql.NullTime
-		scopeTo    sql.NullTime
+		h                 Hold
+		createdBy2        sql.NullString
+		approvedAt        sql.NullTime
+		approvedBy        sql.NullString
+		releasedAt        sql.NullTime
+		releasedBy        sql.NullString
+		scopeType         sql.NullString
+		scopeFrom         sql.NullTime
+		scopeTo           sql.NullTime
+		scopeQueryJSON    string
+		scopeQueryHash    string
+		scopeQueryVersion int
 	)
 	if err := tx.QueryRowContext(ctx, upd, id, approverID).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy2,
 		&h.CreatedAt, &approvedAt, &approvedBy, &releasedAt,
 		&releasedBy, &h.Status, &h.IsActive,
 		&scopeType, &scopeFrom, &scopeTo,
+		&scopeQueryJSON, &scopeQueryHash, &scopeQueryVersion,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: approve update: %w", err)
 	}
@@ -390,7 +475,7 @@ func (r *PGRepository) Approve(ctx context.Context, id, approverID string) (*Hol
 		s := releasedBy.String
 		h.ReleasedBy = &s
 	}
-	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo, scopeQueryJSON, scopeQueryHash, scopeQueryVersion)
 	return &h, nil
 }
 
@@ -442,23 +527,29 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 	    RETURNING target_user_id, case_ref, reason, created_by,
 	              created_at, approved_at, approved_by, released_at,
 	              released_by, status, is_active,
-	              scope_type, scope_date_from, scope_date_to`
+	              scope_type, scope_date_from, scope_date_to,
+	              COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+	              COALESCE(scope_query_version,0)`
 	var (
-		h          Hold
-		createdBy  sql.NullString
-		approvedAt sql.NullTime
-		approvedBy sql.NullString
-		releasedAt sql.NullTime
-		releasedBy sql.NullString
-		scopeType  sql.NullString
-		scopeFrom  sql.NullTime
-		scopeTo    sql.NullTime
+		h                 Hold
+		createdBy         sql.NullString
+		approvedAt        sql.NullTime
+		approvedBy        sql.NullString
+		releasedAt        sql.NullTime
+		releasedBy        sql.NullString
+		scopeType         sql.NullString
+		scopeFrom         sql.NullTime
+		scopeTo           sql.NullTime
+		scopeQueryJSON    string
+		scopeQueryHash    string
+		scopeQueryVersion int
 	)
 	if err := tx.QueryRowContext(ctx, upd, id, actor).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
 		&h.CreatedAt, &approvedAt, &approvedBy, &releasedAt,
 		&releasedBy, &h.Status, &h.IsActive,
 		&scopeType, &scopeFrom, &scopeTo,
+		&scopeQueryJSON, &scopeQueryHash, &scopeQueryVersion,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: reject update: %w", err)
 	}
@@ -489,7 +580,7 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 		s := releasedBy.String
 		h.ReleasedBy = &s
 	}
-	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo, scopeQueryJSON, scopeQueryHash, scopeQueryVersion)
 	return &h, nil
 }
 
@@ -545,19 +636,24 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
 	              approved_at, approved_by, released_at, released_by,
 	              release_requested_at, release_requested_by, status, is_active,
-	              scope_type, scope_date_from, scope_date_to`
+	              scope_type, scope_date_from, scope_date_to,
+	              COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+	              COALESCE(scope_query_version,0)`
 	var (
-		h            Hold
-		createdBy    sql.NullString
-		approvedAt   sql.NullTime
-		approvedBy   sql.NullString
-		releasedAt   sql.NullTime
-		releasedBy   sql.NullString
-		releaseReqAt sql.NullTime
-		releaseReqBy sql.NullString
-		scopeType    sql.NullString
-		scopeFrom    sql.NullTime
-		scopeTo      sql.NullTime
+		h                 Hold
+		createdBy         sql.NullString
+		approvedAt        sql.NullTime
+		approvedBy        sql.NullString
+		releasedAt        sql.NullTime
+		releasedBy        sql.NullString
+		releaseReqAt      sql.NullTime
+		releaseReqBy      sql.NullString
+		scopeType         sql.NullString
+		scopeFrom         sql.NullTime
+		scopeTo           sql.NullTime
+		scopeQueryJSON    string
+		scopeQueryHash    string
+		scopeQueryVersion int
 	)
 	if err := tx.QueryRowContext(ctx, q, id, actor).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
@@ -566,6 +662,7 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 		&releaseReqAt, &releaseReqBy,
 		&h.Status, &h.IsActive,
 		&scopeType, &scopeFrom, &scopeTo,
+		&scopeQueryJSON, &scopeQueryHash, &scopeQueryVersion,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: request_release update: %w", err)
 	}
@@ -604,7 +701,7 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 		s := releaseReqBy.String
 		h.ReleaseRequestedBy = &s
 	}
-	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo, scopeQueryJSON, scopeQueryHash, scopeQueryVersion)
 	return &h, nil
 }
 
@@ -659,7 +756,9 @@ func (r *PGRepository) ApproveRelease(ctx context.Context, id, approverID string
 	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
 	              approved_at, approved_by, released_at, released_by,
 	              release_requested_at, release_requested_by, status, is_active,
-	              scope_type, scope_date_from, scope_date_to`
+	              scope_type, scope_date_from, scope_date_to,
+	              COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+	              COALESCE(scope_query_version,0)`
 	h, err := r.scanHoldFull(tx.QueryRowContext(ctx, upd, id, actor))
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: approve_release update: %w", err)
@@ -711,7 +810,9 @@ func (r *PGRepository) RejectRelease(ctx context.Context, id, rejectorID string)
 	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
 	              approved_at, approved_by, released_at, released_by,
 	              release_requested_at, release_requested_by, status, is_active,
-	              scope_type, scope_date_from, scope_date_to`
+	              scope_type, scope_date_from, scope_date_to,
+	              COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+	              COALESCE(scope_query_version,0)`
 	h, err := r.scanHoldFull(tx.QueryRowContext(ctx, upd, id, actor))
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: reject_release update: %w", err)
@@ -742,7 +843,9 @@ func (r *PGRepository) PendingOlderThan(ctx context.Context, threshold time.Dura
 		    created_at, approved_at, approved_by,
 		    released_at, released_by, status, is_active,
 		    release_requested_at, release_requested_by,
-		    scope_type, scope_date_from, scope_date_to
+		    scope_type, scope_date_from, scope_date_to,
+		    COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+		    COALESCE(scope_query_version,0)
 		 FROM legal_holds
 		 WHERE status = 'pending' AND created_at < $1
 		 ORDER BY created_at ASC`, cutoff)
@@ -766,7 +869,9 @@ func (r *PGRepository) PendingOlderThanInOrg(ctx context.Context, threshold time
 		    created_at, approved_at, approved_by,
 		    released_at, released_by, status, is_active,
 		    release_requested_at, release_requested_by,
-		    scope_type, scope_date_from, scope_date_to
+		    scope_type, scope_date_from, scope_date_to,
+		    COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+		    COALESCE(scope_query_version,0)
 		 FROM legal_holds
 		 WHERE status = 'pending' AND created_at < $1 AND org_id = $2
 		 ORDER BY created_at ASC`, cutoff, orgID)
@@ -844,17 +949,20 @@ func (r *PGRepository) SLASignalExists(ctx context.Context, holdID string, statu
 // scanHoldFull — helper для single-row scans with all columns.
 func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 	var (
-		h            Hold
-		createdBy    sql.NullString
-		approvedAt   sql.NullTime
-		approvedBy   sql.NullString
-		releasedAt   sql.NullTime
-		releasedBy   sql.NullString
-		releaseReqAt sql.NullTime
-		releaseReqBy sql.NullString
-		scopeType    sql.NullString
-		scopeFrom    sql.NullTime
-		scopeTo      sql.NullTime
+		h                 Hold
+		createdBy         sql.NullString
+		approvedAt        sql.NullTime
+		approvedBy        sql.NullString
+		releasedAt        sql.NullTime
+		releasedBy        sql.NullString
+		releaseReqAt      sql.NullTime
+		releaseReqBy      sql.NullString
+		scopeType         sql.NullString
+		scopeFrom         sql.NullTime
+		scopeTo           sql.NullTime
+		scopeQueryJSON    string
+		scopeQueryHash    string
+		scopeQueryVersion int
 	)
 	if err := row.Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
@@ -863,6 +971,7 @@ func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 		&releaseReqAt, &releaseReqBy,
 		&h.Status, &h.IsActive,
 		&scopeType, &scopeFrom, &scopeTo,
+		&scopeQueryJSON, &scopeQueryHash, &scopeQueryVersion,
 	); err != nil {
 		return nil, err
 	}
@@ -894,7 +1003,7 @@ func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 		s := releaseReqBy.String
 		h.ReleaseRequestedBy = &s
 	}
-	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo, scopeQueryJSON, scopeQueryHash, scopeQueryVersion)
 	return &h, nil
 }
 
@@ -903,17 +1012,20 @@ func (r *PGRepository) scanHolds(rows *sql.Rows) ([]Hold, error) {
 	var out []Hold
 	for rows.Next() {
 		var (
-			h            Hold
-			createdBy    sql.NullString
-			approvedAt   sql.NullTime
-			approvedBy   sql.NullString
-			releasedAt   sql.NullTime
-			releasedBy   sql.NullString
-			releaseReqAt sql.NullTime
-			releaseReqBy sql.NullString
-			scopeType    sql.NullString
-			scopeFrom    sql.NullTime
-			scopeTo      sql.NullTime
+			h                 Hold
+			createdBy         sql.NullString
+			approvedAt        sql.NullTime
+			approvedBy        sql.NullString
+			releasedAt        sql.NullTime
+			releasedBy        sql.NullString
+			releaseReqAt      sql.NullTime
+			releaseReqBy      sql.NullString
+			scopeType         sql.NullString
+			scopeFrom         sql.NullTime
+			scopeTo           sql.NullTime
+			scopeQueryJSON    string
+			scopeQueryHash    string
+			scopeQueryVersion int
 		)
 		if err := rows.Scan(
 			&h.ID, &h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
@@ -921,6 +1033,7 @@ func (r *PGRepository) scanHolds(rows *sql.Rows) ([]Hold, error) {
 			&releasedAt, &releasedBy, &h.Status, &h.IsActive,
 			&releaseReqAt, &releaseReqBy,
 			&scopeType, &scopeFrom, &scopeTo,
+			&scopeQueryJSON, &scopeQueryHash, &scopeQueryVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -952,13 +1065,13 @@ func (r *PGRepository) scanHolds(rows *sql.Rows) ([]Hold, error) {
 			s := releaseReqBy.String
 			h.ReleaseRequestedBy = &s
 		}
-		applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
+		applyScopeScan(&h, scopeType, scopeFrom, scopeTo, scopeQueryJSON, scopeQueryHash, scopeQueryVersion)
 		out = append(out, h)
 	}
 	return out, rows.Err()
 }
 
-func applyScopeScan(h *Hold, scopeType sql.NullString, scopeFrom, scopeTo sql.NullTime) {
+func applyScopeScan(h *Hold, scopeType sql.NullString, scopeFrom, scopeTo sql.NullTime, scopeQueryJSON, scopeQueryHash string, scopeQueryVersion int) {
 	if scopeType.Valid && scopeType.String != "" {
 		h.ScopeType = scopeType.String
 	} else {
@@ -971,6 +1084,11 @@ func applyScopeScan(h *Hold, scopeType sql.NullString, scopeFrom, scopeTo sql.Nu
 	if scopeTo.Valid {
 		t := scopeTo.Time
 		h.ScopeDateTo = &t
+	}
+	if h.ScopeType == ScopeQuery {
+		h.ScopeQueryJSON = scopeQueryJSON
+		h.ScopeQueryHash = scopeQueryHash
+		h.ScopeQueryVersion = scopeQueryVersion
 	}
 }
 
@@ -1057,7 +1175,9 @@ func (r *PGRepository) List(ctx context.Context) ([]Hold, error) {
 		    created_at, approved_at, approved_by,
 		    released_at, released_by, status, is_active,
 		    release_requested_at, release_requested_by,
-		    scope_type, scope_date_from, scope_date_to
+		    scope_type, scope_date_from, scope_date_to,
+		    COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+		    COALESCE(scope_query_version,0)
 		 FROM legal_holds
 		 ORDER BY
 		    CASE status
@@ -1089,7 +1209,9 @@ func (r *PGRepository) ListInOrg(ctx context.Context, orgID string) ([]Hold, err
 		    created_at, approved_at, approved_by,
 		    released_at, released_by, status, is_active,
 		    release_requested_at, release_requested_by,
-		    scope_type, scope_date_from, scope_date_to
+		    scope_type, scope_date_from, scope_date_to,
+		    COALESCE(scope_query_json::text,''), COALESCE(scope_query_hash,''),
+		    COALESCE(scope_query_version,0)
 		 FROM legal_holds
 		 WHERE org_id = $1
 		 ORDER BY

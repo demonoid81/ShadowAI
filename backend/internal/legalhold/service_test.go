@@ -315,6 +315,50 @@ func TestCreateHold_MissingFields(t *testing.T) {
 	}
 }
 
+func TestCreateQueryScopedHold_NormalizesAndPreviews(t *testing.T) {
+	repo := &memRepo{previewStats: QueryScopePreviewStats{MatchedRows: 3}}
+	s := NewService(repo)
+	raw := []byte(`{
+		"v":1,
+		"all":[
+			{"field":"provider","op":"in","value":["openai","anthropic","openai"]},
+			{"field":"policy_action","op":"eq","value":"blocked"}
+		]
+	}`)
+
+	h, preview, err := s.CreateQueryScopedHoldInOrg(context.Background(), "u-1", "case-q", "query", "u-admin", "org-a", raw)
+	if err != nil {
+		t.Fatalf("CreateQueryScopedHoldInOrg: %v", err)
+	}
+	if h.ScopeType != ScopeQuery || h.ScopeQueryHash == "" || h.ScopeQueryJSON == "" || h.ScopeQueryVersion != 1 {
+		t.Fatalf("query scope fields = %+v", h)
+	}
+	if preview.SelectorHash != h.ScopeQueryHash || preview.MatchedRows != 3 {
+		t.Fatalf("preview = %+v, hold = %+v", preview, h)
+	}
+	if repo.previewOrgID != "org-a" || repo.previewUserID != "u-1" {
+		t.Fatalf("preview scope org=%q user=%q", repo.previewOrgID, repo.previewUserID)
+	}
+	if len(repo.holds) != 1 {
+		t.Fatalf("holds = %d, want 1", len(repo.holds))
+	}
+}
+
+func TestCreateQueryScopedHold_InvalidSelectorNoCreate(t *testing.T) {
+	repo := &memRepo{}
+	s := NewService(repo)
+	_, _, err := s.CreateQueryScopedHoldInOrg(
+		context.Background(), "u-1", "case-q", "query", "u-admin", "org-a",
+		[]byte(`{"v":1,"field":"org_id","op":"eq","value":"org-b"}`),
+	)
+	if !IsValidation(err) {
+		t.Fatalf("err = %v, want validation", err)
+	}
+	if len(repo.holds) != 0 {
+		t.Fatalf("holds = %d, want 0", len(repo.holds))
+	}
+}
+
 // TestCreateHold_DuplicateBlocking — второй hold на того же user'а
 // (в pending ИЛИ active) → ErrAlreadyActive. Под L2.3 index покрывает
 // оба статуса, чтобы admin не мог создать второй pending поверх

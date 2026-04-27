@@ -124,6 +124,17 @@ func CanonicalLegalHoldEvent(
 	)
 }
 
+func CanonicalLegalHoldEventV2(
+	id, holdID, action, newStatus, actorID string,
+	createdAtUnix int64,
+	scopeType, scopeQueryHash, scopeQueryVersion, scopeDateFrom, scopeDateTo, orgID string,
+) string {
+	return fmt.Sprintf("v2|%s|%s|%s|%s|%s|%d|%s|%s|%s|%s|%s|%s",
+		id, holdID, action, newStatus, actorID, createdAtUnix,
+		scopeType, scopeQueryHash, scopeQueryVersion, scopeDateFrom, scopeDateTo, orgID,
+	)
+}
+
 // CanonicalAuditPurgeRun возвращает v1 canonical для audit_purge_runs row.
 // Пишется ПЕРЕД самим purge в той же tx — доказывает что purge авторизован.
 func CanonicalAuditPurgeRun(

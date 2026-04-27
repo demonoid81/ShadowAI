@@ -178,13 +178,63 @@ func TestCreate_DateRangeScope_HappyPath(t *testing.T) {
 	}
 }
 
-func TestCreate_QueryScopeUnsupported(t *testing.T) {
+func TestCreate_QueryScopeSuccess(t *testing.T) {
 	h, repo, rec := setupHandler(t)
 	body := `{
 		"target_user_id":"u-target",
 		"case_ref":"case-query",
 		"reason":"query scope",
-		"scope_type":"query_scope"
+		"scope_type":"query_scope",
+		"scope_query":{
+			"v":1,
+			"all":[
+				{"field":"policy_action","op":"eq","value":"blocked"},
+				{"field":"provider","op":"in","value":["openai","anthropic"]}
+			]
+		}
+	}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+
+	h.Create(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 1 {
+		t.Fatalf("holds = %d, want 1", len(repo.holds))
+	}
+	hold := repo.holds[0]
+	if hold.ScopeType != ScopeQuery || hold.ScopeQueryHash == "" || hold.ScopeQueryJSON == "" || hold.ScopeQueryVersion != 1 {
+		t.Fatalf("query scope fields not stored: %+v", hold)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["selector_hash"] != hold.ScopeQueryHash || meta["scope_type"] != ScopeQuery {
+		t.Fatalf("metadata = %+v, hold hash = %s", meta, hold.ScopeQueryHash)
+	}
+	if _, ok := meta["scope_query"]; ok {
+		t.Fatalf("metadata must not contain raw selector: %+v", meta)
+	}
+	var resp holdResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SelectorHash != hold.ScopeQueryHash {
+		t.Fatalf("response selector_hash = %q, want %q", resp.SelectorHash, hold.ScopeQueryHash)
+	}
+}
+
+func TestCreate_QueryScopeInvalidSelector(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	body := `{
+		"target_user_id":"u-target",
+		"case_ref":"case-query",
+		"reason":"query scope",
+		"scope_type":"query_scope",
+		"scope_query":{"v":1,"field":"user_id","op":"eq","value":"u-other"}
 	}`
 	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
 	w := httptest.NewRecorder()
@@ -201,8 +251,8 @@ func TestCreate_QueryScopeUnsupported(t *testing.T) {
 		t.Fatalf("events = %d, want 1", len(rec.events))
 	}
 	meta := rec.events[0].Metadata.(map[string]any)
-	if meta["error_code"] != "unsupported_scope_type" {
-		t.Fatalf("error_code = %v, want unsupported_scope_type", meta["error_code"])
+	if meta["error_code"] != "invalid_scope_query" {
+		t.Fatalf("error_code = %v, want invalid_scope_query", meta["error_code"])
 	}
 }
 

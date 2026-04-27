@@ -193,6 +193,7 @@ type holdResponse struct {
 	ScopeType     string  `json:"scope_type"`
 	ScopeDateFrom *string `json:"scope_date_from,omitempty"`
 	ScopeDateTo   *string `json:"scope_date_to,omitempty"`
+	SelectorHash  string  `json:"selector_hash,omitempty"`
 }
 
 type previewRequest struct {
@@ -239,6 +240,59 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "target user not found"})
 		h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusNotFound, false, map[string]any{
 			"error_code": "target_user_not_found",
+		})
+		return
+	}
+
+	if req.ScopeType == ScopeQuery {
+		hold, preview, err := h.svc.CreateQueryScopedHoldInOrg(
+			r.Context(),
+			req.TargetUserID,
+			req.CaseRef,
+			req.Reason,
+			claims.UserID,
+			targetOrgID,
+			req.ScopeQuery,
+		)
+		if err != nil {
+			switch {
+			case IsAlreadyActive(err):
+				writeJSON(w, http.StatusConflict, errorResponse{Error: "user already has blocking hold"})
+				h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusConflict, false, map[string]any{
+					"error_code":    "already_blocking",
+					"case_ref_hash": h.tokens.Tokenize(req.CaseRef),
+					"scope_type":    ScopeQuery,
+				})
+			case IsInvalidSelector(err), IsValidation(err):
+				writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid scope query"})
+				h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+					"error_code": "invalid_scope_query",
+					"scope_type": ScopeQuery,
+				})
+			case IsNotConfigured(err):
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+				h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusServiceUnavailable, false, map[string]any{
+					"error_code": "not_configured",
+					"scope_type": ScopeQuery,
+				})
+			default:
+				writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "hold creation failed"})
+				h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusInternalServerError, false, map[string]any{
+					"error_code": "internal_error",
+					"scope_type": ScopeQuery,
+				})
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, toResponse(hold))
+		h.recordAdmin(r, "apply_hold_requested", hold.ID, http.StatusCreated, true, map[string]any{
+			"target_user_id": hold.TargetUserID,
+			"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
+			"status":         string(hold.Status),
+			"scope_type":     ScopeQuery,
+			"selector_hash":  preview.SelectorHash,
+			"matched_rows":   preview.MatchedRows,
 		})
 		return
 	}
@@ -934,6 +988,9 @@ func toResponse(h *Hold) holdResponse {
 	if h.ScopeDateTo != nil {
 		s := h.ScopeDateTo.UTC().Format(time.RFC3339)
 		r.ScopeDateTo = &s
+	}
+	if h.ScopeQueryHash != "" {
+		r.SelectorHash = h.ScopeQueryHash
 	}
 	return r
 }

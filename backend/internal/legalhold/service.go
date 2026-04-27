@@ -162,6 +162,64 @@ func (s *Service) CreateScopedHoldInOrg(ctx context.Context, targetUserID, caseR
 	return s.repo.Create(ctx, h)
 }
 
+func (s *Service) CreateQueryScopedHoldInOrg(ctx context.Context, targetUserID, caseRef, reason, createdBy, orgID string, raw json.RawMessage) (*Hold, QueryScopePreviewResult, error) {
+	if s == nil || s.repo == nil {
+		return nil, QueryScopePreviewResult{}, ErrNotConfigured
+	}
+	if strings.TrimSpace(targetUserID) == "" {
+		return nil, QueryScopePreviewResult{}, fmt.Errorf("target_user_id required: %w", ErrValidation)
+	}
+	if strings.TrimSpace(caseRef) == "" {
+		return nil, QueryScopePreviewResult{}, fmt.Errorf("case_ref required: %w", ErrValidation)
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, QueryScopePreviewResult{}, fmt.Errorf("reason required: %w", ErrValidation)
+	}
+	previewRepo, ok := s.repo.(QueryPreviewRepository)
+	if !ok {
+		return nil, QueryScopePreviewResult{}, ErrNotConfigured
+	}
+	compiled, err := legalholdselector.Compile(raw, legalholdselector.CompileOptions{ArgOffset: 3})
+	if err != nil {
+		return nil, QueryScopePreviewResult{}, fmt.Errorf("%w: %w", ErrValidation, err)
+	}
+	stats, err := previewRepo.PreviewQueryScope(ctx, orgID, targetUserID, compiled)
+	if err != nil {
+		return nil, QueryScopePreviewResult{}, err
+	}
+	h := &Hold{
+		OrgID:             orgID,
+		TargetUserID:      targetUserID,
+		CaseRef:           strings.TrimSpace(caseRef),
+		Reason:            strings.TrimSpace(reason),
+		ScopeType:         ScopeQuery,
+		ScopeQueryJSON:    string(compiled.NormalizedJSON),
+		ScopeQueryHash:    compiled.Hash,
+		ScopeQueryVersion: 1,
+	}
+	if createdBy != "" {
+		c := createdBy
+		h.CreatedBy = &c
+	}
+	var created *Hold
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		created, err = scoped.CreateInOrg(ctx, h, orgID)
+	} else {
+		created, err = s.repo.Create(ctx, h)
+	}
+	if err != nil {
+		return nil, QueryScopePreviewResult{}, err
+	}
+	return created, QueryScopePreviewResult{
+		ScopeType:       ScopeQuery,
+		SelectorHash:    compiled.Hash,
+		MatchedRows:     stats.MatchedRows,
+		OldestCreatedAt: stats.OldestCreatedAt,
+		NewestCreatedAt: stats.NewestCreatedAt,
+		Explanation:     "target user rows where " + compiled.Explanation,
+	}, nil
+}
+
 func (s *Service) PreviewQueryScopeInOrg(ctx context.Context, targetUserID, orgID string, raw json.RawMessage) (QueryScopePreviewResult, error) {
 	if s == nil || s.repo == nil {
 		return QueryScopePreviewResult{}, ErrNotConfigured

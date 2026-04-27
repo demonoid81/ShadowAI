@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAcquireSlot_DisabledWhenSecretEmpty — chain disabled path:
@@ -127,6 +128,70 @@ func TestCanonicalLegalHoldEvent_Format(t *testing.T) {
 	if len(parts) != 7 { // v1 + 6 fields
 		t.Errorf("expected 7 parts, got %d: %q", len(parts), c)
 	}
+}
+
+func TestCanonicalLegalHoldEventV2_FormatAndSensitivity(t *testing.T) {
+	c := CanonicalLegalHoldEventV2(
+		"id1", "hold1", "create", "pending", "actor1", 1714000000,
+		"query_scope", "abc123", "1", "", "", "org-a",
+	)
+	parts := strings.Split(c, "|")
+	if parts[0] != "v2" {
+		t.Fatalf("missing v2 prefix: %q", c)
+	}
+	if len(parts) != 13 { // v2 + 12 fields
+		t.Fatalf("expected 13 parts, got %d: %q", len(parts), c)
+	}
+	tampered := CanonicalLegalHoldEventV2(
+		"id1", "hold1", "create", "pending", "actor1", 1714000000,
+		"query_scope", "DIFFERENT", "1", "", "", "org-a",
+	)
+	if c == tampered {
+		t.Fatal("scope_query_hash must affect v2 canonical")
+	}
+}
+
+func TestLegalHoldEventCanonicalDispatch_V1V2(t *testing.T) {
+	createdAt := mustTimeUnix(1714000000)
+	v1 := LegalHoldEventRow{
+		ID: "evt-1", HoldID: "hold-1", Action: "create", NewStatus: "pending",
+		ActorID: "actor-1", CreatedAt: createdAt, CanonicalVersion: "v1",
+	}
+	if got := canonicalLegalHoldEvent(v1); !strings.HasPrefix(got, "v1|") {
+		t.Fatalf("v1 dispatch = %q", got)
+	}
+	v2 := v1
+	v2.CanonicalVersion = "v2"
+	v2.OrgID = "org-a"
+	v2.ScopeType = "query_scope"
+	v2.ScopeQueryHash = "hash-a"
+	v2.ScopeQueryVersion = "1"
+	if got := canonicalLegalHoldEvent(v2); !strings.HasPrefix(got, "v2|") || !strings.Contains(got, "|query_scope|hash-a|1|||org-a") {
+		t.Fatalf("v2 dispatch = %q", got)
+	}
+}
+
+func TestLegalHoldEventV2_TamperedScopeHashFails(t *testing.T) {
+	secret := []byte("chain-secret-32chars!!!!!!!!!!!")
+	row := LegalHoldEventRow{
+		ID: "evt-1", HoldID: "hold-1", Action: "create", NewStatus: "pending",
+		ActorID: "actor-1", CreatedAt: mustTimeUnix(1714000000),
+		CanonicalVersion:  "v2",
+		OrgID:             "org-a",
+		ScopeType:         "query_scope",
+		ScopeQueryHash:    "hash-a",
+		ScopeQueryVersion: "1",
+	}
+	hashes := buildChainedHashes(1, secret, []string{canonicalLegalHoldEvent(row)})
+	tampered := row
+	tampered.ScopeQueryHash = "hash-b"
+	if Verify(nil, canonicalLegalHoldEvent(tampered), secret, hashes[0]) {
+		t.Fatal("tampered scope_query_hash should break legal_hold_events v2 chain")
+	}
+}
+
+func mustTimeUnix(epoch int64) time.Time {
+	return time.Unix(epoch, 0).UTC()
 }
 
 // TestCostMicrocents — float USD → int64 microcents.
