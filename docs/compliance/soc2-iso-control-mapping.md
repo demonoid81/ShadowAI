@@ -130,11 +130,11 @@ it describes:
 | Field | Detail |
 |-------|--------|
 | **Control objective** | Personal data is retained only as long as required. Users can request erasure. Legal holds prevent premature deletion of data subject to regulatory or legal requirements. |
-| **Implementation** | Configurable retention (`AUDIT_RETENTION_DAYS`) with automatic purge. DSAR (right-to-erasure): `POST /auth/erase` initiates anonymization, creates `user_erasure_runs` record, respects active holds. Legal hold (L1-L4): 4-eyes apply workflow, active hold blocks DSAR, retention-aware purge skips held users, advisory-lock prevents concurrent conflicting operations. Hold state tracked in `legal_holds` table with actor, timestamps, and reason. |
+| **Implementation** | Configurable retention (`AUDIT_RETENTION_DAYS`) with automatic purge. DSAR (right-to-erasure): `POST /auth/erase` initiates anonymization, creates `user_erasure_runs` record, respects active/release-pending holds. Legal hold (L1-L6): 4-eyes apply/release workflow, active hold blocks DSAR, retention-aware purge skips held users or date ranges, advisory-lock prevents concurrent conflicting operations. Hold state tracked in `legal_holds` table with actor, timestamps, reason, and scope. |
 | **Evidence artifacts** | `user_erasure_runs` table. `legal_holds` table. `admin_event_logs` for hold apply/release events. Erasure audit trail in `audit_logs` via `policy_action='erasure_*'`. |
 | **Owner** | Platform / legal / DPO |
 | **Cadence** | Purge: configurable interval. Erasure: on-demand. Hold status: continuous. |
-| **Residual gap** | Legal hold scope is currently whole-user only (not date-range or query-scope). No automated SLA escalation for hold durations. Bulk hold approval/release is manual. No automated notification to DPO on DSAR submission. |
+| **Residual gap** | Legal hold date-range enforcement is implemented, but arbitrary query-scope selectors are not implemented. No automated SLA escalation for hold durations. No automated notification to DPO on DSAR submission. |
 
 ---
 
@@ -233,7 +233,7 @@ audit engagement.
 | Key rotation automation for chain secret / Ed25519 signing key | Evidence integrity | Manual runbook; W7 roadmap item |
 | Automated restore verification drill | Evidence integrity, A1.3 | Manual runbook; W7 roadmap item |
 | Independent second anchor sink | Evidence integrity | Single immudb sink; optional second sink in roadmap |
-| Legal hold scope beyond whole-user | Data retention | Date-range / query-scope holds in roadmap (L5) |
+| Legal hold query-scope beyond date-range | Data retention | Query-scope selector language remains roadmap; date-range enforcement is implemented in L6 |
 | SAST / SCA in CI | Change management | Not integrated; operator can add |
 | Two-person code review enforcement | Change management | GitHub branch protection: operator-managed |
 | Database-layer row-level security | Tenant isolation | Application-level only |

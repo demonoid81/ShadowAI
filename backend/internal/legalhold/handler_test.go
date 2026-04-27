@@ -144,6 +144,67 @@ func TestCreate_TenantAdmin_SameOrgSetsHoldOrg(t *testing.T) {
 	}
 }
 
+func TestCreate_DateRangeScope_HappyPath(t *testing.T) {
+	h, repo, _ := setupHandler(t)
+	body := `{
+		"target_user_id":"u-target",
+		"case_ref":"case-date",
+		"reason":"date range",
+		"scope_type":"date_range",
+		"scope_date_from":"2026-04-01T00:00:00Z",
+		"scope_date_to":"2026-04-30T23:59:59Z"
+	}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+
+	h.Create(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 1 {
+		t.Fatalf("holds = %d, want 1", len(repo.holds))
+	}
+	if repo.holds[0].ScopeType != ScopeDateRange {
+		t.Fatalf("scope = %q, want %q", repo.holds[0].ScopeType, ScopeDateRange)
+	}
+	var resp holdResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ScopeType != ScopeDateRange {
+		t.Fatalf("response scope = %q, want %q", resp.ScopeType, ScopeDateRange)
+	}
+}
+
+func TestCreate_QueryScopeUnsupported(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	body := `{
+		"target_user_id":"u-target",
+		"case_ref":"case-query",
+		"reason":"query scope",
+		"scope_type":"query_scope"
+	}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+
+	h.Create(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 0 {
+		t.Fatalf("holds = %d, want 0", len(repo.holds))
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "unsupported_scope_type" {
+		t.Fatalf("error_code = %v, want unsupported_scope_type", meta["error_code"])
+	}
+}
+
 // TestCreate_Unauthenticated.
 func TestCreate_Unauthenticated(t *testing.T) {
 	h, _, _ := setupHandler(t)

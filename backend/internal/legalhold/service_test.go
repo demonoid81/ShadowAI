@@ -944,6 +944,51 @@ func TestL5_WholeUserBackwardCompat(t *testing.T) {
 	}
 }
 
+func TestL6_CreateDateRangeHold_ValidatesAndStoresScope(t *testing.T) {
+	s := NewService(&memRepo{})
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 4, 30, 23, 59, 59, 0, time.UTC)
+
+	h, err := s.CreateScopedHoldInOrg(context.Background(),
+		"u-date", "case-date", "date range hold", "creator", "",
+		ScopeDateRange, &from, &to)
+	if err != nil {
+		t.Fatalf("CreateScopedHoldInOrg: %v", err)
+	}
+	if h.ScopeType != ScopeDateRange {
+		t.Fatalf("ScopeType = %q, want %q", h.ScopeType, ScopeDateRange)
+	}
+	if h.ScopeDateFrom == nil || !h.ScopeDateFrom.Equal(from) {
+		t.Fatalf("ScopeDateFrom = %v, want %v", h.ScopeDateFrom, from)
+	}
+	if h.ScopeDateTo == nil || !h.ScopeDateTo.Equal(to) {
+		t.Fatalf("ScopeDateTo = %v, want %v", h.ScopeDateTo, to)
+	}
+}
+
+func TestL6_CreateDateRangeHold_InvalidRangeRejected(t *testing.T) {
+	s := NewService(&memRepo{})
+	from := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+
+	_, err := s.CreateScopedHoldInOrg(context.Background(),
+		"u-date", "case-date", "date range hold", "creator", "",
+		ScopeDateRange, &from, &to)
+	if !IsInvalidScopeRange(err) {
+		t.Fatalf("err = %v, want invalid scope range", err)
+	}
+}
+
+func TestL6_CreateQueryScopeHold_Unsupported(t *testing.T) {
+	s := NewService(&memRepo{})
+	_, err := s.CreateScopedHoldInOrg(context.Background(),
+		"u-query", "case-query", "query scope hold", "creator", "",
+		ScopeQuery, nil, nil)
+	if !IsUnsupportedScope(err) {
+		t.Fatalf("err = %v, want unsupported scope", err)
+	}
+}
+
 // TestL5_AlreadyReleasePending_IsConflict — повторный RequestRelease
 // возвращает явный конфликт, не idempotent.
 func TestL5_AlreadyReleasePending_IsConflict(t *testing.T) {

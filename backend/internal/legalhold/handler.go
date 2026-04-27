@@ -168,24 +168,30 @@ func (h *Handler) resolveTargetOrg(ctx context.Context, targetUserID string, cla
 }
 
 type createRequest struct {
-	TargetUserID string `json:"target_user_id"`
-	CaseRef      string `json:"case_ref"`
-	Reason       string `json:"reason"`
+	TargetUserID  string     `json:"target_user_id"`
+	CaseRef       string     `json:"case_ref"`
+	Reason        string     `json:"reason"`
+	ScopeType     string     `json:"scope_type,omitempty"`
+	ScopeDateFrom *time.Time `json:"scope_date_from,omitempty"`
+	ScopeDateTo   *time.Time `json:"scope_date_to,omitempty"`
 }
 
 type holdResponse struct {
-	ID           string  `json:"id"`
-	TargetUserID string  `json:"target_user_id"`
-	CaseRef      string  `json:"case_ref"`
-	Reason       string  `json:"reason"`
-	Status       string  `json:"status"`
-	CreatedBy    *string `json:"created_by,omitempty"`
-	CreatedAt    string  `json:"created_at"`
-	ApprovedAt   *string `json:"approved_at,omitempty"`
-	ApprovedBy   *string `json:"approved_by,omitempty"`
-	ReleasedAt   *string `json:"released_at,omitempty"`
-	ReleasedBy   *string `json:"released_by,omitempty"`
-	IsActive     bool    `json:"is_active"`
+	ID            string  `json:"id"`
+	TargetUserID  string  `json:"target_user_id"`
+	CaseRef       string  `json:"case_ref"`
+	Reason        string  `json:"reason"`
+	Status        string  `json:"status"`
+	CreatedBy     *string `json:"created_by,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	ApprovedAt    *string `json:"approved_at,omitempty"`
+	ApprovedBy    *string `json:"approved_by,omitempty"`
+	ReleasedAt    *string `json:"released_at,omitempty"`
+	ReleasedBy    *string `json:"released_by,omitempty"`
+	IsActive      bool    `json:"is_active"`
+	ScopeType     string  `json:"scope_type"`
+	ScopeDateFrom *string `json:"scope_date_from,omitempty"`
+	ScopeDateTo   *string `json:"scope_date_to,omitempty"`
 }
 
 type errorResponse struct {
@@ -221,7 +227,17 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold, err := h.svc.CreateHoldInOrg(r.Context(), req.TargetUserID, req.CaseRef, req.Reason, claims.UserID, targetOrgID)
+	hold, err := h.svc.CreateScopedHoldInOrg(
+		r.Context(),
+		req.TargetUserID,
+		req.CaseRef,
+		req.Reason,
+		claims.UserID,
+		targetOrgID,
+		req.ScopeType,
+		req.ScopeDateFrom,
+		req.ScopeDateTo,
+	)
 	if err != nil {
 		// PR-L1.1: split error paths. Validation → 400 (generic);
 		// not configured → 503; already active/pending → 409; всё
@@ -242,6 +258,16 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})
 			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
 				"error_code": "validation_failed",
+			})
+		case IsUnsupportedScope(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported scope_type"})
+			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+				"error_code": "unsupported_scope_type",
+			})
+		case IsInvalidScopeRange(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid scope range"})
+			h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+				"error_code": "invalid_scope_range",
 			})
 		case IsNotConfigured(err):
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
@@ -265,6 +291,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		"target_user_id": hold.TargetUserID,
 		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
 		"status":         string(hold.Status),
+		"scope_type":     hold.ScopeType,
 	})
 }
 
@@ -792,6 +819,10 @@ func toResponse(h *Hold) holdResponse {
 		CreatedBy:    h.CreatedBy,
 		CreatedAt:    h.CreatedAt.UTC().Format(time.RFC3339),
 		IsActive:     h.IsActive,
+		ScopeType:    h.ScopeType,
+	}
+	if r.ScopeType == "" {
+		r.ScopeType = ScopeWholeUser
 	}
 	if h.ApprovedAt != nil {
 		s := h.ApprovedAt.UTC().Format(time.RFC3339)
@@ -806,6 +837,14 @@ func toResponse(h *Hold) holdResponse {
 	}
 	if h.ReleasedBy != nil {
 		r.ReleasedBy = h.ReleasedBy
+	}
+	if h.ScopeDateFrom != nil {
+		s := h.ScopeDateFrom.UTC().Format(time.RFC3339)
+		r.ScopeDateFrom = &s
+	}
+	if h.ScopeDateTo != nil {
+		s := h.ScopeDateTo.UTC().Format(time.RFC3339)
+		r.ScopeDateTo = &s
 	}
 	return r
 }

@@ -305,10 +305,10 @@ conflict: `already_active` → `already_blocking`. Changelog 1.17
 
 **[gap]** Что осталось вне scope:
 - Backup-freeze — infra-уровня, остаётся manual.
-- Hold-scope шире user-level (query-window, date-range hold) —
-  roadmap.
+- Hold-scope шире date-range (query-window/query-scope hold) —
+  roadmap. Date-range enforcement реализован в L6.
 - SLA / escalation engine на неподтверждённые pending — roadmap.
-- Bulk approvals — roadmap.
+- Bulk approvals/rejections реализованы в L5; UI для них остаётся out of scope.
 - UI beyond minimal API — roadmap.
 
 ### 5.3 Operator процедура (PR-L1 + PR-L2.3)
@@ -408,9 +408,9 @@ review.
 
 ### 5.5 Planned improvements (v2+)
 
-- Hold-scope шире: per-query, per-date-range, per-conversation.
-- 4-eyes workflow для release (симметрично apply — на сейчас
-  release делает один admin).
+- Hold-scope шире: per-query, per-conversation. Per-date-range enforcement
+  реализован в L6.
+- 4-eyes workflow для release реализован в L5.
 - SLA / escalation engine — pending hold старше N минут эскалируется
   legal-on-call.
 - Bulk approvals — approve нескольких pending за один call.
@@ -627,9 +627,9 @@ external tooling.
   active. Self-approval блокируется на repo-layer + handler
   возвращает 403 с `metadata.error_code=self_approval`
   (SIEM-alerting key). См. §5.2 / §5.3.
-- **[gap]** 4-eyes для release (на сейчас release делает один
-  admin) — §5.5 roadmap.
-- **[gap]** Hold-scope шире user-level (query-window, date-range) —
+- **[implemented]** 4-eyes для release — L5.
+- **[implemented]** Date-range hold enforcement — L6.
+- **[gap]** Hold-scope шире date-range (query-window/query-scope) —
   v2+ roadmap.
 - **[gap]** SLA / escalation на неподтверждённые pending —
   §5.5 roadmap.

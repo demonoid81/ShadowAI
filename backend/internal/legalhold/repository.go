@@ -141,7 +141,10 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 		return nil, fmt.Errorf("legalhold: repo not configured")
 	}
 	if orgID == "" {
-		orgID = "00000000-0000-0000-0000-000000000001"
+		orgID = domain.DefaultOrgID
+	}
+	if h.ScopeType == "" {
+		h.ScopeType = ScopeWholeUser
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -154,8 +157,9 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 	}
 
 	const q = `INSERT INTO legal_holds
-	    (target_user_id, case_ref, reason, created_by, status, is_active, org_id)
-	    VALUES ($1, $2, $3, $4, 'pending', false, $5)
+	    (target_user_id, case_ref, reason, created_by, status, is_active, org_id,
+	     scope_type, scope_date_from, scope_date_to)
+	    VALUES ($1, $2, $3, $4, 'pending', false, $5, $6, $7, $8)
 	    RETURNING id, created_at`
 	var (
 		id        string
@@ -165,7 +169,9 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 	if h.CreatedBy != nil && *h.CreatedBy != "" {
 		actor = *h.CreatedBy
 	}
-	if err := tx.QueryRowContext(ctx, q, h.TargetUserID, h.CaseRef, h.Reason, actor, orgID).
+	if err := tx.QueryRowContext(ctx, q,
+		h.TargetUserID, h.CaseRef, h.Reason, actor, orgID,
+		h.ScopeType, h.ScopeDateFrom, h.ScopeDateTo).
 		Scan(&id, &createdAt); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyActive
@@ -301,7 +307,8 @@ func (r *PGRepository) Approve(ctx context.Context, id, approverID string) (*Hol
 	    WHERE id = $1
 	    RETURNING target_user_id, case_ref, reason, created_by,
 	              created_at, approved_at, approved_by, released_at,
-	              released_by, status, is_active`
+	              released_by, status, is_active,
+	              scope_type, scope_date_from, scope_date_to`
 	var (
 		h          Hold
 		createdBy2 sql.NullString
@@ -309,11 +316,15 @@ func (r *PGRepository) Approve(ctx context.Context, id, approverID string) (*Hol
 		approvedBy sql.NullString
 		releasedAt sql.NullTime
 		releasedBy sql.NullString
+		scopeType  sql.NullString
+		scopeFrom  sql.NullTime
+		scopeTo    sql.NullTime
 	)
 	if err := tx.QueryRowContext(ctx, upd, id, approverID).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy2,
 		&h.CreatedAt, &approvedAt, &approvedBy, &releasedAt,
 		&releasedBy, &h.Status, &h.IsActive,
+		&scopeType, &scopeFrom, &scopeTo,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: approve update: %w", err)
 	}
@@ -344,6 +355,7 @@ func (r *PGRepository) Approve(ctx context.Context, id, approverID string) (*Hol
 		s := releasedBy.String
 		h.ReleasedBy = &s
 	}
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
 	return &h, nil
 }
 
@@ -394,7 +406,8 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 	    WHERE id = $1
 	    RETURNING target_user_id, case_ref, reason, created_by,
 	              created_at, approved_at, approved_by, released_at,
-	              released_by, status, is_active`
+	              released_by, status, is_active,
+	              scope_type, scope_date_from, scope_date_to`
 	var (
 		h          Hold
 		createdBy  sql.NullString
@@ -402,11 +415,15 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 		approvedBy sql.NullString
 		releasedAt sql.NullTime
 		releasedBy sql.NullString
+		scopeType  sql.NullString
+		scopeFrom  sql.NullTime
+		scopeTo    sql.NullTime
 	)
 	if err := tx.QueryRowContext(ctx, upd, id, actor).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
 		&h.CreatedAt, &approvedAt, &approvedBy, &releasedAt,
 		&releasedBy, &h.Status, &h.IsActive,
+		&scopeType, &scopeFrom, &scopeTo,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: reject update: %w", err)
 	}
@@ -437,6 +454,7 @@ func (r *PGRepository) Reject(ctx context.Context, id, rejectorID string) (*Hold
 		s := releasedBy.String
 		h.ReleasedBy = &s
 	}
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
 	return &h, nil
 }
 
@@ -491,7 +509,8 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 	    WHERE id = $1
 	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
 	              approved_at, approved_by, released_at, released_by,
-	              release_requested_at, release_requested_by, status, is_active`
+	              release_requested_at, release_requested_by, status, is_active,
+	              scope_type, scope_date_from, scope_date_to`
 	var (
 		h            Hold
 		createdBy    sql.NullString
@@ -501,6 +520,9 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 		releasedBy   sql.NullString
 		releaseReqAt sql.NullTime
 		releaseReqBy sql.NullString
+		scopeType    sql.NullString
+		scopeFrom    sql.NullTime
+		scopeTo      sql.NullTime
 	)
 	if err := tx.QueryRowContext(ctx, q, id, actor).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
@@ -508,6 +530,7 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 		&releasedAt, &releasedBy,
 		&releaseReqAt, &releaseReqBy,
 		&h.Status, &h.IsActive,
+		&scopeType, &scopeFrom, &scopeTo,
 	); err != nil {
 		return nil, fmt.Errorf("legalhold: request_release update: %w", err)
 	}
@@ -546,6 +569,7 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 		s := releaseReqBy.String
 		h.ReleaseRequestedBy = &s
 	}
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
 	return &h, nil
 }
 
@@ -599,7 +623,8 @@ func (r *PGRepository) ApproveRelease(ctx context.Context, id, approverID string
 	    WHERE id = $1
 	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
 	              approved_at, approved_by, released_at, released_by,
-	              release_requested_at, release_requested_by, status, is_active`
+	              release_requested_at, release_requested_by, status, is_active,
+	              scope_type, scope_date_from, scope_date_to`
 	h, err := r.scanHoldFull(tx.QueryRowContext(ctx, upd, id, actor))
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: approve_release update: %w", err)
@@ -650,7 +675,8 @@ func (r *PGRepository) RejectRelease(ctx context.Context, id, rejectorID string)
 	    WHERE id = $1
 	    RETURNING target_user_id, case_ref, reason, created_by, created_at,
 	              approved_at, approved_by, released_at, released_by,
-	              release_requested_at, release_requested_by, status, is_active`
+	              release_requested_at, release_requested_by, status, is_active,
+	              scope_type, scope_date_from, scope_date_to`
 	h, err := r.scanHoldFull(tx.QueryRowContext(ctx, upd, id, actor))
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: reject_release update: %w", err)
@@ -680,7 +706,8 @@ func (r *PGRepository) PendingOlderThan(ctx context.Context, threshold time.Dura
 		`SELECT id, target_user_id, case_ref, reason, created_by,
 		    created_at, approved_at, approved_by,
 		    released_at, released_by, status, is_active,
-		    release_requested_at, release_requested_by
+		    release_requested_at, release_requested_by,
+		    scope_type, scope_date_from, scope_date_to
 		 FROM legal_holds
 		 WHERE status = 'pending' AND created_at < $1
 		 ORDER BY created_at ASC`, cutoff)
@@ -703,7 +730,8 @@ func (r *PGRepository) PendingOlderThanInOrg(ctx context.Context, threshold time
 		`SELECT id, target_user_id, case_ref, reason, created_by,
 		    created_at, approved_at, approved_by,
 		    released_at, released_by, status, is_active,
-		    release_requested_at, release_requested_by
+		    release_requested_at, release_requested_by,
+		    scope_type, scope_date_from, scope_date_to
 		 FROM legal_holds
 		 WHERE status = 'pending' AND created_at < $1 AND org_id = $2
 		 ORDER BY created_at ASC`, cutoff, orgID)
@@ -725,6 +753,9 @@ func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 		releasedBy   sql.NullString
 		releaseReqAt sql.NullTime
 		releaseReqBy sql.NullString
+		scopeType    sql.NullString
+		scopeFrom    sql.NullTime
+		scopeTo      sql.NullTime
 	)
 	if err := row.Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
@@ -732,6 +763,7 @@ func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 		&releasedAt, &releasedBy,
 		&releaseReqAt, &releaseReqBy,
 		&h.Status, &h.IsActive,
+		&scopeType, &scopeFrom, &scopeTo,
 	); err != nil {
 		return nil, err
 	}
@@ -763,6 +795,7 @@ func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 		s := releaseReqBy.String
 		h.ReleaseRequestedBy = &s
 	}
+	applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
 	return &h, nil
 }
 
@@ -779,12 +812,16 @@ func (r *PGRepository) scanHolds(rows *sql.Rows) ([]Hold, error) {
 			releasedBy   sql.NullString
 			releaseReqAt sql.NullTime
 			releaseReqBy sql.NullString
+			scopeType    sql.NullString
+			scopeFrom    sql.NullTime
+			scopeTo      sql.NullTime
 		)
 		if err := rows.Scan(
 			&h.ID, &h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
 			&h.CreatedAt, &approvedAt, &approvedBy,
 			&releasedAt, &releasedBy, &h.Status, &h.IsActive,
 			&releaseReqAt, &releaseReqBy,
+			&scopeType, &scopeFrom, &scopeTo,
 		); err != nil {
 			return nil, err
 		}
@@ -816,9 +853,26 @@ func (r *PGRepository) scanHolds(rows *sql.Rows) ([]Hold, error) {
 			s := releaseReqBy.String
 			h.ReleaseRequestedBy = &s
 		}
+		applyScopeScan(&h, scopeType, scopeFrom, scopeTo)
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+func applyScopeScan(h *Hold, scopeType sql.NullString, scopeFrom, scopeTo sql.NullTime) {
+	if scopeType.Valid && scopeType.String != "" {
+		h.ScopeType = scopeType.String
+	} else {
+		h.ScopeType = ScopeWholeUser
+	}
+	if scopeFrom.Valid {
+		t := scopeFrom.Time
+		h.ScopeDateFrom = &t
+	}
+	if scopeTo.Valid {
+		t := scopeTo.Time
+		h.ScopeDateTo = &t
+	}
 }
 
 // checkExistsInactive — используется Release для различения
@@ -902,7 +956,9 @@ func (r *PGRepository) List(ctx context.Context) ([]Hold, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, target_user_id, case_ref, reason, created_by,
 		    created_at, approved_at, approved_by,
-		    released_at, released_by, status, is_active
+		    released_at, released_by, status, is_active,
+		    release_requested_at, release_requested_by,
+		    scope_type, scope_date_from, scope_date_to
 		 FROM legal_holds
 		 ORDER BY
 		    CASE status
@@ -915,41 +971,11 @@ func (r *PGRepository) List(ctx context.Context) ([]Hold, error) {
 		return nil, fmt.Errorf("legalhold: list: %w", err)
 	}
 	defer rows.Close()
-	var out []Hold
-	for rows.Next() {
-		var h Hold
-		var createdBy, approvedByN, releasedBy sql.NullString
-		var approvedAtN, releasedAt sql.NullTime
-		if err := rows.Scan(
-			&h.ID, &h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
-			&h.CreatedAt, &approvedAtN, &approvedByN,
-			&releasedAt, &releasedBy, &h.Status, &h.IsActive,
-		); err != nil {
-			return nil, err
-		}
-		if createdBy.Valid {
-			s := createdBy.String
-			h.CreatedBy = &s
-		}
-		if approvedAtN.Valid {
-			t := approvedAtN.Time
-			h.ApprovedAt = &t
-		}
-		if approvedByN.Valid {
-			s := approvedByN.String
-			h.ApprovedBy = &s
-		}
-		if releasedAt.Valid {
-			t := releasedAt.Time
-			h.ReleasedAt = &t
-		}
-		if releasedBy.Valid {
-			s := releasedBy.String
-			h.ReleasedBy = &s
-		}
-		out = append(out, h)
+	holds, err := r.scanHolds(rows)
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return holds, nil
 }
 
 func (r *PGRepository) ListInOrg(ctx context.Context, orgID string) ([]Hold, error) {
@@ -962,7 +988,9 @@ func (r *PGRepository) ListInOrg(ctx context.Context, orgID string) ([]Hold, err
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, target_user_id, case_ref, reason, created_by,
 		    created_at, approved_at, approved_by,
-		    released_at, released_by, status, is_active
+		    released_at, released_by, status, is_active,
+		    release_requested_at, release_requested_by,
+		    scope_type, scope_date_from, scope_date_to
 		 FROM legal_holds
 		 WHERE org_id = $1
 		 ORDER BY
@@ -976,42 +1004,14 @@ func (r *PGRepository) ListInOrg(ctx context.Context, orgID string) ([]Hold, err
 		return nil, fmt.Errorf("legalhold: list scoped: %w", err)
 	}
 	defer rows.Close()
-	var out []Hold
-	for rows.Next() {
-		var h Hold
-		var createdBy, approvedByN, releasedBy sql.NullString
-		var approvedAtN, releasedAt sql.NullTime
-		if err := rows.Scan(
-			&h.ID, &h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
-			&h.CreatedAt, &approvedAtN, &approvedByN,
-			&releasedAt, &releasedBy, &h.Status, &h.IsActive,
-		); err != nil {
-			return nil, err
-		}
-		h.OrgID = orgID
-		if createdBy.Valid {
-			s := createdBy.String
-			h.CreatedBy = &s
-		}
-		if approvedAtN.Valid {
-			t := approvedAtN.Time
-			h.ApprovedAt = &t
-		}
-		if approvedByN.Valid {
-			s := approvedByN.String
-			h.ApprovedBy = &s
-		}
-		if releasedAt.Valid {
-			t := releasedAt.Time
-			h.ReleasedAt = &t
-		}
-		if releasedBy.Valid {
-			s := releasedBy.String
-			h.ReleasedBy = &s
-		}
-		out = append(out, h)
+	out, err := r.scanHolds(rows)
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	for i := range out {
+		out[i].OrgID = orgID
+	}
+	return out, nil
 }
 
 // isUniqueViolation — PostgreSQL 23505 unique_violation. Используется

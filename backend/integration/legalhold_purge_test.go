@@ -183,6 +183,51 @@ func TestCoord_MixedUsers(t *testing.T) {
 	}
 }
 
+func TestCoord_DateRangeHold_ProtectsOnlyRowsInsideRange(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "date-range@example.com")
+	from := time.Now().UTC().Add(-72 * time.Hour)
+	to := time.Now().UTC().Add(-36 * time.Hour)
+	insideID := insertAuditLog(t, db, userID, from.Add(12*time.Hour))
+	outsideID := insertAuditLog(t, db, userID, from.Add(-12*time.Hour))
+
+	hRepo := legalhold.NewPGRepository(db)
+	hold, err := hRepo.Create(ctx, &legalhold.Hold{
+		TargetUserID:  userID,
+		CaseRef:       "DATE-1",
+		Reason:        "date range purge protection",
+		ScopeType:     legalhold.ScopeDateRange,
+		ScopeDateFrom: &from,
+		ScopeDateTo:   &to,
+	})
+	if err != nil {
+		t.Fatalf("create date-range hold: %v", err)
+	}
+	approverID := insertTestUser(t, db, "approver-date@example.com")
+	if _, err := hRepo.Approve(ctx, hold.ID, approverID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx, time.Now().UTC().Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 row вне date-range", deleted)
+	}
+	if !auditLogExists(t, db, insideID) {
+		t.Error("audit row внутри date-range был удалён")
+	}
+	if auditLogExists(t, db, outsideID) {
+		t.Error("audit row вне date-range не был удалён")
+	}
+}
+
 // TestCoord_PendingHold_DoesNotProtect — PR-L2.3 regression guard:
 // pending hold (без approve) НЕ защищает audit от purge. Только
 // status='active' участвует в purge-protection. Этот контракт
@@ -247,7 +292,11 @@ func TestCoord_ApprovedThenReleased_NoLongerProtects(t *testing.T) {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := hRepo.Release(ctx, hold.ID, approverID); err != nil {
-		t.Fatalf("release: %v", err)
+		t.Fatalf("request release: %v", err)
+	}
+	releaseApproverID := insertTestUser(t, db, "release-approver-rel@example.com")
+	if _, err := hRepo.ApproveRelease(ctx, hold.ID, releaseApproverID); err != nil {
+		t.Fatalf("approve release: %v", err)
 	}
 
 	// Released hold → purge удаляет row.
@@ -262,5 +311,44 @@ func TestCoord_ApprovedThenReleased_NoLongerProtects(t *testing.T) {
 	}
 	if auditLogExists(t, db, auditID) {
 		t.Error("released hold продолжает защищать audit")
+	}
+}
+
+func TestCoord_ReleasePendingStillProtects(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "release-pending-protects@example.com")
+	auditID := insertAuditLog(t, db, userID, time.Now().Add(-48*time.Hour))
+
+	hRepo := legalhold.NewPGRepository(db)
+	hold, err := hRepo.Create(ctx, &legalhold.Hold{
+		TargetUserID: userID,
+		CaseRef:      "REL-PEND-1",
+		Reason:       "release pending protects",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	approverID := insertTestUser(t, db, "approver-rel-pend@example.com")
+	if _, err := hRepo.Approve(ctx, hold.ID, approverID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := hRepo.Release(ctx, hold.ID, approverID); err != nil {
+		t.Fatalf("request release: %v", err)
+	}
+
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx, time.Now().Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 для release_pending hold", deleted)
+	}
+	if !auditLogExists(t, db, auditID) {
+		t.Error("release_pending hold не защитил audit row")
 	}
 }

@@ -297,7 +297,7 @@ evidenceAuditReport:
 | Governance cache multi-replica lag | Policy updates visible in ≤ 60s on all replicas | Reduce TTL or restart pod for immediate propagation; distributed invalidation is future work |
 | Streaming incremental: Anthropic/Gemini/Ollama sanitize | `EmitSanitized` is identity stub for non-OpenAI adapters (F7.5) | Do not enable incremental prod for these providers; full implementation in F7.6 |
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
-| Legal hold scope: whole-user only currently blocking | Date-range scope model exists in DB (L5) but not enforced in hold evaluation | L5 scope enforcement is future L6 work |
+| Legal hold query-scope not implemented | `whole_user` and `date_range` holds are enforced; arbitrary query-scope selectors are not implemented | Use `whole_user` or `date_range`; `query_scope` returns a validation error until a future selector-language PR |
 | BYOK: not implemented | Payload fields are plaintext (BYOK1 is design only) | See BYOK1 RFC; implement BYOK2 after customer requirement |
 | No formal pen test | Tenant isolation validated in code/smoke tests; no third-party assessment | Schedule before regulated-industry go-live |
 | Single immudb anchor sink | Second independent anchor sink improves WORM durability | W7 documents this as known gap |

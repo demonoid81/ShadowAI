@@ -74,17 +74,27 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 		return 0, err
 	}
 
-	// PR-L2.3: status = 'active' (4-eyes workflow). Pending holds
-	// НЕ защищают от purge — только approve'нутые. is_active
-	// сохраняется как derivative, но source of truth — status.
+	// PR-L6: whole_user защищает все строки target user. date_range
+	// защищает только строки, где created_at попадает в диапазон hold.
+	// release_pending остаётся юридически действующим до ApproveRelease.
 	const delQ = `DELETE FROM audit_logs WHERE id IN (
 	    SELECT id FROM audit_logs
 	    WHERE created_at < $1
 	      AND (user_id IS NULL
 	           OR NOT EXISTS (
 	             SELECT 1 FROM legal_holds lh
-	             WHERE lh.status = 'active'
+	             WHERE lh.status IN ('active', 'release_pending')
 	               AND lh.target_user_id = audit_logs.user_id
+	               AND (
+	                 lh.scope_type = 'whole_user'
+	                 OR (
+	                   lh.scope_type = 'date_range'
+	                   AND lh.scope_date_from IS NOT NULL
+	                   AND lh.scope_date_to IS NOT NULL
+	                   AND audit_logs.created_at >= lh.scope_date_from
+	                   AND audit_logs.created_at <= lh.scope_date_to
+	                 )
+	               )
 	           ))
 	    LIMIT $2
 	)`
@@ -150,10 +160,10 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 // user_id IS NULL rows остаются eligible — это post-DSAR scrubbed
 // rows, legal-hold к ним не может применяться (user'а нет).
 //
-// PR-L2.3: только approve'нутые (status='active') hold'ы защищают
-// от purge. Pending hold'ы НЕ participate в purge-protection — это
-// by design: creator не может создать hold + delete audit в один ход,
-// нужен второй admin.
+// PR-L6: whole_user hold защищает все строки target user. date_range
+// hold защищает только строки внутри диапазона. Pending hold'ы НЕ
+// участвуют в purge-protection — нужен второй admin. release_pending
+// остаётся юридически действующим до ApproveRelease.
 //
 // Race-window: под READ COMMITTED hold, applied после начала DELETE
 // statement'а, не виден ему — его rows могут удалиться. См. package
@@ -169,8 +179,18 @@ func (r *Repository) PurgeOlderThanRespectingHolds(ctx context.Context, cutoff t
 	      AND (user_id IS NULL
 	           OR NOT EXISTS (
 	             SELECT 1 FROM legal_holds lh
-	             WHERE lh.status = 'active'
+	             WHERE lh.status IN ('active', 'release_pending')
 	               AND lh.target_user_id = audit_logs.user_id
+	               AND (
+	                 lh.scope_type = 'whole_user'
+	                 OR (
+	                   lh.scope_type = 'date_range'
+	                   AND lh.scope_date_from IS NOT NULL
+	                   AND lh.scope_date_to IS NOT NULL
+	                   AND audit_logs.created_at >= lh.scope_date_from
+	                   AND audit_logs.created_at <= lh.scope_date_to
+	                 )
+	               )
 	           ))
 	    LIMIT $2
 	)`

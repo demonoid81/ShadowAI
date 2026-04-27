@@ -22,8 +22,10 @@ import (
 // Raw err.Error() строки НЕ должны уходить клиенту — admin event
 // metadata пишет machine-readable code вместо этого (PR-L1.1).
 var (
-	ErrValidation    = errors.New("legalhold: validation failed")
-	ErrNotConfigured = errors.New("legalhold: service not configured")
+	ErrValidation        = errors.New("legalhold: validation failed")
+	ErrNotConfigured     = errors.New("legalhold: service not configured")
+	ErrUnsupportedScope  = errors.New("legalhold: unsupported scope type")
+	ErrInvalidScopeRange = errors.New("legalhold: invalid scope range")
 )
 
 // IsValidation — handler helper для split validation vs runtime.
@@ -31,6 +33,10 @@ func IsValidation(err error) bool { return errors.Is(err, ErrValidation) }
 
 // IsNotConfigured — handler helper.
 func IsNotConfigured(err error) bool { return errors.Is(err, ErrNotConfigured) }
+
+func IsUnsupportedScope(err error) bool { return errors.Is(err, ErrUnsupportedScope) }
+
+func IsInvalidScopeRange(err error) bool { return errors.Is(err, ErrInvalidScopeRange) }
 
 // Repository — persistence interface для Service. Реализация —
 // PGRepository. Тесты mock'ают через in-memory impl.
@@ -93,6 +99,10 @@ func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason,
 }
 
 func (s *Service) CreateHoldInOrg(ctx context.Context, targetUserID, caseRef, reason, createdBy, orgID string) (*Hold, error) {
+	return s.CreateScopedHoldInOrg(ctx, targetUserID, caseRef, reason, createdBy, orgID, ScopeWholeUser, nil, nil)
+}
+
+func (s *Service) CreateScopedHoldInOrg(ctx context.Context, targetUserID, caseRef, reason, createdBy, orgID, scopeType string, scopeFrom, scopeTo *time.Time) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
@@ -105,11 +115,18 @@ func (s *Service) CreateHoldInOrg(ctx context.Context, targetUserID, caseRef, re
 	if strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("reason required: %w", ErrValidation)
 	}
+	scopeType, scopeFrom, scopeTo, err := normalizeScope(scopeType, scopeFrom, scopeTo)
+	if err != nil {
+		return nil, err
+	}
 	h := &Hold{
-		OrgID:        orgID,
-		TargetUserID: targetUserID,
-		CaseRef:      strings.TrimSpace(caseRef),
-		Reason:       strings.TrimSpace(reason),
+		OrgID:         orgID,
+		TargetUserID:  targetUserID,
+		CaseRef:       strings.TrimSpace(caseRef),
+		Reason:        strings.TrimSpace(reason),
+		ScopeType:     scopeType,
+		ScopeDateFrom: scopeFrom,
+		ScopeDateTo:   scopeTo,
 	}
 	if createdBy != "" {
 		c := createdBy
@@ -119,6 +136,31 @@ func (s *Service) CreateHoldInOrg(ctx context.Context, targetUserID, caseRef, re
 		return scoped.CreateInOrg(ctx, h, orgID)
 	}
 	return s.repo.Create(ctx, h)
+}
+
+func normalizeScope(scopeType string, from, to *time.Time) (string, *time.Time, *time.Time, error) {
+	scopeType = strings.TrimSpace(scopeType)
+	if scopeType == "" {
+		scopeType = ScopeWholeUser
+	}
+	switch scopeType {
+	case ScopeWholeUser:
+		return ScopeWholeUser, nil, nil, nil
+	case ScopeDateRange:
+		if from == nil || to == nil {
+			return "", nil, nil, fmt.Errorf("date_range requires scope_date_from and scope_date_to: %w", ErrInvalidScopeRange)
+		}
+		fromUTC := from.UTC()
+		toUTC := to.UTC()
+		if fromUTC.After(toUTC) {
+			return "", nil, nil, fmt.Errorf("scope_date_from must be <= scope_date_to: %w", ErrInvalidScopeRange)
+		}
+		return ScopeDateRange, &fromUTC, &toUTC, nil
+	case ScopeQuery:
+		return "", nil, nil, fmt.Errorf("query_scope unsupported in L6 v1: %w", ErrUnsupportedScope)
+	default:
+		return "", nil, nil, fmt.Errorf("unknown scope_type: %w", ErrUnsupportedScope)
+	}
 }
 
 // ReleaseHold — PR-L5 BREAKING CHANGE: теперь означает RequestRelease

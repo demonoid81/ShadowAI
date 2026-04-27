@@ -30,6 +30,12 @@ const (
 	StatusReleased       Status = "released"
 )
 
+const (
+	ScopeWholeUser = "whole_user"
+	ScopeDateRange = "date_range"
+	ScopeQuery     = "query_scope"
+)
+
 // Hold — одна запись в legal_holds.
 //
 // L2.3: Status, ApprovedAt, ApprovedBy.
