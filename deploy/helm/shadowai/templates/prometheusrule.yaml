@@ -1,7 +1,8 @@
 {{- $exportAlerts := .Values.evidenceExport.alerts.enabled }}
 {{- $auditAlerts := and .Values.evidenceAuditReport.enabled .Values.evidenceAuditReport.alerts.enabled }}
 {{- $collectionAlerts := and .Values.evidenceCollection.enabled .Values.evidenceCollection.alerts.enabled }}
-{{- if or $exportAlerts $auditAlerts $collectionAlerts }}
+{{- $legalHoldAlerts := .Values.legalHoldSLA.alerts.enabled }}
+{{- if or $exportAlerts $auditAlerts $collectionAlerts $legalHoldAlerts }}
 # PR-O4.1/O4.4: PrometheusRule for evidence pipeline alerting.
 # Requires kube-state-metrics (kube_job_status_failed, kube_cronjob_next_schedule_time).
 apiVersion: monitoring.coreos.com/v1
@@ -16,6 +17,56 @@ metadata:
     {{- end }}
 spec:
   groups:
+
+    {{- if $legalHoldAlerts }}
+    - name: shadowai.legal-hold-sla
+      interval: {{ .Values.legalHoldSLA.alerts.evaluationInterval | default "1m" }}
+      rules:
+
+        - alert: LegalHoldPendingSLABreached
+          expr: |
+            increase(shadowai_legal_hold_sla_breaches_total{status="pending"}[10m]) > 0
+          for: {{ .Values.legalHoldSLA.alerts.pendingFor | default "5m" }}
+          labels:
+            severity: {{ .Values.legalHoldSLA.alerts.severity | default "warning" }}
+            team: legal
+          annotations:
+            summary: "ShadowAI legal hold pending SLA breached"
+            description: >-
+              A pending legal hold exceeded LEGAL_HOLD_PENDING_SLA_HOURS.
+              Check admin_event_logs action=legal_hold_sla_breached and route
+              the item to the legal approver queue.
+            runbook: "https://docs.shadowai.internal/runbooks/privacy-ops#legal-hold-sla"
+
+        - alert: LegalHoldReleasePendingSLABreached
+          expr: |
+            increase(shadowai_legal_hold_sla_breaches_total{status="release_pending"}[10m]) > 0
+          for: {{ .Values.legalHoldSLA.alerts.releasePendingFor | default "5m" }}
+          labels:
+            severity: {{ .Values.legalHoldSLA.alerts.severity | default "warning" }}
+            team: legal
+          annotations:
+            summary: "ShadowAI legal hold release-pending SLA breached"
+            description: >-
+              A release_pending legal hold exceeded LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS.
+              Check admin_event_logs action=legal_hold_sla_breached and route
+              the item to a different release approver.
+            runbook: "https://docs.shadowai.internal/runbooks/privacy-ops#legal-hold-sla"
+
+        - alert: DSARBlockedByLegalHold
+          expr: |
+            increase(shadowai_dsar_dpo_signal_total{result="blocked_by_hold"}[10m]) > 0
+          for: {{ .Values.legalHoldSLA.alerts.dsarBlockedFor | default "1m" }}
+          labels:
+            severity: {{ .Values.legalHoldSLA.alerts.severity | default "warning" }}
+            team: legal
+          annotations:
+            summary: "ShadowAI DSAR blocked by legal hold"
+            description: >-
+              A DSAR erasure request was blocked by an active or release_pending
+              legal hold. Review admin_event_logs action=dsar_blocked_by_legal_hold.
+            runbook: "https://docs.shadowai.internal/runbooks/privacy-ops#dsar-blocked-by-legal-hold"
+    {{- end }}
 
     {{- if $exportAlerts }}
     - name: shadowai.evidence-export

@@ -742,6 +742,70 @@ func (r *PGRepository) PendingOlderThanInOrg(ctx context.Context, threshold time
 	return r.scanHolds(rows)
 }
 
+func (r *PGRepository) HoldsOlderThanStatus(ctx context.Context, status Status, cutoff time.Time) ([]Hold, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	var rows *sql.Rows
+	var err error
+	switch status {
+	case StatusPending:
+		rows, err = r.db.QueryContext(ctx,
+			`SELECT id, COALESCE(org_id::text,''), target_user_id, status, created_at, release_requested_at
+			 FROM legal_holds
+			 WHERE status = 'pending' AND created_at < $1
+			 ORDER BY created_at ASC`, cutoff)
+	case StatusReleasePending:
+		rows, err = r.db.QueryContext(ctx,
+			`SELECT id, COALESCE(org_id::text,''), target_user_id, status, created_at, release_requested_at
+			 FROM legal_holds
+			 WHERE status = 'release_pending'
+			   AND release_requested_at IS NOT NULL
+			   AND release_requested_at < $1
+			 ORDER BY release_requested_at ASC`, cutoff)
+	default:
+		return nil, fmt.Errorf("legalhold: unsupported SLA status %q", status)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: sla scan %s: %w", status, err)
+	}
+	defer rows.Close()
+	var holds []Hold
+	for rows.Next() {
+		var h Hold
+		var releaseReq sql.NullTime
+		if err := rows.Scan(&h.ID, &h.OrgID, &h.TargetUserID, &h.Status, &h.CreatedAt, &releaseReq); err != nil {
+			return nil, fmt.Errorf("legalhold: sla scan row: %w", err)
+		}
+		if releaseReq.Valid {
+			t := releaseReq.Time
+			h.ReleaseRequestedAt = &t
+		}
+		holds = append(holds, h)
+	}
+	return holds, rows.Err()
+}
+
+func (r *PGRepository) SLASignalExists(ctx context.Context, holdID string, status Status, bucket string) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, fmt.Errorf("legalhold: repo not configured")
+	}
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+		    SELECT 1 FROM admin_event_logs
+		    WHERE action = $1
+		      AND resource = 'legal_hold'
+		      AND target_id = $2
+		      AND metadata_json->>'status' = $3
+		      AND metadata_json->>'dedupe_bucket' = $4
+		)`, ActionLegalHoldSLABreached, holdID, string(status), bucket).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("legalhold: sla signal exists: %w", err)
+	}
+	return exists, nil
+}
+
 // scanHoldFull — helper для single-row scans with all columns.
 func (r *PGRepository) scanHoldFull(row *sql.Row) (*Hold, error) {
 	var (

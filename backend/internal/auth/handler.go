@@ -9,6 +9,7 @@ import (
 
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/domain"
+	"github.com/shadowai/backend/internal/metrics"
 )
 
 // optionalString distinguishes three JSON states for a string field:
@@ -56,10 +57,11 @@ type UserOrgLookup interface {
 }
 
 type Handler struct {
-	service    *Service
-	eraser     Eraser
-	adminAudit adminaudit.Recorder
-	userLookup UserOrgLookup
+	service              *Service
+	eraser               Eraser
+	adminAudit           adminaudit.Recorder
+	userLookup           UserOrgLookup
+	dsarDPOSignalEnabled bool
 }
 
 // NewHandler. Если eraser=nil, endpoint /users/{id}/erase вернёт
@@ -69,6 +71,11 @@ func NewHandler(service *Service, eraser Eraser, adminAudit adminaudit.Recorder)
 	if service != nil {
 		h.userLookup = service.GetRepo()
 	}
+	return h
+}
+
+func (h *Handler) WithDSARDPOSignals(enabled bool) *Handler {
+	h.dsarDPOSignalEnabled = enabled
 	return h
 }
 
@@ -592,6 +599,9 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		meta["blocked_by_hold"] = true
 	}
 	h.recordErase(r, claims.UserID, targetID, status, status < 400, meta)
+	if result.Status == ErasureHoldActive && h.dsarDPOSignalEnabled {
+		h.recordDSARDPOSignal(r, claims.UserID, targetID, targetOrgID)
+	}
 }
 
 func (h *Handler) resolveTargetUserOrg(ctx context.Context, targetID string, claims *Claims) (string, bool) {
@@ -636,6 +646,33 @@ func (h *Handler) recordErase(r *http.Request, actorID, targetID string, status 
 		Success:     success,
 		Metadata:    metadata,
 	})
+}
+
+func (h *Handler) recordDSARDPOSignal(r *http.Request, actorID, targetID, targetOrgID string) {
+	if h.adminAudit == nil {
+		metrics.RecordDSARDPOSignal("skipped_no_recorder")
+		return
+	}
+	actor := &actorID
+	h.adminAudit.Record(r.Context(), adminaudit.Event{
+		ActorUserID: actor,
+		Action:      "dsar_blocked_by_legal_hold",
+		Resource:    "dsar",
+		TargetID:    targetID,
+		Path:        r.URL.Path,
+		Method:      r.Method,
+		StatusCode:  http.StatusConflict,
+		Success:     false,
+		OrgID:       targetOrgID,
+		TargetOrgID: targetOrgID,
+		Metadata: map[string]any{
+			"event_code":        "dsar_blocked_by_legal_hold",
+			"status":            string(ErasureHoldActive),
+			"target_org_id":     targetOrgID,
+			"notification_type": "dpo_legal_review",
+		},
+	})
+	metrics.RecordDSARDPOSignal("blocked_by_hold")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

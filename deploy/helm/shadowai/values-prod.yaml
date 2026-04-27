@@ -26,6 +26,10 @@ config:
   AUDIT_RETENTION_DAYS: "90"
   AUDIT_PURGE_INTERVAL: "24h"
   AUDIT_PURGE_CHUNK_SIZE: "1000"
+  LEGAL_HOLD_PENDING_SLA_HOURS: "24"
+  LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS: "24"
+  LEGAL_HOLD_SLA_SCAN_INTERVAL: "1h"
+  DSAR_DPO_SIGNAL_ENABLED: "true"
 
   # Streaming: buffered is the safe production default.
   # Do NOT enable incremental until the 30-day proof window is complete.
@@ -167,6 +171,11 @@ evidenceExport:
     missingAfterSeconds: 172800   # 48h = 2× daily schedule
     ruleLabels:
       prometheus: kube-prometheus  # adjust to match your Prometheus operator selector
+
+legalHoldSLA:
+  alerts:
+    enabled: true
+    severity: warning
 
 # PR-O4.4: Weekly retention posture audit report.
 # REQUIRES storage: s3 — the audit report reads S3 List+HeadObject.

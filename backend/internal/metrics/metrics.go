@@ -281,6 +281,21 @@ var (
 		Name: "shadowai_semantic_v2_inspect_total",
 		Help: "Semantic V2 inspection outcomes: allow|flag|block|would_block|fail_open. would_block = blocked similarity in shadow_only mode (downgraded to flag).",
 	}, []string{"result"})
+
+	LegalHoldSLABreachesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_legal_hold_sla_breaches_total",
+		Help: "Legal hold SLA breach signals emitted by status. Labels are status only; no PII.",
+	}, []string{"status"})
+
+	LegalHoldSLAOldestAgeHours = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "shadowai_legal_hold_sla_oldest_age_hours",
+		Help: "Oldest legal hold age in hours among current SLA-breach candidates by status.",
+	}, []string{"status"})
+
+	DSARDPOSignalTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "shadowai_dsar_dpo_signal_total",
+		Help: "DSAR DPO/legal signal events by result. No user or tenant labels.",
+	}, []string{"result"})
 )
 
 // RecordAuditQueue обновляет gauge очереди. Вызывать из периодического
@@ -376,6 +391,18 @@ func RecordJudgeRequest(provider, threatType string) {
 // similarity to a flag; distinguishable from natural "flag" (between thresholds).
 func RecordSemanticV2Inspect(result string) {
 	SemanticV2InspectTotal.WithLabelValues(result).Inc()
+}
+
+func RecordLegalHoldSLABreach(status string) {
+	LegalHoldSLABreachesTotal.WithLabelValues(status).Inc()
+}
+
+func SetLegalHoldSLAOldestAge(status string, ageHours float64) {
+	LegalHoldSLAOldestAgeHours.WithLabelValues(status).Set(ageHours)
+}
+
+func RecordDSARDPOSignal(result string) {
+	DSARDPOSignalTotal.WithLabelValues(result).Inc()
 }
 
 // RecordJudgeFail инкрементирует счётчик transport/HTTP/build ошибок.

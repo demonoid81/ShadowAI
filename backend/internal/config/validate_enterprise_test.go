@@ -47,6 +47,46 @@ func TestValidateStartupConfig_LegalHoldSecretOK(t *testing.T) {
 	}
 }
 
+func TestValidateStartupConfig_LegalHoldSLA_InvalidValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		patch func(*Config)
+		want  string
+	}{
+		{
+			name: "pending threshold",
+			patch: func(c *Config) {
+				c.LegalHoldPendingSLAHours = 0
+			},
+			want: "LEGAL_HOLD_PENDING_SLA_HOURS",
+		},
+		{
+			name: "release threshold",
+			patch: func(c *Config) {
+				c.LegalHoldReleasePendingSLAHours = 0
+			},
+			want: "LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS",
+		},
+		{
+			name: "scan interval",
+			patch: func(c *Config) {
+				c.LegalHoldSLAScanInterval = 0
+			},
+			want: "LEGAL_HOLD_SLA_SCAN_INTERVAL",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := prodConfigBase()
+			tt.patch(cfg)
+			err := cfg.ValidateStartupConfig()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %s error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 // TestValidateStartupConfig_LegalHoldSecret_DevIgnored — dev env
 // принимает пустой secret (fallback на unkeyed + warning).
 func TestValidateStartupConfig_LegalHoldSecret_DevIgnored(t *testing.T) {

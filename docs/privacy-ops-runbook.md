@@ -1,7 +1,7 @@
 # ShadowAI — Privacy / Retention / DSAR / Legal-Hold / Incident Runbook
 
-**Версия документа:** 1.19
-**Дата:** 2026-04-19
+**Версия документа:** 1.20
+**Дата:** 2026-04-27
 **Audience:** ops, compliance, legal, incident responders.
 **Покрывает:** ShadowAI backend после merge PR-A/B/C/D/D.1.
 **Jurisdiction baseline:** GDPR (EU). Короткие отличия для CCPA (US/CA)
@@ -296,6 +296,13 @@ holds с 4-eyes approver workflow.
   - `release_hold`         — release (active → released).
   - `read`                 — list.
   Все events mirror'ятся в SIEM (PR-S1).
+- PR-L7 добавляет operational signals:
+  - `legal_hold_sla_breached` — scheduler-событие, если hold слишком
+    долго находится в `pending` или `release_pending`.
+  - `dsar_blocked_by_legal_hold` — DPO-facing сигнал, если DSAR
+    заблокирован active/release-pending legal hold.
+  Оба сигнала пишутся в `admin_event_logs`, mirror'ятся в SIEM и
+  имеют Prometheus alerts.
 
 **[breaking, SIEM]** PR-L2.3 переименовал `action=apply_hold` →
 `apply_hold_requested`. SIEM-rules и дашборды, которые matched
@@ -303,11 +310,13 @@ holds с 4-eyes approver workflow.
 conflict: `already_active` → `already_blocking`. Changelog 1.17
 фиксирует migration path.
 
-**[gap]** Что осталось вне scope:
+**[gap] / [operational]** Что осталось вне scope или требует внешней
+интеграции:
 - Backup-freeze — infra-уровня, остаётся manual.
 - Hold-scope шире date-range (query-window/query-scope hold) —
   roadmap. Date-range enforcement реализован в L6.
-- SLA / escalation engine на неподтверждённые pending — roadmap.
+- External email/webhook/ticket-routing на основе L7 SLA/DPO signals —
+  operator-owned integration.
 - Bulk approvals/rejections реализованы в L5; UI для них остаётся out of scope.
 - UI beyond minimal API — roadmap.
 
@@ -406,13 +415,70 @@ review.
 обязан **не исполнять** erasure вручную через DB в обход endpoint —
 это нарушает audit trail.
 
-### 5.5 Planned improvements (v2+)
+<a id="legal-hold-sla"></a>
+
+### 5.5 Legal Hold SLA Signals (PR-L7)
+
+**[implemented]** Scheduler периодически сканирует legal holds и
+пишет `admin_event_logs` event `action=legal_hold_sla_breached`,
+если:
+
+- `status=pending` старше `LEGAL_HOLD_PENDING_SLA_HOURS`;
+- `status=release_pending` и `release_requested_at` старше
+  `LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS`.
+
+Сигнал dedupe'ится по hold/status/UTC-day через metadata
+`dedupe_bucket`, чтобы Prometheus/SIEM не получали бесконечный spam
+для одного и того же hold. Scheduler настраивается:
+
+- `LEGAL_HOLD_PENDING_SLA_HOURS` — default `24`;
+- `LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS` — default `24`;
+- `LEGAL_HOLD_SLA_SCAN_INTERVAL` — default `1h`.
+
+Prometheus signals:
+
+- `shadowai_legal_hold_sla_breaches_total{status="pending"}`;
+- `shadowai_legal_hold_sla_breaches_total{status="release_pending"}`;
+- `shadowai_legal_hold_sla_oldest_age_hours{status="..."}`.
+
+Operator action:
+
+1. Найти hold по `target_id` в alert/admin event.
+2. Проверить `metadata.status`, `age_hours`, `threshold_hours`.
+3. Для `pending` — назначить независимого approver'а или reject.
+4. Для `release_pending` — approve/reject release request.
+5. Зафиксировать external legal ticket / DPO case reference вручную,
+   если организация требует case-management outside ShadowAI.
+
+<a id="dsar-blocked-by-legal-hold"></a>
+
+### 5.6 DSAR Blocked By Legal Hold Signal (PR-L7)
+
+**[implemented]** Если `POST /api/users/{id}/erase` возвращает 409 из-за
+active или release-pending legal hold, handler дополнительно пишет
+`admin_event_logs` event:
+
+- `action=dsar_blocked_by_legal_hold`;
+- `resource=dsar`;
+- `status_code=409`;
+- metadata: `event_code`, `status`, `target_org_id`,
+  `notification_type=dpo_signal`.
+
+Метрика:
+
+- `shadowai_dsar_dpo_signal_total{result="blocked_by_hold"}`.
+
+Это не отправляет email напрямую. Сигнал предназначен для SIEM,
+Prometheus alerting и downstream workflow engine, который уведомляет
+DPO/legal team по локальным правилам организации.
+
+### 5.7 Planned improvements (v2+)
 
 - Hold-scope шире: per-query, per-conversation. Per-date-range enforcement
   реализован в L6.
 - 4-eyes workflow для release реализован в L5.
-- SLA / escalation engine — pending hold старше N минут эскалируется
-  legal-on-call.
+- External SLA routing — email/webhook/ticket creation на основе L7
+  admin/SIEM/Prometheus signals.
 - Bulk approvals — approve нескольких pending за один call.
 - Auto-release по external signal (webhook от legal CMS).
 - UI для approver queue (на сейчас — только API).
@@ -631,8 +697,9 @@ external tooling.
 - **[implemented]** Date-range hold enforcement — L6.
 - **[gap]** Hold-scope шире date-range (query-window/query-scope) —
   v2+ roadmap.
-- **[gap]** SLA / escalation на неподтверждённые pending —
-  §5.5 roadmap.
+- **[implemented]** SLA / DPO signals для legal hold и DSAR block —
+  L7, см. §5.5 / §5.6. External email/webhook/ticket-routing
+  остаются operator-owned integration.
 
 ### 8.3 External storage erasure
 
@@ -736,6 +803,13 @@ external tooling.
 
 ## 9. Change log
 
+- **1.20 (2026-04-27)** — PR-L7: legal hold SLA и DPO-facing
+  signals. Scheduler пишет `legal_hold_sla_breached` для
+  `pending` / `release_pending` holds старше настроенных порогов.
+  DSAR block из-за active/release-pending hold пишет
+  `dsar_blocked_by_legal_hold`. Оба события попадают в
+  `admin_event_logs`, SIEM mirror и Prometheus. External email,
+  webhook и ticket-routing остаются operator-owned integration.
 - **1.19 (2026-04-23)** — PR-F7.3: structured streaming audit outcomes.
   Migration `backend/migrations/009_add_streaming_audit_outcomes.sql`
   добавляет 3 колонки в `audit_logs`: `outcome`, `fallback_reason`,

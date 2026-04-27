@@ -96,6 +96,11 @@ type Config struct {
 	// fallback на unkeyed hash с warning-логом.
 	LegalHoldTokenSecret string // LEGAL_HOLD_TOKEN_SECRET
 
+	LegalHoldPendingSLAHours        int           // LEGAL_HOLD_PENDING_SLA_HOURS
+	LegalHoldReleasePendingSLAHours int           // LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS
+	LegalHoldSLAScanInterval        time.Duration // LEGAL_HOLD_SLA_SCAN_INTERVAL
+	DSARDPOSignalEnabled            bool          // DSAR_DPO_SIGNAL_ENABLED
+
 	// Firewall
 	FirewallEnabled              bool
 	FirewallPIEnabled            bool
@@ -133,7 +138,7 @@ type Config struct {
 	// (block downgrade → flag). Рекомендуется для initial rollout: включить
 	// с SHADOW_ONLY=true, дать стабилизироваться метрике
 	// semantic_v2_inspect_total, затем снять SHADOW_ONLY для enforcement.
-	FirewallSAV2ShadowOnly bool
+	FirewallSAV2ShadowOnly     bool
 	FirewallEmbeddingProvider  string
 	FirewallEmbeddingEndpoint  string
 	FirewallEmbeddingModel     string
@@ -171,7 +176,7 @@ type Config struct {
 	AuditImmuDBAddr     string
 	AuditImmuDBUsername string // AUDIT_IMMUDB_USERNAME
 	AuditImmuDBPassword string // AUDIT_IMMUDB_PASSWORD
-	AuditImmuDBDatabase  string // AUDIT_IMMUDB_DATABASE
+	AuditImmuDBDatabase string // AUDIT_IMMUDB_DATABASE
 	// AUDIT_IMMUDB_API_PREFIX — REST API base path override for immugw_v1 profile only.
 	// Default (empty): "/v1/immurestproxy". Ignored when AUDIT_IMMUDB_REST_PROFILE=immudb_v2
 	// (that profile uses fixed absolute /api/v2/... paths).
@@ -246,24 +251,24 @@ type Config struct {
 	// PR-E1: OIDC Enterprise Auth v1.
 	// Enterprise-only; wired only under -tags enterprise.
 	// When OIDC_ENABLED=false all these fields are ignored at runtime.
-	OIDCEnabled          bool     // OIDC_ENABLED (default false)
-	OIDCIssuerURL        string   // OIDC_ISSUER_URL — IdP discovery endpoint (must be HTTPS in prod)
-	OIDCClientID         string   // OIDC_CLIENT_ID
-	OIDCClientSecret     string   // OIDC_CLIENT_SECRET
-	OIDCRedirectURL      string   // OIDC_REDIRECT_URL — must be HTTPS in prod
-	OIDCScopes           string   // OIDC_SCOPES — space-separated (default "openid email profile")
+	OIDCEnabled      bool   // OIDC_ENABLED (default false)
+	OIDCIssuerURL    string // OIDC_ISSUER_URL — IdP discovery endpoint (must be HTTPS in prod)
+	OIDCClientID     string // OIDC_CLIENT_ID
+	OIDCClientSecret string // OIDC_CLIENT_SECRET
+	OIDCRedirectURL  string // OIDC_REDIRECT_URL — must be HTTPS in prod
+	OIDCScopes       string // OIDC_SCOPES — space-separated (default "openid email profile")
 	// OIDC_ROLE_MAP_JSON — JSON mapping OIDC groups → ShadowAI role.
 	// Example: {"admins":"admin","engineers":"user"}
-	OIDCRoleMapJSON      string
+	OIDCRoleMapJSON string
 	// OIDC_DEPARTMENT_CLAIM — claim name to read department from.
 	// Default: "department". Set to "" to disable department sync.
-	OIDCDepartmentClaim  string
+	OIDCDepartmentClaim string
 	// OIDC_AUTO_PROVISION — create a new ShadowAI user on first OIDC login
 	// if no matching account exists. Default false (explicit accounts only).
-	OIDCAutoProvision    bool
+	OIDCAutoProvision bool
 	// OIDC_LINK_BY_EMAIL — if no OIDC subject match, link to an existing
 	// account with matching email. Default false (explicit opt-in required).
-	OIDCLinkByEmail      bool
+	OIDCLinkByEmail bool
 	// OIDC_ALLOW_UNVERIFIED_EMAIL — disable email_verified check.
 	// DANGEROUS: only for IdPs that don't support the email_verified claim.
 	// Default false: unverified emails are rejected for link/provision/sync.
@@ -376,16 +381,16 @@ func Load() *Config {
 		AdminMFARequired:     getEnv("ADMIN_MFA_REQUIRED", "false") == "true",
 
 		// PR-E1: OIDC.
-		OIDCEnabled:         getEnv("OIDC_ENABLED", "false") == "true",
-		OIDCIssuerURL:       getEnv("OIDC_ISSUER_URL", ""),
-		OIDCClientID:        getEnv("OIDC_CLIENT_ID", ""),
-		OIDCClientSecret:    getEnv("OIDC_CLIENT_SECRET", ""),
-		OIDCRedirectURL:     getEnv("OIDC_REDIRECT_URL", ""),
-		OIDCScopes:          getEnv("OIDC_SCOPES", "openid email profile"),
-		OIDCRoleMapJSON:     getEnv("OIDC_ROLE_MAP_JSON", ""),
-		OIDCDepartmentClaim: getEnv("OIDC_DEPARTMENT_CLAIM", "department"),
-		OIDCAutoProvision:        getEnv("OIDC_AUTO_PROVISION", "false") == "true",
-		OIDCLinkByEmail:          getEnv("OIDC_LINK_BY_EMAIL", "false") == "true",
+		OIDCEnabled:                    getEnv("OIDC_ENABLED", "false") == "true",
+		OIDCIssuerURL:                  getEnv("OIDC_ISSUER_URL", ""),
+		OIDCClientID:                   getEnv("OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:               getEnv("OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURL:                getEnv("OIDC_REDIRECT_URL", ""),
+		OIDCScopes:                     getEnv("OIDC_SCOPES", "openid email profile"),
+		OIDCRoleMapJSON:                getEnv("OIDC_ROLE_MAP_JSON", ""),
+		OIDCDepartmentClaim:            getEnv("OIDC_DEPARTMENT_CLAIM", "department"),
+		OIDCAutoProvision:              getEnv("OIDC_AUTO_PROVISION", "false") == "true",
+		OIDCLinkByEmail:                getEnv("OIDC_LINK_BY_EMAIL", "false") == "true",
 		OIDCAllowUnverifiedEmail:       getEnv("OIDC_ALLOW_UNVERIFIED_EMAIL", "false") == "true",
 		OIDCAllowUnverifiedEmailInProd: getEnv("OIDC_ALLOW_UNVERIFIED_EMAIL_IN_PROD", "false") == "true",
 		OIDCDiscoveryTimeout:           getDuration("OIDC_DISCOVERY_TIMEOUT", 10*time.Second),
@@ -440,8 +445,12 @@ func Load() *Config {
 		SIEMDropPolicy:    getEnv("SIEM_DROP_POLICY", "drop_oldest"),
 
 		// PR-L1.2
-		LegalHoldTokenSecret: getEnv("LEGAL_HOLD_TOKEN_SECRET", ""),
-		AuditChainSecret:     getEnv("AUDIT_CHAIN_SECRET", ""),
+		LegalHoldTokenSecret:            getEnv("LEGAL_HOLD_TOKEN_SECRET", ""),
+		LegalHoldPendingSLAHours:        getEnvInt("LEGAL_HOLD_PENDING_SLA_HOURS", 24),
+		LegalHoldReleasePendingSLAHours: getEnvInt("LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS", 24),
+		LegalHoldSLAScanInterval:        getDuration("LEGAL_HOLD_SLA_SCAN_INTERVAL", time.Hour),
+		DSARDPOSignalEnabled:            getEnv("DSAR_DPO_SIGNAL_ENABLED", "true") == "true",
+		AuditChainSecret:                getEnv("AUDIT_CHAIN_SECRET", ""),
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",
@@ -542,9 +551,9 @@ func (c *Config) ValidateStartupConfig() error {
 	//     при превышении; в buffered было бы 402).
 	// См. docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2.
 	if c.StreamingMode == "incremental" && !c.StreamingAllowIncrementalInProd {
-		errs = append(errs, "STREAMING_MODE=incremental requires STREAMING_ALLOW_INCREMENTAL_IN_PROD=true in prod " +
-			"(incremental tradeoffs: CM+judge falls back to buffered automatically, " +
-			"heuristic response inspection runs on sliding window, " +
+		errs = append(errs, "STREAMING_MODE=incremental requires STREAMING_ALLOW_INCREMENTAL_IN_PROD=true in prod "+
+			"(incremental tradeoffs: CM+judge falls back to buffered automatically, "+
+			"heuristic response inspection runs on sliding window, "+
 			"post-call budget is soft-record-only; see docs/rfcs/2026-04-pr-f7-streaming-architecture.md §13.2)")
 	}
 	if c.AuditRetentionDays == 0 && !c.AuditAllowNoRetentionInProd {

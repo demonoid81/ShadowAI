@@ -159,6 +159,33 @@ func TestEraseUser_HoldActive_Returns409(t *testing.T) {
 	}
 }
 
+func TestEraseUser_HoldActive_EmitsDPOSignalWhenEnabled(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{
+		UserID: "u-target", Status: ErasureHoldActive,
+	}}
+	rec := &captureRecorder{}
+	h := NewHandler(nil, eraser, rec).WithDSARDPOSignals(true)
+
+	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin})
+	w := httptest.NewRecorder()
+	h.EraseUser(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	if len(rec.events) != 2 {
+		t.Fatalf("events = %d, want erase + DPO signal", len(rec.events))
+	}
+	ev := rec.events[1]
+	if ev.Action != "dsar_blocked_by_legal_hold" || ev.Resource != "dsar" {
+		t.Fatalf("event = %+v, want DPO/legal signal", ev)
+	}
+	meta := ev.Metadata.(map[string]any)
+	if meta["event_code"] != "dsar_blocked_by_legal_hold" {
+		t.Fatalf("event_code = %v", meta["event_code"])
+	}
+}
+
 // TestEraseUser_AlreadyErased — идемпотентность: status 200 + already_erased,
 // без counters (omitempty).
 func TestEraseUser_AlreadyErased(t *testing.T) {

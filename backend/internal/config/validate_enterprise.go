@@ -66,6 +66,15 @@ func appendEnterpriseValidations(c *Config, errs []string) []string {
 	} else if len(c.LegalHoldTokenSecret) < 32 {
 		errs = append(errs, "LEGAL_HOLD_TOKEN_SECRET must be >=32 chars (current shorter — insufficient entropy for HMAC)")
 	}
+	if c.LegalHoldPendingSLAHours <= 0 {
+		errs = append(errs, "LEGAL_HOLD_PENDING_SLA_HOURS must be > 0 in prod")
+	}
+	if c.LegalHoldReleasePendingSLAHours <= 0 {
+		errs = append(errs, "LEGAL_HOLD_RELEASE_PENDING_SLA_HOURS must be > 0 in prod")
+	}
+	if c.LegalHoldSLAScanInterval <= 0 {
+		errs = append(errs, "LEGAL_HOLD_SLA_SCAN_INTERVAL must be > 0 in prod")
+	}
 	// PR-W4.1: если оба ключа заданы, проверяем что AUDIT_ANCHOR_PUBKEY
 	// совпадает с публичным ключом, derived из AUDIT_ANCHOR_SIGNING_KEY.
 	// Это ловит misconfiguration (wrong pubkey value) на startup, а не

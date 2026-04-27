@@ -278,7 +278,57 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			if cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0 {
 				go runAdminEventsPurgeScheduler(ctx, cfg, deps.AuditRepo, adminAuditRepo, adminAuditRecorder)
 			}
+			if cfg.LegalHoldSLAScanInterval > 0 {
+				go runLegalHoldSLAScheduler(ctx, cfg, legalHoldSvc, adminAuditRecorder)
+			}
 		},
+	}
+}
+
+func runLegalHoldSLAScheduler(ctx context.Context, cfg *config.Config, legalHoldSvc *legalhold.Service, adminAuditSvc adminaudit.Recorder) {
+	pendingThreshold := time.Duration(cfg.LegalHoldPendingSLAHours) * time.Hour
+	releaseThreshold := time.Duration(cfg.LegalHoldReleasePendingSLAHours) * time.Hour
+	log.Printf("legal-hold SLA scheduler: interval=%s pending_threshold=%s release_pending_threshold=%s",
+		cfg.LegalHoldSLAScanInterval, pendingThreshold, releaseThreshold)
+	scan := func() {
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		report, err := legalHoldSvc.EmitSLASignals(rctx, adminAuditSvc, legalhold.SLAConfig{
+			PendingThreshold:        pendingThreshold,
+			ReleasePendingThreshold: releaseThreshold,
+		})
+		if err != nil {
+			log.Printf("legal-hold SLA scheduler: scan failed: %v", err)
+			adminAuditSvc.Record(rctx, adminaudit.Event{
+				ActorUserID: nil,
+				Action:      "legal_hold_sla_scan_failed",
+				Resource:    "legal_hold",
+				Path:        "scheduler",
+				Method:      "INTERNAL",
+				StatusCode:  500,
+				Success:     false,
+				Metadata: map[string]any{
+					"event_code": "legal_hold_sla_scan_failed",
+					"error":      err.Error(),
+				},
+			})
+			return
+		}
+		if report.PendingEmitted > 0 || report.ReleasePendingEmitted > 0 {
+			log.Printf("legal-hold SLA scheduler: emitted pending=%d release_pending=%d duplicates=%d",
+				report.PendingEmitted, report.ReleasePendingEmitted, report.DuplicatesSkipped)
+		}
+	}
+	scan()
+	ticker := time.NewTicker(cfg.LegalHoldSLAScanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			scan()
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

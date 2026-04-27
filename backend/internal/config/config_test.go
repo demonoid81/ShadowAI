@@ -332,14 +332,17 @@ func TestConfigIsProduction(t *testing.T) {
 // operator обязан opt-in'ить осознанно.
 func TestValidateStartupConfig_StreamingModeProdGuard(t *testing.T) {
 	base := &Config{
-		AppEnv:                      "production",
-		DatabaseURL:                 "postgres://shadowai:shadowai_secret@db.internal:5432/shadowai?sslmode=require",
-		RedisURL:                    "redis://redis.internal:6379/0",
-		JWTSecret:                   "super-secret-key-for-production-12345",
-		AuditPayloadMode:            "redacted",
-		AuditRetentionDays:          30,
-		LegalHoldTokenSecret:        "super-secret-legal-hold-hmac-32!!!",
-		AuditChainSecret:            "super-secret-audit-chain-hmac-32!!",
+		AppEnv:                          "production",
+		DatabaseURL:                     "postgres://shadowai:shadowai_secret@db.internal:5432/shadowai?sslmode=require",
+		RedisURL:                        "redis://redis.internal:6379/0",
+		JWTSecret:                       "super-secret-key-for-production-12345",
+		AuditPayloadMode:                "redacted",
+		AuditRetentionDays:              30,
+		LegalHoldTokenSecret:            "super-secret-legal-hold-hmac-32!!!",
+		AuditChainSecret:                "super-secret-audit-chain-hmac-32!!",
+		LegalHoldPendingSLAHours:        24,
+		LegalHoldReleasePendingSLAHours: 24,
+		LegalHoldSLAScanInterval:        time.Hour,
 	}
 
 	t.Run("incremental_without_override_rejected", func(t *testing.T) {
@@ -439,16 +442,19 @@ func TestValidateStartupConfig_ProdRejectsUnsafeConfig(t *testing.T) {
 
 func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
 	cfg := &Config{
-		AppEnv:                      "production",
-		DatabaseURL:                 "postgres://shadowai:shadowai_secret@db.internal:5432/shadowai?sslmode=require",
-		RedisURL:                    "redis://redis.internal:6379/0",
-		JWTSecret:                   "super-secret-key-for-production-12345",
-		AuditPayloadMode:            "full",
-		AuditAllowFullInProd:        true,
-		AuditRetentionDays:          0,
-		AuditAllowNoRetentionInProd: true,
-		LegalHoldTokenSecret:        "super-secret-legal-hold-hmac-32!!!",
-		AuditChainSecret:            "super-secret-audit-chain-hmac-32!!",
+		AppEnv:                          "production",
+		DatabaseURL:                     "postgres://shadowai:shadowai_secret@db.internal:5432/shadowai?sslmode=require",
+		RedisURL:                        "redis://redis.internal:6379/0",
+		JWTSecret:                       "super-secret-key-for-production-12345",
+		AuditPayloadMode:                "full",
+		AuditAllowFullInProd:            true,
+		AuditRetentionDays:              0,
+		AuditAllowNoRetentionInProd:     true,
+		LegalHoldTokenSecret:            "super-secret-legal-hold-hmac-32!!!",
+		AuditChainSecret:                "super-secret-audit-chain-hmac-32!!",
+		LegalHoldPendingSLAHours:        24,
+		LegalHoldReleasePendingSLAHours: 24,
+		LegalHoldSLAScanInterval:        time.Hour,
 	}
 
 	if err := cfg.ValidateStartupConfig(); err != nil {
@@ -462,14 +468,17 @@ func TestValidateStartupConfig_ProdAllowsExplicitAuditOverrides(t *testing.T) {
 // поле просто игнорируется validation hook'ом.
 func prodConfigBase() *Config {
 	return &Config{
-		AppEnv:               "production",
-		DatabaseURL:          "postgres://u:p@db.internal:5432/db?sslmode=require",
-		RedisURL:             "redis://redis.internal:6379/0",
-		JWTSecret:            "super-secret-key-for-production-12345",
-		AuditPayloadMode:     "redacted",
-		AuditRetentionDays:   30,
-		LegalHoldTokenSecret: "super-secret-legal-hold-hmac-32!!!",
-		AuditChainSecret:     "super-secret-audit-chain-hmac-32!!",
+		AppEnv:                          "production",
+		DatabaseURL:                     "postgres://u:p@db.internal:5432/db?sslmode=require",
+		RedisURL:                        "redis://redis.internal:6379/0",
+		JWTSecret:                       "super-secret-key-for-production-12345",
+		AuditPayloadMode:                "redacted",
+		AuditRetentionDays:              30,
+		LegalHoldTokenSecret:            "super-secret-legal-hold-hmac-32!!!",
+		LegalHoldPendingSLAHours:        24,
+		LegalHoldReleasePendingSLAHours: 24,
+		LegalHoldSLAScanInterval:        time.Hour,
+		AuditChainSecret:                "super-secret-audit-chain-hmac-32!!",
 	}
 }
 
@@ -576,7 +585,7 @@ func TestValidateStartupConfig_SIEMDevAllowsAnything(t *testing.T) {
 		AppEnv:                 "development",
 		SIEMEnabled:            true,
 		SIEMEndpoint:           "http://localhost:8088/ingest", // non-https OK в dev
-		SIEMInsecureSkipVerify: true,                            // OK в dev
+		SIEMInsecureSkipVerify: true,                           // OK в dev
 	}
 	if err := cfg.ValidateStartupConfig(); err != nil {
 		t.Fatalf("dev env ValidateStartupConfig() error: %v", err)

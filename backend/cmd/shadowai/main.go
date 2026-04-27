@@ -296,7 +296,8 @@ func main() {
 	// safe). В Core-билде entBundle.AdminAudit / Eraser / Governance
 	// равны nil, и соответствующие code paths в каждом handler'е
 	// деградируют корректно (recordAdmin* — no-op, EraseUser → 503).
-	authHandler := auth.NewHandler(authSvc, entBundle.Eraser, entBundle.AdminAudit)
+	authHandler := auth.NewHandler(authSvc, entBundle.Eraser, entBundle.AdminAudit).
+		WithDSARDPOSignals(cfg.DSARDPOSignalEnabled)
 	// schedulerEnabled — для визуализации в /audit/status. Реальный
 	// запуск scheduler'ов делает entBundle.StartSchedulers.
 	auditSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AuditRetentionDays > 0

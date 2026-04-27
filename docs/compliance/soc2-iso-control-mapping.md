@@ -130,11 +130,11 @@ it describes:
 | Field | Detail |
 |-------|--------|
 | **Control objective** | Personal data is retained only as long as required. Users can request erasure. Legal holds prevent premature deletion of data subject to regulatory or legal requirements. |
-| **Implementation** | Configurable retention (`AUDIT_RETENTION_DAYS`) with automatic purge. DSAR (right-to-erasure): `POST /auth/erase` initiates anonymization, creates `user_erasure_runs` record, respects active/release-pending holds. Legal hold (L1-L6): 4-eyes apply/release workflow, active hold blocks DSAR, retention-aware purge skips held users or date ranges, advisory-lock prevents concurrent conflicting operations. Hold state tracked in `legal_holds` table with actor, timestamps, reason, and scope. |
-| **Evidence artifacts** | `user_erasure_runs` table. `legal_holds` table. `admin_event_logs` for hold apply/release events. Erasure audit trail in `audit_logs` via `policy_action='erasure_*'`. |
+| **Implementation** | Configurable retention (`AUDIT_RETENTION_DAYS`) with automatic purge. DSAR (right-to-erasure): `POST /auth/erase` initiates anonymization, creates `user_erasure_runs` record, respects active/release-pending holds. Legal hold (L1-L7): 4-eyes apply/release workflow, active hold blocks DSAR, retention-aware purge skips held users or date ranges, advisory-lock prevents concurrent conflicting operations. Hold state tracked in `legal_holds` table with actor, timestamps, reason, and scope. PR-L7 adds scheduled SLA breach signals for `pending` / `release_pending` holds and DPO-facing DSAR-blocked signals through admin audit, SIEM mirror and Prometheus alerts. |
+| **Evidence artifacts** | `user_erasure_runs` table. `legal_holds` table. `admin_event_logs` for hold apply/release events and L7 signals (`legal_hold_sla_breached`, `dsar_blocked_by_legal_hold`). Erasure audit trail in `audit_logs` via `policy_action='erasure_*'`. Prometheus metrics: `shadowai_legal_hold_sla_breaches_total`, `shadowai_dsar_dpo_signal_total`. |
 | **Owner** | Platform / legal / DPO |
 | **Cadence** | Purge: configurable interval. Erasure: on-demand. Hold status: continuous. |
-| **Residual gap** | Legal hold date-range enforcement is implemented, but arbitrary query-scope selectors are not implemented. No automated SLA escalation for hold durations. No automated notification to DPO on DSAR submission. |
+| **Residual gap** | Legal hold date-range enforcement is implemented, but arbitrary query-scope selectors are not implemented. L7 emits machine-readable SLA/DPO signals; external email, paging, ticket creation and DPO case-management workflows remain operator-owned integrations. |
 
 ---
 
