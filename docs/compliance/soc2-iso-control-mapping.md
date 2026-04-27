@@ -233,7 +233,7 @@ audit engagement.
 | Key rotation automation for chain secret / Ed25519 signing key | Evidence integrity | Manual runbook; W7 roadmap item |
 | Automated restore verification drill | Evidence integrity, A1.3 | Manual runbook; W7 roadmap item |
 | Independent second anchor sink | Evidence integrity | Single immudb sink; optional second sink in roadmap |
-| Legal hold query-scope beyond date-range | Data retention | Query-scope selector language remains roadmap; date-range enforcement is implemented in L6 |
+| Legal hold query-scope beyond date-range | Data retention | Query-scope selector language design is captured in PR-L8 RFC; implementation remains roadmap. Date-range enforcement is implemented in L6 |
 | SAST / SCA in CI | Change management | Not integrated; operator can add |
 | Two-person code review enforcement | Change management | GitHub branch protection: operator-managed |
 | Database-layer row-level security | Tenant isolation | Application-level only |

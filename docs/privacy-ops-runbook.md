@@ -475,7 +475,8 @@ DPO/legal team по локальным правилам организации.
 ### 5.7 Planned improvements (v2+)
 
 - Hold-scope шире: per-query, per-conversation. Per-date-range enforcement
-  реализован в L6.
+  реализован в L6; design для `query_scope` зафиксирован в PR-L8 RFC,
+  implementation остаётся будущей работой.
 - 4-eyes workflow для release реализован в L5.
 - External SLA routing — email/webhook/ticket creation на основе L7
   admin/SIEM/Prometheus signals.
@@ -696,7 +697,7 @@ external tooling.
 - **[implemented]** 4-eyes для release — L5.
 - **[implemented]** Date-range hold enforcement — L6.
 - **[gap]** Hold-scope шире date-range (query-window/query-scope) —
-  v2+ roadmap.
+  design зафиксирован в PR-L8 RFC, implementation остаётся v2+ roadmap.
 - **[implemented]** SLA / DPO signals для legal hold и DSAR block —
   L7, см. §5.5 / §5.6. External email/webhook/ticket-routing
   остаются operator-owned integration.
