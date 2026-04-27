@@ -170,7 +170,9 @@ Exit 1 from this CronJob triggers `EvidenceAuditReportJobFailed` alert.
   rotation epoch in the on-call log. Old rows verified with old secret; new rows with new.
 - **Ed25519 signing key**: pass new key_id + public key to anchor scheduler. Build a signing
   keyring JSON and pass `--signing-keyring` to `audit-verify`.
-- **Restore drill**: run quarterly using `audit-verify --restore-drill --table all`.
+- **Restore drill**: run quarterly using `audit-verify --restore-drill --table all`
+  with either `--pubkey-file` or `--signing-keyring` so the signature tier is
+  verified, not silently skipped.
 
 ---
 
@@ -319,7 +321,7 @@ go test -tags enterprise ./... -count=1
 go test -tags 'enterprise smoke' ./smoke/... -count=1
 
 # 4. Evidence chain verify (against restored DB if doing restore drill)
-audit-verify --restore-drill --table all --verbose
+audit-verify --restore-drill --table all --pubkey-file ./anchor-pubkey.b64 --verbose
 
 # 5. Retention audit report (against evidence S3 bucket)
 audit-evidence-report \

@@ -3,18 +3,19 @@
 //
 // Two independent keyring types:
 //
-//   SigningKeyring — maps pubkey_id → ed25519.PublicKey for anchor signature
-//     verification across key rotation epochs. Anchors without pubkey_id
-//     ("legacy") are verified with the optional legacyKey.
+//	SigningKeyring — maps pubkey_id → ed25519.PublicKey for anchor signature
+//	  verification across key rotation epochs. Anchors without pubkey_id
+//	  ("legacy") are verified with the optional legacyKey.
 //
-//   ChainSecretKeyring — maps seq_no ranges to HMAC secrets.
-//     Rows in epoch 1 (seq_no 0..N) are verified with secret_1;
-//     rows in epoch 2 (seq_no N+1..) with secret_2, etc.
-//     No DB schema change required — epoch is determined by seq_no at verify time.
+//	ChainSecretKeyring — maps seq_no ranges to HMAC secrets.
+//	  Rows in epoch 1 (seq_no 0..N) are verified with secret_1;
+//	  rows in epoch 2 (seq_no N+1..) with secret_2, etc.
+//	  No DB schema change required — epoch is determined by seq_no at verify time.
 //
 // Backward-compatible constructors:
-//   SingleKeyKeyring(pubKey)    — wraps one key; treats ALL anchors as legacy
-//   SingleSecretKeyring(secret) — wraps one secret; covers all seq_nos
+//
+//	SingleKeyKeyring(pubKey)    — wraps one key; treats ALL anchors as legacy
+//	SingleSecretKeyring(secret) — wraps one secret; covers all seq_nos
 package chain
 
 import (
@@ -59,13 +60,20 @@ func SingleKeyKeyring(pubKey ed25519.PublicKey) *SigningKeyring {
 //
 //   - empty pubKeyID (legacy anchor)  → (legacyKey, legacyKey != nil)
 //   - non-empty, found in keyring     → (key, true)
-//   - non-empty, NOT in keyring       → (nil, false)  ← fail-closed: caller must reject
+//   - single-key compatibility mode   → (legacyKey, true) for any pubkey_id
+//   - non-empty, NOT in real keyring  → (nil, false)  ← fail-closed: caller must reject
 func (k *SigningKeyring) LookupSigningKey(pubKeyID string) (ed25519.PublicKey, bool) {
 	if pubKeyID == "" {
 		return k.legacyKey, k.legacyKey != nil
 	}
 	key, ok := k.keys[pubKeyID]
-	return key, ok
+	if ok {
+		return key, true
+	}
+	if len(k.keys) == 0 && k.legacyKey != nil {
+		return k.legacyKey, true
+	}
+	return nil, false
 }
 
 // ---------------------------------------------------------------------------

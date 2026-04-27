@@ -11,15 +11,16 @@ import (
 // Tests use MockImmuDBClient.
 //
 // To connect to real immudb:
-//   import (
-//       immudb "github.com/codenotary/immudb/pkg/client"
-//       schema "github.com/codenotary/immudb/pkg/api/schema"
-//   )
-//   client, _ := immudb.NewImmuClient(immudb.DefaultOptions().WithAddress(addr))
-//   client.Login(ctx, []byte(user), []byte(pass))
-//   client.UseDatabase(ctx, &schema.Database{DatabaseName: db})
-//   impl := &RealImmuDBClient{client: client}
-//   sink := NewImmuDBSink(impl, database)
+//
+//	import (
+//	    immudb "github.com/codenotary/immudb/pkg/client"
+//	    schema "github.com/codenotary/immudb/pkg/api/schema"
+//	)
+//	client, _ := immudb.NewImmuClient(immudb.DefaultOptions().WithAddress(addr))
+//	client.Login(ctx, []byte(user), []byte(pass))
+//	client.UseDatabase(ctx, &schema.Database{DatabaseName: db})
+//	impl := &RealImmuDBClient{client: client}
+//	sink := NewImmuDBSink(impl, database)
 type ImmuDBClient interface {
 	// Set stores value under key. Returns the transaction ID.
 	Set(ctx context.Context, key string, value []byte) (txID uint64, err error)
@@ -117,6 +118,13 @@ func findByte(s string, c byte) int {
 // Returns (true, nil) if everything matches. (false, nil) for any field
 // mismatch or signature failure. (false, err) for network/parse errors.
 func VerifyImmuDBSinkRecord(ctx context.Context, sink *ImmuDBSink, a *AnchorRecord, pubKey ed25519.PublicKey) (bool, error) {
+	return VerifyImmuDBSinkRecordWithKeyring(ctx, sink, a, signingKeyringFromPubKey(pubKey))
+}
+
+// VerifyImmuDBSinkRecordWithKeyring is the W7 keyring-aware variant of
+// VerifyImmuDBSinkRecord. It verifies signatures by anchor pubkey_id when a
+// signing keyring is supplied.
+func VerifyImmuDBSinkRecordWithKeyring(ctx context.Context, sink *ImmuDBSink, a *AnchorRecord, keyring *SigningKeyring) (bool, error) {
 	if sink == nil {
 		return false, nil
 	}
@@ -140,17 +148,5 @@ func VerifyImmuDBSinkRecord(ctx context.Context, sink *ImmuDBSink, a *AnchorReco
 		!merkleEqual(manifest.MerkleRoot, a.MerkleRoot) {
 		return false, nil
 	}
-	// Signature verification.
-	if len(pubKey) == ed25519.PublicKeySize {
-		// If pubKey provided: signature must be present (unsigned = fail).
-		// Prevents downgrade: a DBA who re-signs with a different key or
-		// strips the signature cannot pass verification.
-		if len(manifest.Signature) == 0 {
-			return false, nil // unsigned manifest when pubKey is set
-		}
-		if !VerifyAnchorSignature(manifest, pubKey) {
-			return false, nil
-		}
-	}
-	return true, nil
+	return verifyAnchorSignatureWithKeyring(manifest, keyring), nil
 }

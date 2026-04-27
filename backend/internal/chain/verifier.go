@@ -14,12 +14,12 @@ import (
 
 // VerifyResult — итог верификации одной таблицы.
 type VerifyResult struct {
-	Table      string
-	RowCount   int // total chained rows scanned
-	Gaps       []int64      // seq_no значения которые пропущены
-	Breaks     []ChainBreak // rows где hash не совпадает
-	OK         bool         // true если Gaps и Breaks пусты
-	Duration   time.Duration
+	Table    string
+	RowCount int          // total chained rows scanned
+	Gaps     []int64      // seq_no значения которые пропущены
+	Breaks   []ChainBreak // rows где hash не совпадает
+	OK       bool         // true если Gaps и Breaks пусты
+	Duration time.Duration
 }
 
 // ChainBreak — одна строка с несовпадающим hash'ом.
@@ -389,11 +389,11 @@ func VerifyAuditPurgeRuns(ctx context.Context, db *sql.DB, secret []byte) (Verif
 
 // SignatureVerifyResult — итог проверки Ed25519 подписей anchor'ов.
 type SignatureVerifyResult struct {
-	Table            string
-	AnchorCount      int
-	UnsignedCount    int            // anchors with NULL signature (pre-W4.1)
-	SignatureFails   []AnchorMismatch // bad or unverifiable signatures
-	OK               bool           // true if all signed anchors verified
+	Table          string
+	AnchorCount    int
+	UnsignedCount  int              // anchors with NULL signature (pre-W4.1)
+	SignatureFails []AnchorMismatch // bad or unverifiable signatures
+	OK             bool             // true if all signed anchors verified
 }
 
 // VerifyAnchorSignatures verifies Ed25519 signatures on all anchor records
@@ -459,8 +459,8 @@ func VerifyAnchorSignaturesWithKeyring(ctx context.Context, db *sql.DB, tableNam
 
 // AnchorVerifyResult — итог проверки anchor'ов для одной таблицы.
 type AnchorVerifyResult struct {
-	Table         string
-	AnchorCount   int
+	Table       string
+	AnchorCount int
 	// DBMismatches: DB anchor root ≠ Merkle computed from current DB rows.
 	// Detects: row modification WITHIN DB (chain break in anchor range).
 	DBMismatches []AnchorMismatch
@@ -632,7 +632,7 @@ func verifyAnchors(ctx context.Context, db *sql.DB, tableName, fallbackSinkPath 
 						SeqLo:      a.SeqLo,
 						SeqHi:      a.SeqHi,
 						Stored:     a.MerkleRoot,  // DB anchor root
-						Recomputed: sinkRootBytes,  // what sink says
+						Recomputed: sinkRootBytes, // what sink says
 					})
 				}
 			}
@@ -890,6 +890,233 @@ func VerifyAuditLogsWithKeyring(ctx context.Context, db *sql.DB, keyring *ChainS
 	}
 	if err := rows.Err(); err != nil {
 		return res, fmt.Errorf("verify audit_logs (keyring): rows: %w", err)
+	}
+	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
+	res.Duration = time.Since(start)
+	return res, nil
+}
+
+// VerifyAdminEventLogsWithKeyring verifies admin_event_logs chain integrity
+// using the W7 multi-epoch HMAC keyring.
+func VerifyAdminEventLogsWithKeyring(ctx context.Context, db *sql.DB, keyring *ChainSecretKeyring) (VerifyResult, error) {
+	start := time.Now()
+	res := VerifyResult{Table: "admin_event_logs"}
+	if keyring == nil {
+		return res, fmt.Errorf("verify admin_event_logs (keyring): nil keyring")
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, coalesce(actor_user_id::text,''), action, resource,
+		        coalesce(target_id,''), path, method, status_code, success,
+		        created_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001'),
+		        coalesce(source_org_id::text,''),
+		        coalesce(target_org_id::text,'')
+		 FROM admin_event_logs
+		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
+		 ORDER BY seq_no`)
+	if err != nil {
+		return res, fmt.Errorf("verify admin_event_logs (keyring): query: %w", err)
+	}
+	defer rows.Close()
+
+	var prevHash []byte
+	var prevSeqNo int64
+	for rows.Next() {
+		var r AdminEventRow
+		var canonVer, orgID, sourceOrgID, targetOrgID string
+		if err := rows.Scan(
+			&r.ID, &r.ActorUserID, &r.Action, &r.Resource,
+			&r.TargetID, &r.Path, &r.Method, &r.StatusCode, &r.Success,
+			&r.CreatedAt, &r.SeqNo, &r.RowHash,
+			&canonVer, &orgID, &sourceOrgID, &targetOrgID,
+		); err != nil {
+			return res, fmt.Errorf("verify admin_event_logs (keyring): scan: %w", err)
+		}
+		res.RowCount++
+
+		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
+			for gap := prevSeqNo + 1; gap < r.SeqNo; gap++ {
+				res.Gaps = append(res.Gaps, gap)
+			}
+		}
+
+		secret, ok := keyring.LookupSecret(r.SeqNo)
+		if !ok {
+			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
+			prevHash = r.RowHash
+			prevSeqNo = r.SeqNo
+			continue
+		}
+
+		var canonical string
+		if canonVer == "v2" {
+			canonical = CanonicalAdminEventLogV2(
+				r.ID, r.ActorUserID, r.Action, r.Resource, r.TargetID,
+				r.Path, r.Method, r.StatusCode, r.Success,
+				r.CreatedAt.UTC().Unix(),
+				orgID, sourceOrgID, targetOrgID,
+			)
+		} else {
+			canonical = CanonicalAdminEventLog(
+				r.ID, r.ActorUserID, r.Action, r.Resource, r.TargetID,
+				r.Path, r.Method, r.StatusCode, r.Success,
+				r.CreatedAt.UTC().Unix(),
+			)
+		}
+		if !Verify(prevHash, canonical, secret, r.RowHash) {
+			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
+		}
+
+		prevHash = r.RowHash
+		prevSeqNo = r.SeqNo
+	}
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("verify admin_event_logs (keyring): rows: %w", err)
+	}
+	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
+	res.Duration = time.Since(start)
+	return res, nil
+}
+
+// VerifyLegalHoldEventsWithKeyring verifies legal_hold_events chain integrity
+// using the W7 multi-epoch HMAC keyring.
+func VerifyLegalHoldEventsWithKeyring(ctx context.Context, db *sql.DB, keyring *ChainSecretKeyring) (VerifyResult, error) {
+	start := time.Now()
+	res := VerifyResult{Table: "legal_hold_events"}
+	if keyring == nil {
+		return res, fmt.Errorf("verify legal_hold_events (keyring): nil keyring")
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, hold_id::text, action, new_status,
+		        coalesce(actor_id::text,''), created_at, seq_no, row_hash
+		 FROM legal_hold_events
+		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
+		 ORDER BY seq_no`)
+	if err != nil {
+		return res, fmt.Errorf("verify legal_hold_events (keyring): query: %w", err)
+	}
+	defer rows.Close()
+
+	var prevHash []byte
+	var prevSeqNo int64
+	for rows.Next() {
+		var r LegalHoldEventRow
+		if err := rows.Scan(
+			&r.ID, &r.HoldID, &r.Action, &r.NewStatus,
+			&r.ActorID, &r.CreatedAt, &r.SeqNo, &r.RowHash,
+		); err != nil {
+			return res, fmt.Errorf("verify legal_hold_events (keyring): scan: %w", err)
+		}
+		res.RowCount++
+
+		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
+			for gap := prevSeqNo + 1; gap < r.SeqNo; gap++ {
+				res.Gaps = append(res.Gaps, gap)
+			}
+		}
+
+		secret, ok := keyring.LookupSecret(r.SeqNo)
+		if !ok {
+			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
+			prevHash = r.RowHash
+			prevSeqNo = r.SeqNo
+			continue
+		}
+
+		canonical := CanonicalLegalHoldEvent(
+			r.ID, r.HoldID, r.Action, r.NewStatus, r.ActorID,
+			r.CreatedAt.UTC().Unix(),
+		)
+		if !Verify(prevHash, canonical, secret, r.RowHash) {
+			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
+		}
+
+		prevHash = r.RowHash
+		prevSeqNo = r.SeqNo
+	}
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("verify legal_hold_events (keyring): rows: %w", err)
+	}
+	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
+	res.Duration = time.Since(start)
+	return res, nil
+}
+
+// VerifyAuditPurgeRunsWithKeyring verifies audit_purge_runs chain integrity
+// using the W7 multi-epoch HMAC keyring.
+func VerifyAuditPurgeRunsWithKeyring(ctx context.Context, db *sql.DB, keyring *ChainSecretKeyring) (VerifyResult, error) {
+	start := time.Now()
+	res := VerifyResult{Table: "audit_purge_runs"}
+	if keyring == nil {
+		return res, fmt.Errorf("verify audit_purge_runs (keyring): nil keyring")
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, extract(epoch FROM cutoff)::bigint, rows_deleted,
+		        coalesce(target,''), completed_at, seq_no, row_hash,
+		        coalesce(canonical_version,'v1'),
+		        coalesce(org_id::text,'00000000-0000-0000-0000-000000000001'),
+		        coalesce(scope,'global')
+		 FROM audit_purge_runs
+		 WHERE seq_no IS NOT NULL AND row_hash IS NOT NULL
+		 ORDER BY seq_no`)
+	if err != nil {
+		return res, fmt.Errorf("verify audit_purge_runs (keyring): query: %w", err)
+	}
+	defer rows.Close()
+
+	var prevHash []byte
+	var prevSeqNo int64
+	for rows.Next() {
+		var r AuditPurgeRunRow
+		var canonVer, orgID, scope string
+		if err := rows.Scan(
+			&r.ID, &r.CutoffEpoch, &r.RowsDeleted, &r.Target,
+			&r.CompletedAt, &r.SeqNo, &r.RowHash,
+			&canonVer, &orgID, &scope,
+		); err != nil {
+			return res, fmt.Errorf("verify audit_purge_runs (keyring): scan: %w", err)
+		}
+		res.RowCount++
+
+		if res.RowCount > 1 && r.SeqNo != prevSeqNo+1 {
+			for gap := prevSeqNo + 1; gap < r.SeqNo; gap++ {
+				res.Gaps = append(res.Gaps, gap)
+			}
+		}
+
+		secret, ok := keyring.LookupSecret(r.SeqNo)
+		if !ok {
+			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
+			prevHash = r.RowHash
+			prevSeqNo = r.SeqNo
+			continue
+		}
+
+		var canonical string
+		if canonVer == "v2" {
+			canonical = CanonicalAuditPurgeRunV2(
+				r.ID, r.CutoffEpoch, r.RowsDeleted, r.Target,
+				r.CompletedAt.UTC().Unix(), orgID, scope,
+			)
+		} else {
+			canonical = CanonicalAuditPurgeRun(
+				r.ID, r.CutoffEpoch, r.RowsDeleted, r.Target,
+				r.CompletedAt.UTC().Unix(),
+			)
+		}
+		if !Verify(prevHash, canonical, secret, r.RowHash) {
+			res.Breaks = append(res.Breaks, ChainBreak{SeqNo: r.SeqNo, RowID: r.ID, Actual: r.RowHash})
+		}
+
+		prevHash = r.RowHash
+		prevSeqNo = r.SeqNo
+	}
+	if err := rows.Err(); err != nil {
+		return res, fmt.Errorf("verify audit_purge_runs (keyring): rows: %w", err)
 	}
 	res.OK = len(res.Gaps) == 0 && len(res.Breaks) == 0
 	res.Duration = time.Since(start)

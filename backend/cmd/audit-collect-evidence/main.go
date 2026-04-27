@@ -182,8 +182,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		})
 	}
 
-	// ── 3. Chain + anchor verification (requires DATABASE_URL + AUDIT_CHAIN_SECRET) ──
-	if os.Getenv("DATABASE_URL") != "" && os.Getenv("AUDIT_CHAIN_SECRET") != "" {
+	// ── 3. Chain + anchor verification (requires DB + chain key + signing pubkey) ──
+	hasChainKey := os.Getenv("AUDIT_CHAIN_SECRET") != "" || os.Getenv("AUDIT_CHAIN_KEYRING_FILE") != ""
+	hasSigningKey := os.Getenv("AUDIT_ANCHOR_PUBKEY") != "" || os.Getenv("AUDIT_SIGNING_KEYRING_FILE") != ""
+	if os.Getenv("DATABASE_URL") != "" && hasChainKey && hasSigningKey {
 		verFile := filepath.Join(workDir, "evidence", "chain-verify-summary.json")
 		if err := collectChainVerify(verFile, stderr); err == nil {
 			manifest.addControl(ControlEntry{
@@ -208,7 +210,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Description:       "WORM HMAC chain and Merkle anchor integrity verification",
 			Status:            ControlNotCollected,
 			LiveCheckRequired: true,
-			Reason:            "DATABASE_URL and/or AUDIT_CHAIN_SECRET not set; run: audit-verify --restore-drill --table all --verbose",
+			Reason:            "DATABASE_URL, AUDIT_CHAIN_SECRET, and AUDIT_ANCHOR_PUBKEY/signing keyring not set; run: audit-verify --restore-drill --table all --pubkey-file <pubkey> --verbose",
 		})
 	}
 
@@ -244,9 +246,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	// ── 4. Checklist templates (always generated) ──────────────────────────
 	checklists := map[string]string{
-		"access-review-checklist.md":          accessReviewChecklist(*from, *to),
-		"incident-alert-review-checklist.md":  incidentAlertReviewChecklist(*from, *to),
-		"ci-release-checklist.md":             ciReleaseChecklist(*from, *to),
+		"access-review-checklist.md":         accessReviewChecklist(*from, *to),
+		"incident-alert-review-checklist.md": incidentAlertReviewChecklist(*from, *to),
+		"ci-release-checklist.md":            ciReleaseChecklist(*from, *to),
 	}
 	for name, content := range checklists {
 		_ = os.WriteFile(filepath.Join(workDir, "checklists", name), []byte(content), 0o644)
@@ -374,7 +376,16 @@ func collectChainVerify(outFile string, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("audit-verify not found in PATH; install via make build-cli")
 	}
-	cmd := exec.Command(bin, "--restore-drill", "--table", "all", "--verbose")
+	args := []string{"--restore-drill", "--table", "all", "--verbose"}
+	if signingKeyring := strings.TrimSpace(os.Getenv("AUDIT_SIGNING_KEYRING_FILE")); signingKeyring != "" {
+		args = append(args, "--signing-keyring", signingKeyring)
+	} else if pubKey := strings.TrimSpace(os.Getenv("AUDIT_ANCHOR_PUBKEY")); pubKey != "" {
+		args = append(args, "--pubkey", pubKey)
+	}
+	if chainKeyring := strings.TrimSpace(os.Getenv("AUDIT_CHAIN_KEYRING_FILE")); chainKeyring != "" {
+		args = append(args, "--chain-keyring", chainKeyring)
+	}
+	cmd := exec.Command(bin, args...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout, cmd.Stderr, cmd.Env = &outBuf, &errBuf, os.Environ()
 

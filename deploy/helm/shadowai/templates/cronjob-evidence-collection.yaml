@@ -116,6 +116,8 @@ spec:
                   echo "[evidence-collection] period ${FROM} → ${TO} (mode=${PERIOD_MODE})"
 
                   # ── Artifact paths ────────────────────────────────────────
+                  export TMPDIR=/staging/tmp
+                  mkdir -p "${TMPDIR}"
                   PACKAGE_NAME="evidence-collection-${FROM}-to-${TO}"
                   PACKAGE_ZIP="/staging/${PACKAGE_NAME}.zip"
                   YYYY=$(echo "${FROM}" | cut -c1-4)
@@ -211,6 +213,12 @@ spec:
                     secretKeyRef:
                       name: {{ $chainSecret }}
                       key: auditChainSecret
+                - name: AUDIT_ANCHOR_PUBKEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $chainSecret }}
+                      key: anchorPubKey
+                      optional: true
                 {{- end }}
 
               resources:

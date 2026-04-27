@@ -1,10 +1,13 @@
 package chain
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"testing"
+	"time"
 )
 
 // ── Multi-sink test mocks ──────────────────────────────────────────────────
@@ -268,6 +271,136 @@ func TestMultiSink_VerifyDetectsMissingSink(t *testing.T) {
 	t.Logf("sink ref %q inaccessible (expected for test): %v", path, err)
 	// The verifier would report this as status="missing" or "unverified".
 	// This test validates the detection path, not the full verifier output.
+}
+
+func TestVerifyFileSinkManifest_MatchesExactAnchor(t *testing.T) {
+	a := testMultiSinkAnchor()
+	manifest, err := MarshalSignedManifest(a)
+	if err != nil {
+		t.Fatalf("MarshalSignedManifest: %v", err)
+	}
+	path := writeSinkManifest(t, manifest)
+
+	ok, err := verifyFileSinkManifest(path, a, nil)
+	if err != nil {
+		t.Fatalf("verifyFileSinkManifest: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected exact manifest match")
+	}
+}
+
+func TestVerifyFileSinkManifest_MismatchedRootFails(t *testing.T) {
+	a := testMultiSinkAnchor()
+	tampered := *a
+	tampered.MerkleRoot = bytes.Repeat([]byte{0x02}, 32)
+	manifest, err := MarshalSignedManifest(&tampered)
+	if err != nil {
+		t.Fatalf("MarshalSignedManifest: %v", err)
+	}
+	path := writeSinkManifest(t, manifest)
+
+	ok, err := verifyFileSinkManifest(path, a, nil)
+	if err != nil {
+		t.Fatalf("verifyFileSinkManifest: %v", err)
+	}
+	if ok {
+		t.Fatal("mismatched manifest root must fail")
+	}
+}
+
+func TestVerifyFileSinkManifest_UnrelatedAnchorFails(t *testing.T) {
+	a := testMultiSinkAnchor()
+	other := *a
+	other.SeqLo = 10
+	other.SeqHi = 20
+	manifest, err := MarshalSignedManifest(&other)
+	if err != nil {
+		t.Fatalf("MarshalSignedManifest: %v", err)
+	}
+	path := writeSinkManifest(t, manifest)
+
+	ok, err := verifyFileSinkManifest(path, a, nil)
+	if err != nil {
+		t.Fatalf("verifyFileSinkManifest: %v", err)
+	}
+	if ok {
+		t.Fatal("unrelated manifest must not satisfy expected anchor")
+	}
+}
+
+func TestVerifyFileSinkManifest_KeyringValidatesSignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	a := testMultiSinkAnchor()
+	if err := SignAnchor(a, priv, "k1"); err != nil {
+		t.Fatalf("SignAnchor: %v", err)
+	}
+	manifest, err := MarshalSignedManifest(a)
+	if err != nil {
+		t.Fatalf("MarshalSignedManifest: %v", err)
+	}
+	path := writeSinkManifest(t, manifest)
+	keyring := NewSigningKeyring(map[string]ed25519.PublicKey{"k1": pub}, nil)
+
+	ok, err := verifyFileSinkManifest(path, a, keyring)
+	if err != nil {
+		t.Fatalf("verifyFileSinkManifest: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected keyring signature verification to pass")
+	}
+}
+
+func TestVerifyFileSinkManifest_KeyringRejectsUnknownKey(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	a := testMultiSinkAnchor()
+	if err := SignAnchor(a, priv, "k1"); err != nil {
+		t.Fatalf("SignAnchor: %v", err)
+	}
+	manifest, err := MarshalSignedManifest(a)
+	if err != nil {
+		t.Fatalf("MarshalSignedManifest: %v", err)
+	}
+	path := writeSinkManifest(t, manifest)
+	keyring := NewSigningKeyring(map[string]ed25519.PublicKey{}, nil)
+
+	ok, err := verifyFileSinkManifest(path, a, keyring)
+	if err != nil {
+		t.Fatalf("verifyFileSinkManifest: %v", err)
+	}
+	if ok {
+		t.Fatal("unknown pubkey_id must fail when keyring is provided")
+	}
+}
+
+func testMultiSinkAnchor() *AnchorRecord {
+	return &AnchorRecord{
+		ID:         "anchor-1",
+		TableName:  "audit_logs",
+		SeqLo:      1,
+		SeqHi:      3,
+		RowCount:   3,
+		MerkleRoot: bytes.Repeat([]byte{0x01}, 32),
+		CreatedAt:  time.Unix(1714000000, 0).UTC(),
+		SinkName:   "file://",
+		SinkRef:    "file:///primary.ndjson",
+		SinkOK:     true,
+	}
+}
+
+func writeSinkManifest(t *testing.T, manifest []byte) string {
+	t.Helper()
+	path := t.TempDir() + "/anchors.ndjson"
+	if err := os.WriteFile(path, append(manifest, '\n'), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
 }
 
 // TestMultiSink_WriteOrderDoesNotAffectManifest — manifest content must be the

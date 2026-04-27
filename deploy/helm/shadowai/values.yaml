@@ -371,8 +371,11 @@ evidenceCollection:
   # Default false (strict: Job fails if any controls are missing).
   allowIncomplete: false
 
-  # chainVerify: pass DATABASE_URL and AUDIT_CHAIN_SECRET to audit-collect-evidence
-  # so it can run chain/anchor verification. Requires DB connectivity from the Job.
+  # chainVerify: pass DATABASE_URL, AUDIT_CHAIN_SECRET, and optional anchorPubKey
+  # to audit-collect-evidence so it can run audit-verify --restore-drill.
+  # Restore-drill now requires a signing pubkey/keyring for full W7 signature verification.
+  # If anchorPubKey is absent, chain verification is reported as not_collected.
+  # Requires DB connectivity from the Job.
   chainVerify:
     enabled: false
     # secretName: K8s Secret containing databaseUrl and auditChainSecret.

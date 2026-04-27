@@ -285,7 +285,7 @@ evidenceCollection:
       retentionDays: 2555   # 7 years
 
   chainVerify:
-    enabled: true    # pass DATABASE_URL + AUDIT_CHAIN_SECRET for chain verification
+    enabled: true    # pass DATABASE_URL + AUDIT_CHAIN_SECRET + anchorPubKey for restore-drill
 
   alerts:
     enabled: true

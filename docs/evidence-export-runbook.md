@@ -443,7 +443,8 @@ anchors/bundles remain consistent with the restored data.
 - PG backup (pg_dump or managed snapshot)
 - Evidence bundle from same point in time
 - `AUDIT_CHAIN_SECRET` (stored separately, not in DB backup)
-- Optional: signing keyring file for multi-epoch key verification
+- Ed25519 anchor public key, either as `--pubkey-file` or a signing keyring.
+- Optional: signing keyring file for multi-epoch key verification.
 
 ### 7.2 Automated restore drill (W7)
 
@@ -462,6 +463,7 @@ export AUDIT_CHAIN_SECRET=<secret from vault>
 audit-verify \
   --restore-drill \
   --table all \
+  --pubkey-file ./anchor-pubkey.b64 \
   --verbose
 
 # With multi-epoch signing keyring:

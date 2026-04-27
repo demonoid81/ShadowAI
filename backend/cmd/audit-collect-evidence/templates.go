@@ -121,7 +121,7 @@ Evidence export success rate for period: ____%%
 - [ ] Merkle anchor verification passed for all tables
 - [ ] Evidence bundle offline verification: all bundles PASSED
 
-Run: audit-verify --restore-drill --table all --verbose
+Run: audit-verify --restore-drill --table all --pubkey-file <anchor-pubkey.b64> --verbose
 
 ---
 
@@ -187,7 +187,7 @@ const ciReleaseChecklistTpl = `# CI / Release Checklist — {{PERIOD_FROM}} to {
 ___________________
 `
 
-func accessReviewChecklist(from, to string) string   { return fillTemplate(accessReviewTpl, from, to) }
+func accessReviewChecklist(from, to string) string { return fillTemplate(accessReviewTpl, from, to) }
 func incidentAlertReviewChecklist(from, to string) string {
 	return fillTemplate(incidentAlertReviewTpl, from, to)
 }

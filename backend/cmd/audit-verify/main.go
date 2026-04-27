@@ -67,19 +67,20 @@ func main() {
 	//        [--immudb-user immudb --immudb-pass immudb]
 	// For each DB anchor with sink_name=immudb://, fetches manifest from immudb,
 	// cross-checks all fields, and verifies Ed25519 signature (if --pubkey provided).
-	verifySink      := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
-	immudbAddr      := flag.String("immudb-addr", "127.0.0.1:3322", "immudb REST address for --verify-sink")
-	immudbDB        := flag.String("immudb-db", "shadowai", "immudb database for --verify-sink")
-	immudbUser      := flag.String("immudb-user", "immudb", "immudb username for --verify-sink")
-	immudbPass      := flag.String("immudb-pass", "", "immudb password for --verify-sink")
+	verifySink := flag.Bool("verify-sink", false, "W4.2: verify anchor manifests against external immudb sink")
+	immudbAddr := flag.String("immudb-addr", "127.0.0.1:3322", "immudb REST address for --verify-sink")
+	immudbDB := flag.String("immudb-db", "shadowai", "immudb database for --verify-sink")
+	immudbUser := flag.String("immudb-user", "immudb", "immudb username for --verify-sink")
+	immudbPass := flag.String("immudb-pass", "", "immudb password for --verify-sink")
 	immudbAPIPrefix := flag.String("immudb-api-prefix", "", "immudb REST API prefix (default /v1/immurestproxy for immugw; /api/v2 for immudb 2.x built-in REST)")
-	immudbProfile   := flag.String("immudb-rest-profile", "", "W4.3.1: immudb REST API profile: immugw_v1 (default) or immudb_v2 (immudb 1.9+ built-in REST)")
+	immudbProfile := flag.String("immudb-rest-profile", "", "W4.3.1: immudb REST API profile: immugw_v1 (default) or immudb_v2 (immudb 1.9+ built-in REST)")
 	// W7: key rotation keyring flags.
 	signingKeyringFile := flag.String("signing-keyring", "", "W7: path to JSON signing keyring file (pubkey_id→pubkey map for multi-epoch signature verification)")
-	chainKeyringFile   := flag.String("chain-keyring", "", "W7: path to JSON chain secret keyring file (seq_no epoch ranges for AUDIT_CHAIN_SECRET rotation)")
+	chainKeyringFile := flag.String("chain-keyring", "", "W7: path to JSON chain secret keyring file (seq_no epoch ranges for AUDIT_CHAIN_SECRET rotation)")
 	// W7: restore drill — automated restore verification flow.
 	// Runs: chain verification + anchor verification + signature verification in sequence.
-	// Requires DATABASE_URL (chain+anchors) and AUDIT_CHAIN_SECRET or --chain-keyring.
+	// Requires DATABASE_URL, AUDIT_CHAIN_SECRET or --chain-keyring, and
+	// --pubkey/--pubkey-file/--signing-keyring for Ed25519 signatures.
 	// Exit 0=all pass, 1=verification failure, 2=config error.
 	restoreDrill := flag.Bool("restore-drill", false, "W7: run full restore verification suite (chain+anchors+signatures) — automated restore drill")
 	flag.Parse()
@@ -167,6 +168,25 @@ func main() {
 		}
 		signingKeyring = kr
 	}
+	effectiveSigningKeyring := signingKeyring
+	if effectiveSigningKeyring == nil && (*pubKeyFlag != "" || *pubKeyFile != "") {
+		var pubKeyB64 string
+		switch {
+		case *pubKeyFlag != "":
+			pubKeyB64 = *pubKeyFlag
+		case *pubKeyFile != "":
+			data, err := os.ReadFile(*pubKeyFile)
+			if err != nil {
+				exitConfig("--pubkey-file: %v", err)
+			}
+			pubKeyB64 = strings.TrimSpace(string(data))
+		}
+		pubKey, err := chain.ParsePublicKey(pubKeyB64)
+		if err != nil {
+			exitConfig("parse public key: %v", err)
+		}
+		effectiveSigningKeyring = chain.SingleKeyKeyring(pubKey)
+	}
 
 	// W7: load chain secret keyring if provided (replaces AUDIT_CHAIN_SECRET for rotation).
 	var chainKeyring *chain.ChainSecretKeyring
@@ -230,11 +250,11 @@ func main() {
 			case "audit_logs":
 				res, err = chain.VerifyAuditLogsWithKeyring(ctx, db, chainKeyring)
 			case "admin_event_logs":
-				res, err = chain.VerifyAdminEventLogs(ctx, db, secretBytes)
+				res, err = chain.VerifyAdminEventLogsWithKeyring(ctx, db, chainKeyring)
 			case "legal_hold_events":
-				res, err = chain.VerifyLegalHoldEvents(ctx, db, secretBytes)
+				res, err = chain.VerifyLegalHoldEventsWithKeyring(ctx, db, chainKeyring)
 			case "audit_purge_runs":
-				res, err = chain.VerifyAuditPurgeRuns(ctx, db, secretBytes)
+				res, err = chain.VerifyAuditPurgeRunsWithKeyring(ctx, db, chainKeyring)
 			default:
 				exitConfig("unknown table: %q (valid: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all)", table)
 				return
@@ -270,35 +290,12 @@ func main() {
 	// W4.1/W7: signature verification — uses keyring (W7) or single pubkey (legacy).
 	// signingKeyring loaded above from --signing-keyring; also built from --pubkey/--pubkey-file.
 	if *verifySignatures || *restoreDrill {
-		// Resolve effective signing keyring.
-		effectiveKeyring := signingKeyring
-		if effectiveKeyring == nil {
-			// Try single-key mode from --pubkey or --pubkey-file.
-			var pubKeyB64 string
-			switch {
-			case *pubKeyFlag != "":
-				pubKeyB64 = *pubKeyFlag
-			case *pubKeyFile != "":
-				data, err := os.ReadFile(*pubKeyFile)
-				if err != nil {
-					exitConfig("pubkey-file: %v", err)
-				}
-				pubKeyB64 = strings.TrimSpace(string(data))
-			}
-			if pubKeyB64 != "" {
-				pubKey, err := chain.ParsePublicKey(pubKeyB64)
-				if err != nil {
-					exitConfig("parse public key: %v", err)
-				}
-				effectiveKeyring = chain.SingleKeyKeyring(pubKey)
-			}
+		if effectiveSigningKeyring == nil {
+			exitConfig("--verify-signatures/--restore-drill requires --pubkey, --pubkey-file, or --signing-keyring")
 		}
-		if effectiveKeyring == nil && *verifySignatures {
-			exitConfig("--verify-signatures requires --pubkey, --pubkey-file, or --signing-keyring")
-		}
-		if effectiveKeyring != nil {
+		if effectiveSigningKeyring != nil {
 			for _, table := range tables {
-				sr, err := chain.VerifyAnchorSignaturesWithKeyring(ctx, db, table, effectiveKeyring)
+				sr, err := chain.VerifyAnchorSignaturesWithKeyring(ctx, db, table, effectiveSigningKeyring)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR signatures %s: %v\n", table, err)
 					anyFail = true
@@ -346,26 +343,6 @@ func main() {
 		sink := chain.NewImmuDBSink(immuClient, *immudbDB)
 		repo := chain.NewAnchorRepository(db)
 
-		// Optional pubKey for signature verification.
-		var sinkPubKey ed25519.PublicKey
-		if *pubKeyFlag != "" || *pubKeyFile != "" {
-			var b64 string
-			if *pubKeyFlag != "" {
-				b64 = *pubKeyFlag
-			} else {
-				data, err := os.ReadFile(*pubKeyFile)
-				if err != nil {
-					exitConfig("pubkey-file: %v", err)
-				}
-				b64 = strings.TrimSpace(string(data))
-			}
-			pk, err := chain.ParsePublicKey(b64)
-			if err != nil {
-				exitConfig("parse public key for --verify-sink: %v", err)
-			}
-			sinkPubKey = pk
-		}
-
 		for _, table := range tables {
 			anchors, err := repo.ListAnchors(ctx, table)
 			if err != nil {
@@ -379,15 +356,15 @@ func main() {
 				if a.SinkName != "immudb://" {
 					continue
 				}
-				// Warn if signed anchor verified without pubkey (signature not checked).
-				if a.PubKeyID != "" && len(sinkPubKey) == 0 && !sigWarned {
+				// Warn if signed anchor verified without trusted public key material.
+				if a.PubKeyID != "" && effectiveSigningKeyring == nil && !sigWarned {
 					fmt.Printf("  WARNING: signed anchor(s) for %s found (pubkey_id=%q) "+
-						"but no --pubkey provided — field parity only, signature NOT verified.\n",
+						"but no --pubkey/--signing-keyring provided — field parity only, signature NOT verified.\n",
 						table, a.PubKeyID)
 					sigWarned = true
 				}
 				aCopy := a
-				ok, err := chain.VerifyImmuDBSinkRecord(ctx, sink, &aCopy, sinkPubKey)
+				ok, err := chain.VerifyImmuDBSinkRecordWithKeyring(ctx, sink, &aCopy, effectiveSigningKeyring)
 				if err != nil {
 					if *verbose {
 						fmt.Printf("  SINK_ERR anchor_id=%s: %v\n", a.ID, err)
@@ -409,6 +386,17 @@ func main() {
 				status = "FAIL"
 			}
 			fmt.Printf("sink   %-24s %-6s ok=%d fails=%d\n", table, status, sinkOK, sinkFails)
+
+			additional, err := chain.VerifyAnchorAdditionalSinksWithKeyring(ctx, db, table, sink, effectiveSigningKeyring)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR additional sinks %s: %v\n", table, err)
+				anyFail = true
+				continue
+			}
+			printAdditionalSinksResult("sink+ ", additional, *verbose)
+			if !additional.OK {
+				anyFail = true
+			}
 		}
 	}
 
@@ -450,11 +438,40 @@ func main() {
 					fmt.Printf("  ANCHOR_GAP seq_no=%d\n", g)
 				}
 			}
+
+			additional, err := chain.VerifyAnchorAdditionalFileSinksWithKeyring(ctx, db, table, effectiveSigningKeyring)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR additional file sinks %s: %v\n", table, err)
+				anyFail = true
+				continue
+			}
+			printAdditionalSinksResult("file+ ", additional, *verbose)
+			if !additional.OK {
+				anyFail = true
+			}
 		}
 	}
 
 	if anyFail {
 		os.Exit(1)
+	}
+}
+
+func printAdditionalSinksResult(prefix string, r chain.AdditionalSinksVerifyResult, verbose bool) {
+	if r.SinkCount == 0 && len(r.Failures) == 0 {
+		return
+	}
+	status := "OK"
+	if !r.OK {
+		status = "FAIL"
+	}
+	fmt.Printf("%-6s %-24s %-6s sinks=%d ok=%d fails=%d\n",
+		prefix, r.Table, status, r.SinkCount, r.OKCount, len(r.Failures))
+	if verbose {
+		for _, f := range r.Failures {
+			fmt.Printf("  ADDITIONAL_SINK_%s anchor_id=%s sink=%s ref=%s range=[%d,%d] reason=%s\n",
+				strings.ToUpper(f.Status), f.AnchorID, f.SinkName, f.SinkRef, f.SeqLo, f.SeqHi, f.Reason)
+		}
 	}
 }
 

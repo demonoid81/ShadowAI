@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -187,6 +188,10 @@ func TestSigningKeyring_LegacyKeyUsedForEmptyPubKeyID(t *testing.T) {
 	if !VerifyAnchorSignature(a, legacyPub) {
 		t.Error("legacy anchor should verify with legacy key")
 	}
+	pubWithID, ok := keyring.LookupSigningKey("ed25519-current")
+	if !ok || !bytes.Equal(pubWithID, pub) {
+		t.Error("single-key compatibility mode should verify anchors with non-empty pubkey_id")
+	}
 }
 
 // TestSigningKeyring_ExtraKeysNotError — extra keys in keyring don't cause errors.
@@ -243,9 +248,9 @@ func TestChainSecretKeyring_LookupBySeqNo(t *testing.T) {
 	}
 
 	cases := []struct {
-		seqNo    int64
-		wantSec  []byte
-		wantOK   bool
+		seqNo   int64
+		wantSec []byte
+		wantOK  bool
 	}{
 		{0, secret1, true},
 		{500, secret1, true},
