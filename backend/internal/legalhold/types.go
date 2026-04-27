@@ -36,6 +36,7 @@ const (
 // L5: ReleaseRequestedAt, ReleaseRequestedBy, ScopeType, ScopeDateFrom, ScopeDateTo.
 type Hold struct {
 	ID           string
+	OrgID        string
 	TargetUserID string
 	CaseRef      string
 	Reason       string

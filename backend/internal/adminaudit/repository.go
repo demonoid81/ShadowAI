@@ -251,7 +251,7 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, actorID
 	args := []any{}
 	argIdx := 1
 	if orgID != "" {
-		where = append(where, fmt.Sprintf("org_id = $%d", argIdx))
+		where = append(where, adminEventOrgPredicate(argIdx))
 		args = append(args, orgID)
 		argIdx++
 	}
@@ -316,4 +316,9 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, actorID
 		events = append(events, e)
 	}
 	return events, total, nil
+}
+
+func adminEventOrgPredicate(argIdx int) string {
+	placeholder := fmt.Sprintf("$%d", argIdx)
+	return fmt.Sprintf("(org_id = %[1]s OR source_org_id = %[1]s OR target_org_id = %[1]s)", placeholder)
 }

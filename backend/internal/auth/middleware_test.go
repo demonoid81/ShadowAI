@@ -206,3 +206,24 @@ func TestPtrStr_Value(t *testing.T) {
 		t.Errorf("ptrStr(&%q) = %q, want finance", s, got)
 	}
 }
+
+func TestIsPrivilegedAdminRole(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		want bool
+	}{
+		{name: "admin", role: RoleAdmin, want: true},
+		{name: "global admin", role: RoleGlobalAdmin, want: true},
+		{name: "user", role: RoleUser, want: false},
+		{name: "auditor", role: RoleAuditor, want: false},
+		{name: "empty", role: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsPrivilegedAdminRole(tc.role); got != tc.want {
+				t.Fatalf("IsPrivilegedAdminRole(%q) = %v, want %v", tc.role, got, tc.want)
+			}
+		})
+	}
+}

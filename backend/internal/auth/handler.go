@@ -43,16 +43,33 @@ type Eraser interface {
 	EraseUser(ctx context.Context, actorUserID, targetUserID string) (*ErasureResult, error)
 }
 
+// OrgScopedEraser реализует ErasureService, когда доступна привязка к org.
+// Тесты и старые вызывающие стороны могут по-прежнему реализовывать только Eraser.
+type OrgScopedEraser interface {
+	EraseUserInOrg(ctx context.Context, actorUserID, targetUserID, orgID string) (*ErasureResult, error)
+}
+
+// UserOrgLookup резолвит принадлежность целевого пользователя для admin-действий в org.
+type UserOrgLookup interface {
+	GetByID(ctx context.Context, id string) (*domain.User, error)
+	GetByIDScoped(ctx context.Context, id, orgID string) (*domain.User, error)
+}
+
 type Handler struct {
 	service    *Service
 	eraser     Eraser
 	adminAudit adminaudit.Recorder
+	userLookup UserOrgLookup
 }
 
 // NewHandler. Если eraser=nil, endpoint /users/{id}/erase вернёт
 // 503. adminAudit nil → admin-событие для erase не пишется (dev/tests).
 func NewHandler(service *Service, eraser Eraser, adminAudit adminaudit.Recorder) *Handler {
-	return &Handler{service: service, eraser: eraser, adminAudit: adminAudit}
+	h := &Handler{service: service, eraser: eraser, adminAudit: adminAudit}
+	if service != nil {
+		h.userLookup = service.GetRepo()
+	}
+	return h
 }
 
 type loginRequest struct {
@@ -402,8 +419,12 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		meta["new_is_active"] = existing.IsActive
 	}
 	deptChanged := func(a, b *string) bool {
-		if a == nil && b == nil { return false }
-		if a == nil || b == nil { return true }
+		if a == nil && b == nil {
+			return false
+		}
+		if a == nil || b == nil {
+			return true
+		}
 		return *a != *b
 	}
 	if deptChanged(existing.Department, oldDept) {
@@ -469,11 +490,17 @@ func (h *Handler) RotateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	targetID := claims.UserID
 	if req.UserID != "" {
-		if claims.Role != RoleAdmin {
+		if !IsPrivilegedAdminRole(claims.Role) && !claims.BreakGlass {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
 			return
 		}
 		targetID = req.UserID
+	}
+	if targetID != claims.UserID {
+		if _, ok := h.resolveTargetUserOrg(r.Context(), targetID, claims); !ok {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "user not found"})
+			return
+		}
 	}
 
 	newKey, err := h.service.RotateAPIKey(r.Context(), targetID)
@@ -501,7 +528,7 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
-	if claims.Role != RoleAdmin {
+	if !IsPrivilegedAdminRole(claims.Role) && !claims.BreakGlass {
 		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
 		return
 	}
@@ -516,7 +543,22 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.eraser.EraseUser(r.Context(), claims.UserID, targetID)
+	targetOrgID, ok := h.resolveTargetUserOrg(r.Context(), targetID, claims)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "user not found"})
+		h.recordErase(r, claims.UserID, targetID, http.StatusNotFound, false, map[string]any{
+			"error": "user not found",
+		})
+		return
+	}
+
+	var result *ErasureResult
+	var err error
+	if scoped, ok := h.eraser.(OrgScopedEraser); ok {
+		result, err = scoped.EraseUserInOrg(r.Context(), claims.UserID, targetID, targetOrgID)
+	} else {
+		result, err = h.eraser.EraseUser(r.Context(), claims.UserID, targetID)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "erasure failed"})
 		h.recordErase(r, claims.UserID, targetID, http.StatusInternalServerError, false, map[string]any{
@@ -544,11 +586,35 @@ func (h *Handler) EraseUser(w http.ResponseWriter, r *http.Request) {
 		"status":              string(result.Status),
 		"audit_rows_scrubbed": result.AuditRowsScrubbed,
 		"budgets_deleted":     result.BudgetsDeleted,
+		"target_org_id":       targetOrgID,
 	}
 	if result.Status == ErasureHoldActive {
 		meta["blocked_by_hold"] = true
 	}
 	h.recordErase(r, claims.UserID, targetID, status, status < 400, meta)
+}
+
+func (h *Handler) resolveTargetUserOrg(ctx context.Context, targetID string, claims *Claims) (string, bool) {
+	orgID, global, err := RequireOrg(claims)
+	if err != nil {
+		return "", false
+	}
+	if h.userLookup == nil {
+		// Unit-test / legacy no-repo path. Production NewHandler wires auth.Repository.
+		return orgID, true
+	}
+	if global {
+		u, err := h.userLookup.GetByID(ctx, targetID)
+		if err != nil || u == nil {
+			return "", false
+		}
+		return u.OrgID, true
+	}
+	u, err := h.userLookup.GetByIDScoped(ctx, targetID, orgID)
+	if err != nil || u == nil {
+		return "", false
+	}
+	return u.OrgID, true
 }
 
 // recordErase пишет admin-event о erasure (action=erase, resource=user).

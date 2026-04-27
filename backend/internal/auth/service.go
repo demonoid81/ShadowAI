@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,10 +29,10 @@ var (
 )
 
 const (
-	RoleAdmin       = "admin"
-	RoleUser        = "user"
-	RoleAnalyst     = "analyst"
-	RoleAuditor     = "auditor"
+	RoleAdmin   = "admin"
+	RoleUser    = "user"
+	RoleAnalyst = "analyst"
+	RoleAuditor = "auditor"
 	// RoleGlobalAdmin is a special cross-tenant role. It cannot be set via
 	// normal registration (NormalizeRole rejects it); it must be assigned via
 	// direct DB write or admin API by an existing global_admin.
@@ -50,6 +50,14 @@ var allowedRoles = map[string]struct{}{
 // Both bypass per-org tenant filters.
 func IsGlobalClaims(c *Claims) bool {
 	return c != nil && (c.BreakGlass || c.Role == RoleGlobalAdmin)
+}
+
+// IsPrivilegedAdminRole возвращает true для ролей с правами
+// привилегированного администрирования контура управления. global_admin включён
+// намеренно: межарендаторный admin должен проходить те же MFA требования, что и
+// admin арендатора.
+func IsPrivilegedAdminRole(role string) bool {
+	return role == RoleAdmin || role == RoleGlobalAdmin
 }
 
 // RequireOrg extracts the org scope from claims.
@@ -70,14 +78,14 @@ func RequireOrg(c *Claims) (orgID string, global bool, err error) {
 }
 
 type Claims struct {
-	UserID       string `json:"user_id"`
-	Email        string `json:"email"`
-	Role         string `json:"role"`
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	Role   string `json:"role"`
 	// OrgID is the organization scope for this session (PR-T2.2).
 	// Set from users.org_id by AuthMiddleware after DB lookup — never from JWT payload.
 	// Empty string only for break-glass/global sessions (BreakGlass=true).
 	// Middleware rejects non-break-glass sessions with empty OrgID (fail-closed).
-	OrgID        string `json:"org_id,omitempty"`
+	OrgID string `json:"org_id,omitempty"`
 	// Department is the user's organizational department, populated from users.department.
 	// Used by PR-G3 context_scoped governance routing. Empty string = no department assigned.
 	// This field is server-issued (trusted). Request headers must NOT override it.
@@ -85,9 +93,9 @@ type Claims struct {
 	TokenVersion int    `json:"tv"`
 	// PR-E1.1: MFA and break-glass session markers.
 	// MFAVerified=true — session was authenticated with TOTP code in addition to password.
-	MFAVerified  bool   `json:"mfa_verified,omitempty"`
+	MFAVerified bool `json:"mfa_verified,omitempty"`
 	// BreakGlass=true — short-lived emergency session (1h TTL, all actions audited).
-	BreakGlass   bool   `json:"break_glass,omitempty"`
+	BreakGlass bool `json:"break_glass,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -148,12 +156,12 @@ func (s *Service) Register(ctx context.Context, email, password, role string) (*
 	}
 	apiKeyHash := hashAPIKey(apiKey)
 	u := &domain.User{
-		ID:       uuid.New().String(),
-		Email:    email,
-		Password: string(hash),
-		Role:     normRole,
-		APIKey:   apiKeyHash,
-		IsActive: true,
+		ID:           uuid.New().String(),
+		Email:        email,
+		Password:     string(hash),
+		Role:         normRole,
+		APIKey:       apiKeyHash,
+		IsActive:     true,
 		TokenVersion: 0,
 	}
 	if err := s.repo.CreateUser(ctx, u); err != nil {

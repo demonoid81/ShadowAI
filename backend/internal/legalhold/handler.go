@@ -5,6 +5,7 @@
 package legalhold
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/auth"
+	"github.com/shadowai/backend/internal/domain"
 )
 
 // tokenizer — PR-L1.2: keyed HMAC-SHA256 (truncated к 16 hex =
@@ -33,8 +35,8 @@ import (
 // process. Warning emission защищён sync.Once — безопасно при
 // concurrent requests (PR-L1.3 data-race fix).
 type tokenizer struct {
-	secret    []byte
-	warnOnce  sync.Once
+	secret   []byte
+	warnOnce sync.Once
 }
 
 // newTokenizer. Пустой secret → unkeyed mode (dev only — prod
@@ -91,6 +93,12 @@ type Handler struct {
 	svc        *Service
 	adminAudit adminaudit.Recorder
 	tokens     *tokenizer
+	userLookup UserOrgLookup
+}
+
+type UserOrgLookup interface {
+	GetByID(ctx context.Context, id string) (*domain.User, error)
+	GetByIDScoped(ctx context.Context, id, orgID string) (*domain.User, error)
 }
 
 // NewHandler — каноничный конструктор. Использует unkeyed tokenizer
@@ -106,6 +114,57 @@ func NewHandler(svc *Service, adminAudit adminaudit.Recorder) *Handler {
 // вариант.
 func NewHandlerWithSecret(svc *Service, adminAudit adminaudit.Recorder, tokenSecret string) *Handler {
 	return &Handler{svc: svc, adminAudit: adminAudit, tokens: newTokenizer(tokenSecret)}
+}
+
+func (h *Handler) WithUserLookup(lookup UserOrgLookup) *Handler {
+	h.userLookup = lookup
+	return h
+}
+
+func requirePrivilegedAdmin(w http.ResponseWriter, r *http.Request) (*auth.Claims, bool) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+		return nil, false
+	}
+	if !auth.IsPrivilegedAdminRole(claims.Role) && !claims.BreakGlass {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return nil, false
+	}
+	return claims, true
+}
+
+func (h *Handler) orgScopeForClaims(claims *auth.Claims) (string, bool) {
+	orgID, global, err := auth.RequireOrg(claims)
+	if err != nil {
+		return "", false
+	}
+	if global {
+		return "", true
+	}
+	return orgID, true
+}
+
+func (h *Handler) resolveTargetOrg(ctx context.Context, targetUserID string, claims *auth.Claims) (string, bool) {
+	orgID, global, err := auth.RequireOrg(claims)
+	if err != nil {
+		return "", false
+	}
+	if h.userLookup == nil {
+		return orgID, true
+	}
+	if global {
+		u, err := h.userLookup.GetByID(ctx, targetUserID)
+		if err != nil || u == nil {
+			return "", false
+		}
+		return u.OrgID, true
+	}
+	u, err := h.userLookup.GetByIDScoped(ctx, targetUserID, orgID)
+	if err != nil || u == nil {
+		return "", false
+	}
+	return u.OrgID, true
 }
 
 type createRequest struct {
@@ -141,13 +200,8 @@ type errorResponse struct {
 // "apply_hold_requested" (раньше был "apply_hold" — breaking
 // change для SIEM-consumer'ов; changelog 1.17 документирует).
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
-		return
-	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
 
@@ -158,7 +212,16 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold, err := h.svc.CreateHold(r.Context(), req.TargetUserID, req.CaseRef, req.Reason, claims.UserID)
+	targetOrgID, ok := h.resolveTargetOrg(r.Context(), req.TargetUserID, claims)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "target user not found"})
+		h.recordAdmin(r, "apply_hold_requested", req.TargetUserID, http.StatusNotFound, false, map[string]any{
+			"error_code": "target_user_not_found",
+		})
+		return
+	}
+
+	hold, err := h.svc.CreateHoldInOrg(r.Context(), req.TargetUserID, req.CaseRef, req.Reason, claims.UserID, targetOrgID)
 	if err != nil {
 		// PR-L1.1: split error paths. Validation → 400 (generic);
 		// not configured → 503; already active/pending → 409; всё
@@ -217,13 +280,13 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 //	not found → 404
 //	self      → 403     (metadata.error_code="self_approval")
 func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	id := mux.Vars(r)["id"]
@@ -232,7 +295,7 @@ func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold, err := h.svc.Approve(r.Context(), id, claims.UserID)
+	hold, err := h.svc.ApproveInOrg(r.Context(), id, claims.UserID, orgID)
 	if err != nil {
 		switch {
 		case IsNotFound(err):
@@ -286,13 +349,13 @@ func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 // Rejector может быть тем же admin, что и creator (это cancellation
 // собственного request'а, не approval).
 func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	id := mux.Vars(r)["id"]
@@ -301,7 +364,7 @@ func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold, err := h.svc.Reject(r.Context(), id, claims.UserID)
+	hold, err := h.svc.RejectInOrg(r.Context(), id, claims.UserID, orgID)
 	if err != nil {
 		switch {
 		case IsNotFound(err):
@@ -344,13 +407,13 @@ func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
 // Release — POST /api/legal-holds/{id}/release. Admin-only. Body не
 // требуется.
 func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	id := mux.Vars(r)["id"]
@@ -361,7 +424,7 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 
 	// PR-L5 BREAKING CHANGE: ReleaseHold теперь RequestRelease
 	// (active → release_pending). Требуется ApproveRelease от второго admin.
-	hold, err := h.svc.ReleaseHold(r.Context(), id, claims.UserID)
+	hold, err := h.svc.ReleaseHoldInOrg(r.Context(), id, claims.UserID, orgID)
 	if err != nil {
 		switch {
 		case IsNotFound(err):
@@ -407,13 +470,13 @@ func (h *Handler) Release(w http.ResponseWriter, r *http.Request) {
 // PR-L5: 4-eyes перевод release_pending → released.
 // approver должен отличаться от того, кто запросил release.
 func (h *Handler) ApproveRelease(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	id := mux.Vars(r)["id"]
@@ -422,7 +485,7 @@ func (h *Handler) ApproveRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold, err := h.svc.ApproveRelease(r.Context(), id, claims.UserID)
+	hold, err := h.svc.ApproveReleaseInOrg(r.Context(), id, claims.UserID, orgID)
 	if err != nil {
 		switch {
 		case IsNotFound(err):
@@ -454,13 +517,13 @@ func (h *Handler) ApproveRelease(w http.ResponseWriter, r *http.Request) {
 // RejectRelease — POST /api/legal-holds/{id}/reject-release.
 // PR-L5: перевод release_pending → active (release rejected).
 func (h *Handler) RejectRelease(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	id := mux.Vars(r)["id"]
@@ -469,7 +532,7 @@ func (h *Handler) RejectRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hold, err := h.svc.RejectRelease(r.Context(), id, claims.UserID)
+	hold, err := h.svc.RejectReleaseInOrg(r.Context(), id, claims.UserID, orgID)
 	if err != nil {
 		switch {
 		case IsNotFound(err):
@@ -500,13 +563,13 @@ func (h *Handler) RejectRelease(w http.ResponseWriter, r *http.Request) {
 // Body: {"ids": ["id-1", "id-2", ...]}
 // Per-item semantics: partial failures are reported per-item.
 func (h *Handler) BulkApprove(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	var req struct {
@@ -521,7 +584,7 @@ func (h *Handler) BulkApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := h.svc.BulkApprove(r.Context(), req.IDs, claims.UserID)
+	results, err := h.svc.BulkApproveInOrg(r.Context(), req.IDs, claims.UserID, orgID)
 	if err != nil {
 		if IsNotConfigured(err) {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
@@ -554,13 +617,13 @@ func (h *Handler) BulkApprove(w http.ResponseWriter, r *http.Request) {
 // BulkReject — POST /api/legal-holds/bulk-reject. Admin-only.
 // Body: {"ids": [...]}
 func (h *Handler) BulkReject(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 	var req struct {
@@ -575,7 +638,7 @@ func (h *Handler) BulkReject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := h.svc.BulkReject(r.Context(), req.IDs, claims.UserID)
+	results, err := h.svc.BulkRejectInOrg(r.Context(), req.IDs, claims.UserID, orgID)
 	if err != nil {
 		if IsNotConfigured(err) {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
@@ -609,13 +672,13 @@ func (h *Handler) BulkReject(w http.ResponseWriter, r *http.Request) {
 // PR-L5: SLA visibility. Возвращает pending holds старше threshold.
 // Default threshold: 24 hours.
 func (h *Handler) PendingSLA(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
 
@@ -627,7 +690,7 @@ func (h *Handler) PendingSLA(w http.ResponseWriter, r *http.Request) {
 	}
 	threshold := time.Duration(thresholdHours) * time.Hour
 
-	holds, err := h.svc.PendingOlderThan(r.Context(), threshold)
+	holds, err := h.svc.PendingOlderThanInOrg(r.Context(), threshold, orgID)
 	if err != nil {
 		if IsNotConfigured(err) {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
@@ -651,17 +714,17 @@ func (h *Handler) PendingSLA(w http.ResponseWriter, r *http.Request) {
 // List — GET /api/legal-holds. Admin-only. Возвращает все holds
 // (active + released) в порядке active-first, created_at DESC.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
+		return
+	}
+	orgID, ok := h.orgScopeForClaims(claims)
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
 		return
 	}
-	if claims.Role != auth.RoleAdmin {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
-		return
-	}
 
-	holds, err := h.svc.List(r.Context())
+	holds, err := h.svc.ListInOrg(r.Context(), orgID)
 	if err != nil {
 		if IsNotConfigured(err) {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})

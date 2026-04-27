@@ -293,10 +293,10 @@ func (h *Handler) recordSuccess(r *http.Request, result SyncResult, claims IDTok
 		StatusCode:  http.StatusOK,
 		Success:     true,
 		Metadata: map[string]any{
-			"issuer":       h.cfg.IssuerURL,
-			"role_mapped":  result.RoleMapped,
-			"dept_synced":  result.DeptSynced,
-			"action":       result.Action,
+			"issuer":      h.cfg.IssuerURL,
+			"role_mapped": result.RoleMapped,
+			"dept_synced": result.DeptSynced,
+			"action":      result.Action,
 			// NOTE: no raw token values, no email, no sub — PII-minimized.
 		},
 	})
@@ -345,7 +345,7 @@ func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDToke
 // in an admin session. Checks three paths in order:
 //
 //  1. OIDC groups claim maps to admin role.
-//  2. Existing user found by subject already has admin role.
+//  2. Существующий user, найденный по subject, уже имеет привилегированную admin-роль.
 //  3. Email-link path: OIDC_LINK_BY_EMAIL=true AND email link is allowed
 //     (verified email OR AllowUnverifiedEmail=true, mirroring requireVerifiedEmail)
 //     AND existing user found by email already has admin role.
@@ -353,13 +353,13 @@ func (h *Handler) wouldBeAdmin(ctx context.Context, issuer string, claims IDToke
 // Called BEFORE Sync() to prevent dirty writes when admin MFA is denied.
 func wouldBeAdminWith(ctx context.Context, issuer string, claims IDTokenClaims, cfg *Config, lookup oidcAdminLookup) (bool, string) {
 	// 1. Groups → admin mapping.
-	if mappedRole := cfg.MapRole(claims.Groups); mappedRole == auth.RoleAdmin {
+	if mappedRole := cfg.MapRole(claims.Groups); auth.IsPrivilegedAdminRole(mappedRole) {
 		return true, "groups_map_to_admin"
 	}
 	// 2. Existing user by subject already admin.
 	if claims.Subject != "" {
 		existing, err := lookup.GetBySubject(ctx, issuer, claims.Subject)
-		if err == nil && existing != nil && existing.Role == auth.RoleAdmin {
+		if err == nil && existing != nil && auth.IsPrivilegedAdminRole(existing.Role) {
 			return true, "existing_admin_role"
 		}
 	}
@@ -370,7 +370,7 @@ func wouldBeAdminWith(ctx context.Context, issuer string, claims IDTokenClaims, 
 		(claims.EmailVerified || cfg.AllowUnverifiedEmail)
 	if emailLinkAllowed {
 		byEmail, err := lookup.GetByEmail(ctx, claims.Email)
-		if err == nil && byEmail != nil && byEmail.Role == auth.RoleAdmin {
+		if err == nil && byEmail != nil && auth.IsPrivilegedAdminRole(byEmail.Role) {
 			return true, "email_link_to_admin"
 		}
 	}

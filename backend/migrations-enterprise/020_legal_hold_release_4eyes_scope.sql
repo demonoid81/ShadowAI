@@ -62,10 +62,35 @@ ALTER TABLE legal_holds
 ALTER TABLE legal_holds
     ADD COLUMN IF NOT EXISTS scope_type VARCHAR(16) NOT NULL DEFAULT 'whole_user';
 
-ALTER TABLE legal_holds
-    ADD CONSTRAINT IF NOT EXISTS legal_holds_scope_type_check
-    CHECK (scope_type IN ('whole_user', 'date_range'));
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'legal_holds_scope_type_check'
+           AND conrelid = 'legal_holds'::regclass
+    ) THEN
+        ALTER TABLE legal_holds
+            ADD CONSTRAINT legal_holds_scope_type_check
+                CHECK (scope_type IN ('whole_user', 'date_range'));
+    END IF;
+END $$;
 
 ALTER TABLE legal_holds
     ADD COLUMN IF NOT EXISTS scope_date_from TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS scope_date_to   TIMESTAMPTZ;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 6. legal_hold_events vocabulary for release 4-eyes workflow.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE legal_hold_events
+    DROP CONSTRAINT IF EXISTS legal_hold_events_action_check,
+    DROP CONSTRAINT IF EXISTS legal_hold_events_new_status_check;
+
+ALTER TABLE legal_hold_events
+    ADD CONSTRAINT legal_hold_events_action_check
+        CHECK (action IN (
+            'create', 'approve', 'reject', 'release',
+            'request_release', 'approve_release', 'reject_release'
+        )),
+    ADD CONSTRAINT legal_hold_events_new_status_check
+        CHECK (new_status IN ('pending', 'active', 'release_pending', 'released'));

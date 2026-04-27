@@ -14,6 +14,7 @@ import (
 
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/auth"
+	"github.com/shadowai/backend/internal/domain"
 )
 
 type captureRecorder struct {
@@ -33,8 +34,26 @@ func setupHandler(t *testing.T) (*Handler, *memRepo, *captureRecorder) {
 
 func adminCtx(req *http.Request, actor string) *http.Request {
 	return req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
-		UserID: actor, Role: auth.RoleAdmin,
+		UserID: actor, Role: auth.RoleAdmin, OrgID: domain.DefaultOrgID,
 	}))
+}
+
+type stubUserOrgLookup struct {
+	byID map[string]*domain.User
+}
+
+func (s stubUserOrgLookup) GetByID(_ context.Context, id string) (*domain.User, error) {
+	if u := s.byID[id]; u != nil {
+		return u, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (s stubUserOrgLookup) GetByIDScoped(_ context.Context, id, orgID string) (*domain.User, error) {
+	if u := s.byID[id]; u != nil && u.OrgID == orgID {
+		return u, nil
+	}
+	return nil, ErrNotFound
 }
 
 // TestCreate_HappyPath — PR-L2.3: admin создаёт pending hold;
@@ -78,6 +97,50 @@ func TestCreate_NonAdmin(t *testing.T) {
 	h.Create(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestCreate_TenantAdmin_CrossOrgDenied(t *testing.T) {
+	h, repo, _ := setupHandler(t)
+	h.userLookup = stubUserOrgLookup{byID: map[string]*domain.User{
+		"u-target": {ID: "u-target", OrgID: "org-b", IsActive: true},
+	}}
+	body := `{"target_user_id":"u-target","case_ref":"x","reason":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body))
+	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
+		UserID: "u-admin", Role: auth.RoleAdmin, OrgID: "org-a",
+	}))
+	w := httptest.NewRecorder()
+
+	h.Create(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s, want 404", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 0 {
+		t.Fatalf("hold created for cross-org target: %+v", repo.holds)
+	}
+}
+
+func TestCreate_TenantAdmin_SameOrgSetsHoldOrg(t *testing.T) {
+	h, repo, _ := setupHandler(t)
+	h.userLookup = stubUserOrgLookup{byID: map[string]*domain.User{
+		"u-target": {ID: "u-target", OrgID: "org-a", IsActive: true},
+	}}
+	body := `{"target_user_id":"u-target","case_ref":"x","reason":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/legal-holds", bytes.NewBufferString(body))
+	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
+		UserID: "u-admin", Role: auth.RoleAdmin, OrgID: "org-a",
+	}))
+	w := httptest.NewRecorder()
+
+	h.Create(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s, want 201", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 1 || repo.holds[0].OrgID != "org-a" {
+		t.Fatalf("hold org mismatch: %+v", repo.holds)
 	}
 }
 

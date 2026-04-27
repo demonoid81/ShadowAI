@@ -15,9 +15,9 @@ import (
 // Sentinel errors для различения validation / config / runtime
 // failures в handler'е. Caller мапит их в HTTP status codes:
 //
-//   ErrValidation    → 400 (bad request, generic message)
-//   ErrNotConfigured → 503 (service unavailable)
-//   everything else  → 500 (internal, generic message)
+//	ErrValidation    → 400 (некорректный запрос, общее сообщение)
+//	ErrNotConfigured → 503 (сервис недоступен)
+//	прочие ошибки    → 500 (внутренняя ошибка, общее сообщение)
 //
 // Raw err.Error() строки НЕ должны уходить клиенту — admin event
 // metadata пишет machine-readable code вместо этого (PR-L1.1).
@@ -57,6 +57,17 @@ type Repository interface {
 	PendingOlderThan(ctx context.Context, threshold time.Duration) ([]Hold, error)
 }
 
+type ScopedRepository interface {
+	CreateInOrg(ctx context.Context, h *Hold, orgID string) (*Hold, error)
+	ApproveInOrg(ctx context.Context, id, approverID, orgID string) (*Hold, error)
+	RejectInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error)
+	ReleaseInOrg(ctx context.Context, id, requesterID, orgID string) (*Hold, error)
+	ApproveReleaseInOrg(ctx context.Context, id, approverID, orgID string) (*Hold, error)
+	RejectReleaseInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error)
+	ListInOrg(ctx context.Context, orgID string) ([]Hold, error)
+	PendingOlderThanInOrg(ctx context.Context, threshold time.Duration, orgID string) ([]Hold, error)
+}
+
 // Service — тонкая обёртка над repo. Валидация входа (non-empty
 // case_ref/reason) + prop'ает ErrAlreadyActive/ErrNotActive как
 // есть (handler их map'ит в HTTP codes).
@@ -78,6 +89,10 @@ func NewService(repo Repository) *Service {
 // системных операций (CLI), но на handler-level всегда заполняется
 // из claims.
 func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason, createdBy string) (*Hold, error) {
+	return s.CreateHoldInOrg(ctx, targetUserID, caseRef, reason, createdBy, "")
+}
+
+func (s *Service) CreateHoldInOrg(ctx context.Context, targetUserID, caseRef, reason, createdBy, orgID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
@@ -91,6 +106,7 @@ func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason,
 		return nil, fmt.Errorf("reason required: %w", ErrValidation)
 	}
 	h := &Hold{
+		OrgID:        orgID,
 		TargetUserID: targetUserID,
 		CaseRef:      strings.TrimSpace(caseRef),
 		Reason:       strings.TrimSpace(reason),
@@ -98,6 +114,9 @@ func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason,
 	if createdBy != "" {
 		c := createdBy
 		h.CreatedBy = &c
+	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.CreateInOrg(ctx, h, orgID)
 	}
 	return s.repo.Create(ctx, h)
 }
@@ -111,11 +130,18 @@ func (s *Service) CreateHold(ctx context.Context, targetUserID, caseRef, reason,
 //   - release_pending → ErrAlreadyReleasePending (409, повторный запрос явный конфликт)
 //   - released → ErrNotActive (200 "already_released" — идемпотентно)
 func (s *Service) ReleaseHold(ctx context.Context, id, requesterID string) (*Hold, error) {
+	return s.ReleaseHoldInOrg(ctx, id, requesterID, "")
+}
+
+func (s *Service) ReleaseHoldInOrg(ctx context.Context, id, requesterID, orgID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.ReleaseInOrg(ctx, id, requesterID, orgID)
 	}
 	return s.repo.Release(ctx, id, requesterID)
 }
@@ -123,6 +149,10 @@ func (s *Service) ReleaseHold(ctx context.Context, id, requesterID string) (*Hol
 // ApproveRelease — PR-L5: 4-eyes перевод release_pending → released.
 // approverID должен отличаться от того, кто запросил release.
 func (s *Service) ApproveRelease(ctx context.Context, id, approverID string) (*Hold, error) {
+	return s.ApproveReleaseInOrg(ctx, id, approverID, "")
+}
+
+func (s *Service) ApproveReleaseInOrg(ctx context.Context, id, approverID, orgID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
@@ -132,16 +162,26 @@ func (s *Service) ApproveRelease(ctx context.Context, id, approverID string) (*H
 	if strings.TrimSpace(approverID) == "" {
 		return nil, fmt.Errorf("approver_id required: %w", ErrValidation)
 	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.ApproveReleaseInOrg(ctx, id, approverID, orgID)
+	}
 	return s.repo.ApproveRelease(ctx, id, approverID)
 }
 
 // RejectRelease — PR-L5: перевод release_pending → active (release rejected).
 func (s *Service) RejectRelease(ctx context.Context, id, rejectorID string) (*Hold, error) {
+	return s.RejectReleaseInOrg(ctx, id, rejectorID, "")
+}
+
+func (s *Service) RejectReleaseInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.RejectReleaseInOrg(ctx, id, rejectorID, orgID)
 	}
 	return s.repo.RejectRelease(ctx, id, rejectorID)
 }
@@ -150,6 +190,10 @@ func (s *Service) RejectRelease(ctx context.Context, id, rejectorID string) (*Ho
 // Per-item semantics: один failing item не rollback'ает остальные.
 // Возвращает полный список результатов, включая partial failures.
 func (s *Service) BulkApprove(ctx context.Context, ids []string, approverID string) ([]BulkItemResult, error) {
+	return s.BulkApproveInOrg(ctx, ids, approverID, "")
+}
+
+func (s *Service) BulkApproveInOrg(ctx context.Context, ids []string, approverID, orgID string) ([]BulkItemResult, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
@@ -161,7 +205,13 @@ func (s *Service) BulkApprove(ctx context.Context, ids []string, approverID stri
 	}
 	results := make([]BulkItemResult, 0, len(ids))
 	for _, id := range ids {
-		hold, err := s.repo.Approve(ctx, id, approverID)
+		var hold *Hold
+		var err error
+		if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+			hold, err = scoped.ApproveInOrg(ctx, id, approverID, orgID)
+		} else {
+			hold, err = s.repo.Approve(ctx, id, approverID)
+		}
 		if err != nil {
 			results = append(results, BulkItemResult{
 				ID:    id,
@@ -181,6 +231,10 @@ func (s *Service) BulkApprove(ctx context.Context, ids []string, approverID stri
 // BulkReject — PR-L5: bulk перевод pending → released.
 // Per-item semantics: partial failure не rollback'ает остальные.
 func (s *Service) BulkReject(ctx context.Context, ids []string, rejectorID string) ([]BulkItemResult, error) {
+	return s.BulkRejectInOrg(ctx, ids, rejectorID, "")
+}
+
+func (s *Service) BulkRejectInOrg(ctx context.Context, ids []string, rejectorID, orgID string) ([]BulkItemResult, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
@@ -189,7 +243,13 @@ func (s *Service) BulkReject(ctx context.Context, ids []string, rejectorID strin
 	}
 	results := make([]BulkItemResult, 0, len(ids))
 	for _, id := range ids {
-		hold, err := s.repo.Reject(ctx, id, rejectorID)
+		var hold *Hold
+		var err error
+		if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+			hold, err = scoped.RejectInOrg(ctx, id, rejectorID, orgID)
+		} else {
+			hold, err = s.repo.Reject(ctx, id, rejectorID)
+		}
 		if err != nil {
 			results = append(results, BulkItemResult{
 				ID:    id,
@@ -209,11 +269,18 @@ func (s *Service) BulkReject(ctx context.Context, ids []string, rejectorID strin
 // PendingOlderThan — PR-L5: SLA visibility. Возвращает pending holds,
 // созданные более threshold назад. Без фонового воркера: query-on-demand.
 func (s *Service) PendingOlderThan(ctx context.Context, threshold time.Duration) ([]Hold, error) {
+	return s.PendingOlderThanInOrg(ctx, threshold, "")
+}
+
+func (s *Service) PendingOlderThanInOrg(ctx context.Context, threshold time.Duration, orgID string) ([]Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
 	if threshold <= 0 {
 		return nil, fmt.Errorf("threshold must be positive: %w", ErrValidation)
+	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.PendingOlderThanInOrg(ctx, threshold, orgID)
 	}
 	return s.repo.PendingOlderThan(ctx, threshold)
 }
@@ -250,8 +317,15 @@ func (s *Service) HasActiveHold(ctx context.Context, userID string) (bool, error
 
 // List возвращает все hold-ы, active first.
 func (s *Service) List(ctx context.Context) ([]Hold, error) {
+	return s.ListInOrg(ctx, "")
+}
+
+func (s *Service) ListInOrg(ctx context.Context, orgID string) ([]Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
+	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.ListInOrg(ctx, orgID)
 	}
 	return s.repo.List(ctx)
 }
@@ -272,6 +346,10 @@ func (s *Service) ActiveUserIDs(ctx context.Context) ([]string, error) {
 // approver == creator; ErrNotFound, если id не существует;
 // ErrNotPending, если hold уже approve'нут/released.
 func (s *Service) Approve(ctx context.Context, id, approverID string) (*Hold, error) {
+	return s.ApproveInOrg(ctx, id, approverID, "")
+}
+
+func (s *Service) ApproveInOrg(ctx context.Context, id, approverID, orgID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
@@ -281,6 +359,9 @@ func (s *Service) Approve(ctx context.Context, id, approverID string) (*Hold, er
 	if strings.TrimSpace(approverID) == "" {
 		return nil, fmt.Errorf("approver_id required: %w", ErrValidation)
 	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.ApproveInOrg(ctx, id, approverID, orgID)
+	}
 	return s.repo.Approve(ctx, id, approverID)
 }
 
@@ -289,11 +370,18 @@ func (s *Service) Approve(ctx context.Context, id, approverID string) (*Hold, er
 // Release: Reject работает только на pending, Release — только на
 // active.
 func (s *Service) Reject(ctx context.Context, id, rejectorID string) (*Hold, error) {
+	return s.RejectInOrg(ctx, id, rejectorID, "")
+}
+
+func (s *Service) RejectInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error) {
 	if s == nil || s.repo == nil {
 		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("id required: %w", ErrValidation)
+	}
+	if scoped, ok := s.repo.(ScopedRepository); ok && orgID != "" {
+		return scoped.RejectInOrg(ctx, id, rejectorID, orgID)
 	}
 	return s.repo.Reject(ctx, id, rejectorID)
 }

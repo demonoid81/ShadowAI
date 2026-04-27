@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/shadowai/backend/internal/adminaudit"
+	"github.com/shadowai/backend/internal/auth"
 	"github.com/shadowai/backend/internal/domain"
 )
 
@@ -237,6 +238,24 @@ func TestWouldBeAdmin_EmailLinkUnverified_AllowUnverifiedTrue(t *testing.T) {
 	}
 	if reason != "email_link_to_admin" {
 		t.Errorf("reason = %q, want email_link_to_admin", reason)
+	}
+}
+
+func TestWouldBeAdmin_ExistingGlobalAdminRole(t *testing.T) {
+	globalAdmin := &domain.User{ID: "global-admin-uuid", Role: auth.RoleGlobalAdmin, IsActive: true}
+	cfg := &Config{RequireMFAForAdmin: true, MFAAMRValues: []string{"mfa"}}
+	claims := IDTokenClaims{Subject: "global-admin-sub", AMR: []string{"pwd"}}
+	mock := &mockPreflightSyncer{
+		bySubject: map[string]*domain.User{"global-admin-sub": globalAdmin},
+		byEmail:   map[string]*domain.User{},
+	}
+
+	admin, reason := wouldBeAdminWith(context.Background(), "https://idp.example.com", claims, cfg, mock)
+	if !admin {
+		t.Fatal("existing global_admin must be treated as privileged admin before OIDC sync")
+	}
+	if reason != "existing_admin_role" {
+		t.Fatalf("reason = %q, want existing_admin_role", reason)
 	}
 }
 

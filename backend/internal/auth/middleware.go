@@ -135,7 +135,7 @@ func (s *Service) AuthMiddleware(next http.Handler) http.Handler {
 		// allow access to /auth/mfa/setup and /auth/mfa/confirm only, so they can
 		// enroll without being permanently locked out. All other routes are blocked
 		// until enrollment is complete.
-		if s.adminMFARequired && claims.Role == RoleAdmin && !claims.MFAVerified && !claims.BreakGlass {
+		if s.adminMFARequired && IsPrivilegedAdminRole(claims.Role) && !claims.MFAVerified && !claims.BreakGlass {
 			if !isMFAEnrollmentPath(r.URL.Path) {
 				mfaRequired()
 				return
@@ -249,7 +249,7 @@ func RequireAdminOrSelf(pathParam string) func(http.Handler) http.Handler {
 				return
 			}
 
-			if claims.Role == "admin" {
+			if claims.Role == RoleAdmin || IsGlobalClaims(claims) {
 				next.ServeHTTP(w, r)
 				return
 			}

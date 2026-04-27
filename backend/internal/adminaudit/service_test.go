@@ -82,3 +82,11 @@ func TestService_Record_RepoError_DoesNotPanic(t *testing.T) {
 	// трогаем — достаточно проверить что функция завершается).
 	svc.Record(context.Background(), Event{Action: "read"})
 }
+
+func TestAdminEventOrgPredicate_IncludesSourceAndTargetOrg(t *testing.T) {
+	got := adminEventOrgPredicate(3)
+	want := "(org_id = $3 OR source_org_id = $3 OR target_org_id = $3)"
+	if got != want {
+		t.Fatalf("predicate = %q, want %q", got, want)
+	}
+}

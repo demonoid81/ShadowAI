@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/shadowai/backend/internal/chain"
+	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/legalholdcoord"
 )
 
@@ -90,6 +91,12 @@ func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, 
 	if actorID != "" {
 		actorArg = actorID
 	}
+	orgID := domain.DefaultOrgID
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(org_id::text, $2) FROM legal_holds WHERE id = $1`,
+		holdID, domain.DefaultOrgID).Scan(&orgID); err != nil {
+		return fmt.Errorf("legalhold: resolve event org: %w", err)
+	}
 	canonical := chain.CanonicalLegalHoldEvent(eventID, holdID, action, newStatus, actorID, createdAt.Unix())
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableLegalHoldEvents, "legal_hold_events", chain.SeqLegalHoldEvents,
@@ -105,9 +112,9 @@ func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, 
 	}
 	// INSERT с явным created_at ($8) — совпадает с canonical.
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO legal_hold_events (id, hold_id, action, new_status, actor_id, created_at, seq_no, row_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		eventID, holdID, action, newStatus, actorArg, createdAt, seqArg, hashArg)
+		`INSERT INTO legal_hold_events (id, hold_id, action, new_status, actor_id, created_at, seq_no, row_hash, org_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		eventID, holdID, action, newStatus, actorArg, createdAt, seqArg, hashArg, orgID)
 	return err
 }
 
@@ -121,12 +128,20 @@ func (r *PGRepository) insertHoldEvent(ctx context.Context, tx *sql.Tx, holdID, 
 //
 // PR-L3: выполняется в tx под
 // `legalholdcoord.AcquireHoldPurgeLock`.
-//   Commit-order guarantee с retention-aware audit purge.
-//   (Pending hold тоже берёт lock — defensive, хотя
-//   purge-SQL проверяет только status='active').
+//
+//	Гарантия порядка commit для purge аудита с учётом retention.
+//	Ожидающий hold тоже берёт lock защитно, хотя
+//	purge-SQL проверяет только status='active'.
 func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
+	return r.CreateInOrg(ctx, h, h.OrgID)
+}
+
+func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (*Hold, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	if orgID == "" {
+		orgID = "00000000-0000-0000-0000-000000000001"
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -139,8 +154,8 @@ func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
 	}
 
 	const q = `INSERT INTO legal_holds
-	    (target_user_id, case_ref, reason, created_by, status, is_active)
-	    VALUES ($1, $2, $3, $4, 'pending', false)
+	    (target_user_id, case_ref, reason, created_by, status, is_active, org_id)
+	    VALUES ($1, $2, $3, $4, 'pending', false, $5)
 	    RETURNING id, created_at`
 	var (
 		id        string
@@ -150,7 +165,7 @@ func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
 	if h.CreatedBy != nil && *h.CreatedBy != "" {
 		actor = *h.CreatedBy
 	}
-	if err := tx.QueryRowContext(ctx, q, h.TargetUserID, h.CaseRef, h.Reason, actor).
+	if err := tx.QueryRowContext(ctx, q, h.TargetUserID, h.CaseRef, h.Reason, actor, orgID).
 		Scan(&id, &createdAt); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyActive
@@ -169,10 +184,62 @@ func (r *PGRepository) Create(ctx context.Context, h *Hold) (*Hold, error) {
 		return nil, fmt.Errorf("legalhold: commit: %w", err)
 	}
 	h.ID = id
+	h.OrgID = orgID
 	h.CreatedAt = createdAt
 	h.Status = StatusPending
 	h.IsActive = false
 	return h, nil
+}
+
+func (r *PGRepository) ensureHoldInOrg(ctx context.Context, id, orgID string) error {
+	if orgID == "" {
+		return nil
+	}
+	var exists bool
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM legal_holds WHERE id = $1 AND org_id = $2)`,
+		id, orgID).Scan(&exists); err != nil {
+		return fmt.Errorf("legalhold: org scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PGRepository) ApproveInOrg(ctx context.Context, id, approverID, orgID string) (*Hold, error) {
+	if err := r.ensureHoldInOrg(ctx, id, orgID); err != nil {
+		return nil, err
+	}
+	return r.Approve(ctx, id, approverID)
+}
+
+func (r *PGRepository) RejectInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error) {
+	if err := r.ensureHoldInOrg(ctx, id, orgID); err != nil {
+		return nil, err
+	}
+	return r.Reject(ctx, id, rejectorID)
+}
+
+func (r *PGRepository) ReleaseInOrg(ctx context.Context, id, requesterID, orgID string) (*Hold, error) {
+	if err := r.ensureHoldInOrg(ctx, id, orgID); err != nil {
+		return nil, err
+	}
+	return r.Release(ctx, id, requesterID)
+}
+
+func (r *PGRepository) ApproveReleaseInOrg(ctx context.Context, id, approverID, orgID string) (*Hold, error) {
+	if err := r.ensureHoldInOrg(ctx, id, orgID); err != nil {
+		return nil, err
+	}
+	return r.ApproveRelease(ctx, id, approverID)
+}
+
+func (r *PGRepository) RejectReleaseInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error) {
+	if err := r.ensureHoldInOrg(ctx, id, orgID); err != nil {
+		return nil, err
+	}
+	return r.RejectRelease(ctx, id, rejectorID)
 }
 
 // Approve переводит pending hold в active. approverID должен
@@ -426,14 +493,14 @@ func (r *PGRepository) Release(ctx context.Context, id, requesterID string) (*Ho
 	              approved_at, approved_by, released_at, released_by,
 	              release_requested_at, release_requested_by, status, is_active`
 	var (
-		h                  Hold
-		createdBy          sql.NullString
-		approvedAt         sql.NullTime
-		approvedBy         sql.NullString
-		releasedAt         sql.NullTime
-		releasedBy         sql.NullString
-		releaseReqAt       sql.NullTime
-		releaseReqBy       sql.NullString
+		h            Hold
+		createdBy    sql.NullString
+		approvedAt   sql.NullTime
+		approvedBy   sql.NullString
+		releasedAt   sql.NullTime
+		releasedBy   sql.NullString
+		releaseReqAt sql.NullTime
+		releaseReqBy sql.NullString
 	)
 	if err := tx.QueryRowContext(ctx, q, id, actor).Scan(
 		&h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
@@ -619,6 +686,29 @@ func (r *PGRepository) PendingOlderThan(ctx context.Context, threshold time.Dura
 		 ORDER BY created_at ASC`, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("legalhold: pending_older_than: %w", err)
+	}
+	defer rows.Close()
+	return r.scanHolds(rows)
+}
+
+func (r *PGRepository) PendingOlderThanInOrg(ctx context.Context, threshold time.Duration, orgID string) ([]Hold, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	if orgID == "" {
+		return r.PendingOlderThan(ctx, threshold)
+	}
+	cutoff := time.Now().UTC().Add(-threshold)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, target_user_id, case_ref, reason, created_by,
+		    created_at, approved_at, approved_by,
+		    released_at, released_by, status, is_active,
+		    release_requested_at, release_requested_by
+		 FROM legal_holds
+		 WHERE status = 'pending' AND created_at < $1 AND org_id = $2
+		 ORDER BY created_at ASC`, cutoff, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: pending_older_than scoped: %w", err)
 	}
 	defer rows.Close()
 	return r.scanHolds(rows)
@@ -837,6 +927,68 @@ func (r *PGRepository) List(ctx context.Context) ([]Hold, error) {
 		); err != nil {
 			return nil, err
 		}
+		if createdBy.Valid {
+			s := createdBy.String
+			h.CreatedBy = &s
+		}
+		if approvedAtN.Valid {
+			t := approvedAtN.Time
+			h.ApprovedAt = &t
+		}
+		if approvedByN.Valid {
+			s := approvedByN.String
+			h.ApprovedBy = &s
+		}
+		if releasedAt.Valid {
+			t := releasedAt.Time
+			h.ReleasedAt = &t
+		}
+		if releasedBy.Valid {
+			s := releasedBy.String
+			h.ReleasedBy = &s
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (r *PGRepository) ListInOrg(ctx context.Context, orgID string) ([]Hold, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("legalhold: repo not configured")
+	}
+	if orgID == "" {
+		return r.List(ctx)
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, target_user_id, case_ref, reason, created_by,
+		    created_at, approved_at, approved_by,
+		    released_at, released_by, status, is_active
+		 FROM legal_holds
+		 WHERE org_id = $1
+		 ORDER BY
+		    CASE status
+		        WHEN 'active' THEN 0
+		        WHEN 'pending' THEN 1
+		        ELSE 2
+		    END,
+		    created_at DESC`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("legalhold: list scoped: %w", err)
+	}
+	defer rows.Close()
+	var out []Hold
+	for rows.Next() {
+		var h Hold
+		var createdBy, approvedByN, releasedBy sql.NullString
+		var approvedAtN, releasedAt sql.NullTime
+		if err := rows.Scan(
+			&h.ID, &h.TargetUserID, &h.CaseRef, &h.Reason, &createdBy,
+			&h.CreatedAt, &approvedAtN, &approvedByN,
+			&releasedAt, &releasedBy, &h.Status, &h.IsActive,
+		); err != nil {
+			return nil, err
+		}
+		h.OrgID = orgID
 		if createdBy.Valid {
 			s := createdBy.String
 			h.CreatedBy = &s

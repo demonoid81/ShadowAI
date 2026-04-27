@@ -303,7 +303,7 @@ func main() {
 	adminEventsSchedulerEnabled := cfg.AuditPurgeInterval > 0 && cfg.AdminAuditRetentionDays > 0
 	auditHandler := audit.NewHandler(auditSvc, auditPayloadMode, cfg.AuditRetentionDays, auditSchedulerEnabled, entBundle.AdminAudit, cfg.AdminAuditRetentionDays, adminEventsSchedulerEnabled)
 	policyHandler := policy.NewHandler(policySvc)
-	budgetHandler := budget.NewHandler(budgetSvc)
+	budgetHandler := budget.NewHandler(budgetSvc).WithUserLookup(authRepo)
 	dashHandler := dashboard.NewHandler(db, entBundle.AdminAudit)
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, entBundle.AdminAudit)
 

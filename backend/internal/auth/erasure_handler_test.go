@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/shadowai/backend/internal/adminaudit"
+	"github.com/shadowai/backend/internal/domain"
 )
 
 // captureRecorder — stub adminaudit.Recorder для verification.
@@ -27,11 +28,12 @@ func (c *captureRecorder) Record(_ context.Context, ev adminaudit.Event) {
 // stubEraser — фейковая реализация Eraser-интерфейса.
 // Принимает заданный результат/ошибку и запоминает полученные args.
 type stubEraser struct {
-	result          *ErasureResult
-	err             error
-	lastActor       string
-	lastTarget      string
-	callCount       int
+	result     *ErasureResult
+	err        error
+	lastActor  string
+	lastTarget string
+	lastOrg    string
+	callCount  int
 }
 
 func (s *stubEraser) EraseUser(_ context.Context, actor, target string) (*ErasureResult, error) {
@@ -41,12 +43,41 @@ func (s *stubEraser) EraseUser(_ context.Context, actor, target string) (*Erasur
 	return s.result, s.err
 }
 
+func (s *stubEraser) EraseUserInOrg(_ context.Context, actor, target, orgID string) (*ErasureResult, error) {
+	s.callCount++
+	s.lastActor = actor
+	s.lastTarget = target
+	s.lastOrg = orgID
+	return s.result, s.err
+}
+
+type stubUserLookup struct {
+	byID map[string]*domain.User
+}
+
+func (s stubUserLookup) GetByID(_ context.Context, id string) (*domain.User, error) {
+	if u := s.byID[id]; u != nil {
+		return u, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (s stubUserLookup) GetByIDScoped(_ context.Context, id, orgID string) (*domain.User, error) {
+	if u := s.byID[id]; u != nil && u.OrgID == orgID {
+		return u, nil
+	}
+	return nil, errors.New("not found")
+}
+
 // requestWithClaims — helper создаёт POST /users/{id}/erase
 // с проставленными claims (через context).
 func requestWithClaims(targetID string, claims *Claims) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/users/"+targetID+"/erase", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": targetID})
 	if claims != nil {
+		if claims.OrgID == "" && !claims.BreakGlass && claims.Role != RoleGlobalAdmin {
+			claims.OrgID = domain.DefaultOrgID
+		}
 		req = req.WithContext(WithClaims(req.Context(), claims))
 	}
 	return req
@@ -245,6 +276,44 @@ func TestEraseUser_NonAdmin_403(t *testing.T) {
 	}
 	if eraser.callCount != 0 {
 		t.Error("non-admin не должен был вызвать eraser")
+	}
+}
+
+func TestEraseUser_TenantAdmin_CrossOrgDenied(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{UserID: "u-target", Status: ErasureCompleted}}
+	h := NewHandler(nil, eraser, nil)
+	h.userLookup = stubUserLookup{byID: map[string]*domain.User{
+		"u-target": {ID: "u-target", OrgID: "org-b", IsActive: true},
+	}}
+
+	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin, OrgID: "org-a"})
+	rec := httptest.NewRecorder()
+	h.EraseUser(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, body=%s; want 404 without cross-org erase", rec.Code, rec.Body.String())
+	}
+	if eraser.callCount != 0 {
+		t.Fatalf("eraser called %d times for cross-org target", eraser.callCount)
+	}
+}
+
+func TestEraseUser_TenantAdmin_PassesTargetOrgToEraser(t *testing.T) {
+	eraser := &stubEraser{result: &ErasureResult{UserID: "u-target", Status: ErasureCompleted}}
+	h := NewHandler(nil, eraser, nil)
+	h.userLookup = stubUserLookup{byID: map[string]*domain.User{
+		"u-target": {ID: "u-target", OrgID: "org-a", IsActive: true},
+	}}
+
+	req := requestWithClaims("u-target", &Claims{UserID: "u-admin", Role: RoleAdmin, OrgID: "org-a"})
+	rec := httptest.NewRecorder()
+	h.EraseUser(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, body=%s; want 200", rec.Code, rec.Body.String())
+	}
+	if eraser.lastOrg != "org-a" {
+		t.Fatalf("eraser org = %q, want org-a", eraser.lastOrg)
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/shadowai/backend/internal/domain"
 )
 
 // ErasureStatus, ErasureResult и константы перенесены в erasure_types.go
@@ -80,6 +82,12 @@ func (s *ErasureService) WithHoldChecker(hc HoldChecker) *ErasureService {
 //   - Если user не существует и erase-run'а нет — ErasureNotFound.
 //   - Иначе — ErasureCompleted.
 func (s *ErasureService) EraseUser(ctx context.Context, actorUserID, targetUserID string) (*ErasureResult, error) {
+	return s.EraseUserInOrg(ctx, actorUserID, targetUserID, "")
+}
+
+// EraseUserInOrg выполняет удаление и фиксирует org арендатора для доказательной записи.
+// Пустой orgID сохраняет старое поведение default org.
+func (s *ErasureService) EraseUserInOrg(ctx context.Context, actorUserID, targetUserID, orgID string) (*ErasureResult, error) {
 	if targetUserID == "" {
 		return nil, errors.New("erasure: targetUserID required")
 	}
@@ -119,9 +127,16 @@ func (s *ErasureService) EraseUser(ctx context.Context, actorUserID, targetUserI
 		// User нет. Проверяем, был ли уже erased ранее.
 		// Проверка в той же tx чтобы linearize c concurrent erase.
 		var alreadyErased bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM user_erasure_runs WHERE target_user_id = $1)`,
-			targetUserID).Scan(&alreadyErased); err != nil {
+		if orgID != "" {
+			err = tx.QueryRowContext(ctx,
+				`SELECT EXISTS(SELECT 1 FROM user_erasure_runs WHERE target_user_id = $1 AND org_id = $2)`,
+				targetUserID, orgID).Scan(&alreadyErased)
+		} else {
+			err = tx.QueryRowContext(ctx,
+				`SELECT EXISTS(SELECT 1 FROM user_erasure_runs WHERE target_user_id = $1)`,
+				targetUserID).Scan(&alreadyErased)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("erasure: check prior run: %w", err)
 		}
 		// Transaction ничего не меняла — можно просто rollback.
@@ -156,11 +171,14 @@ func (s *ErasureService) EraseUser(ctx context.Context, actorUserID, targetUserI
 	if actorUserID != "" && actorUserID != targetUserID {
 		actorRef = actorUserID
 	}
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO user_erasure_runs
-		 (target_user_id, initiated_by_user_id, audit_rows_scrubbed, budgets_deleted)
-		 VALUES ($1, $2, $3, $4)`,
-		targetUserID, actorRef, rowsScrubbed, budgetsDeleted); err != nil {
+		 (target_user_id, initiated_by_user_id, audit_rows_scrubbed, budgets_deleted, org_id)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		targetUserID, actorRef, rowsScrubbed, budgetsDeleted, orgID); err != nil {
 		return nil, fmt.Errorf("erasure: record run: %w", err)
 	}
 

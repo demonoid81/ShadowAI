@@ -84,7 +84,7 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	// warning.
 	legalHoldHandler := legalhold.NewHandlerWithSecret(
 		legalHoldSvc, adminAuditRecorder, deps.Cfg.LegalHoldTokenSecret,
-	)
+	).WithUserLookup(deps.AuthRepo)
 
 	// DSAR erasure (PR-B). auditRepo + budgetRepo используются как
 	// AuditScrubber + BudgetDeleter через interface intersection.
