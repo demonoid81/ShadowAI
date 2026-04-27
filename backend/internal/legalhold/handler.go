@@ -168,12 +168,13 @@ func (h *Handler) resolveTargetOrg(ctx context.Context, targetUserID string, cla
 }
 
 type createRequest struct {
-	TargetUserID  string     `json:"target_user_id"`
-	CaseRef       string     `json:"case_ref"`
-	Reason        string     `json:"reason"`
-	ScopeType     string     `json:"scope_type,omitempty"`
-	ScopeDateFrom *time.Time `json:"scope_date_from,omitempty"`
-	ScopeDateTo   *time.Time `json:"scope_date_to,omitempty"`
+	TargetUserID  string          `json:"target_user_id"`
+	CaseRef       string          `json:"case_ref"`
+	Reason        string          `json:"reason"`
+	ScopeType     string          `json:"scope_type,omitempty"`
+	ScopeDateFrom *time.Time      `json:"scope_date_from,omitempty"`
+	ScopeDateTo   *time.Time      `json:"scope_date_to,omitempty"`
+	ScopeQuery    json.RawMessage `json:"scope_query,omitempty"`
 }
 
 type holdResponse struct {
@@ -192,6 +193,21 @@ type holdResponse struct {
 	ScopeType     string  `json:"scope_type"`
 	ScopeDateFrom *string `json:"scope_date_from,omitempty"`
 	ScopeDateTo   *string `json:"scope_date_to,omitempty"`
+}
+
+type previewRequest struct {
+	TargetUserID string          `json:"target_user_id"`
+	ScopeType    string          `json:"scope_type"`
+	ScopeQuery   json.RawMessage `json:"scope_query"`
+}
+
+type previewResponse struct {
+	ScopeType       string  `json:"scope_type"`
+	SelectorHash    string  `json:"selector_hash"`
+	MatchedRows     int     `json:"matched_rows"`
+	OldestCreatedAt *string `json:"oldest_created_at,omitempty"`
+	NewestCreatedAt *string `json:"newest_created_at,omitempty"`
+	Explanation     string  `json:"explanation"`
 }
 
 type errorResponse struct {
@@ -292,6 +308,79 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		"case_ref_hash":  h.tokens.Tokenize(hold.CaseRef),
 		"status":         string(hold.Status),
 		"scope_type":     hold.ScopeType,
+	})
+}
+
+func (h *Handler) Preview(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requirePrivilegedAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req previewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		h.recordAdmin(r, "preview_hold_scope", "", http.StatusBadRequest, false, map[string]any{"error_code": "invalid_json"})
+		return
+	}
+	if req.ScopeType != ScopeQuery {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported scope_type"})
+		h.recordAdmin(r, "preview_hold_scope", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+			"error_code": "unsupported_scope_type",
+			"scope_type": req.ScopeType,
+		})
+		return
+	}
+	targetOrgID, ok := h.resolveTargetOrg(r.Context(), req.TargetUserID, claims)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "target user not found"})
+		h.recordAdmin(r, "preview_hold_scope", req.TargetUserID, http.StatusNotFound, false, map[string]any{
+			"error_code": "target_user_not_found",
+		})
+		return
+	}
+	result, err := h.svc.PreviewQueryScopeInOrg(r.Context(), req.TargetUserID, targetOrgID, req.ScopeQuery)
+	if err != nil {
+		switch {
+		case IsInvalidSelector(err), IsValidation(err):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid scope query"})
+			h.recordAdmin(r, "preview_hold_scope", req.TargetUserID, http.StatusBadRequest, false, map[string]any{
+				"error_code": "invalid_scope_query",
+				"scope_type": ScopeQuery,
+			})
+		case IsNotConfigured(err):
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "legal hold not configured"})
+			h.recordAdmin(r, "preview_hold_scope", req.TargetUserID, http.StatusServiceUnavailable, false, map[string]any{
+				"error_code": "not_configured",
+				"scope_type": ScopeQuery,
+			})
+		default:
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "scope preview failed"})
+			h.recordAdmin(r, "preview_hold_scope", req.TargetUserID, http.StatusInternalServerError, false, map[string]any{
+				"error_code": "internal_error",
+				"scope_type": ScopeQuery,
+			})
+		}
+		return
+	}
+	resp := previewResponse{
+		ScopeType:    result.ScopeType,
+		SelectorHash: result.SelectorHash,
+		MatchedRows:  result.MatchedRows,
+		Explanation:  result.Explanation,
+	}
+	if result.OldestCreatedAt != nil {
+		s := result.OldestCreatedAt.UTC().Format(time.RFC3339)
+		resp.OldestCreatedAt = &s
+	}
+	if result.NewestCreatedAt != nil {
+		s := result.NewestCreatedAt.UTC().Format(time.RFC3339)
+		resp.NewestCreatedAt = &s
+	}
+	writeJSON(w, http.StatusOK, resp)
+	h.recordAdmin(r, "preview_hold_scope", req.TargetUserID, http.StatusOK, true, map[string]any{
+		"scope_type":    ScopeQuery,
+		"selector_hash": result.SelectorHash,
+		"matched_rows":  result.MatchedRows,
 	})
 }
 

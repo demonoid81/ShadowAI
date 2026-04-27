@@ -16,6 +16,7 @@ import (
 	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/legalholdcoord"
+	"github.com/shadowai/backend/internal/legalholdselector"
 )
 
 // ErrAlreadyActive — DB unique violation при попытке создать
@@ -195,6 +196,40 @@ func (r *PGRepository) CreateInOrg(ctx context.Context, h *Hold, orgID string) (
 	h.Status = StatusPending
 	h.IsActive = false
 	return h, nil
+}
+
+func (r *PGRepository) PreviewQueryScope(ctx context.Context, orgID, targetUserID string, compiled legalholdselector.Compiled) (QueryScopePreviewStats, error) {
+	if r == nil || r.db == nil {
+		return QueryScopePreviewStats{}, fmt.Errorf("legalhold: repo not configured")
+	}
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
+	args := make([]any, 0, 2+len(compiled.Args))
+	args = append(args, orgID, targetUserID)
+	args = append(args, compiled.Args...)
+	q := `SELECT COUNT(*), MIN(created_at), MAX(created_at)
+	      FROM audit_logs
+	      WHERE org_id = $1 AND user_id = $2 AND (` + compiled.SQL + `)`
+	var (
+		count  int
+		oldest sql.NullTime
+		newest sql.NullTime
+	)
+	if err := r.db.QueryRowContext(ctx, q, args...).Scan(&count, &oldest, &newest); err != nil {
+		return QueryScopePreviewStats{}, fmt.Errorf("legalhold: preview query scope: %w", err)
+	}
+	var stats QueryScopePreviewStats
+	stats.MatchedRows = count
+	if oldest.Valid {
+		t := oldest.Time
+		stats.OldestCreatedAt = &t
+	}
+	if newest.Valid {
+		t := newest.Time
+		stats.NewestCreatedAt = &t
+	}
+	return stats, nil
 }
 
 func (r *PGRepository) ensureHoldInOrg(ctx context.Context, id, orgID string) error {

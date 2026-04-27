@@ -6,10 +6,13 @@ package legalhold
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shadowai/backend/internal/legalholdselector"
 )
 
 // Sentinel errors для различения validation / config / runtime
@@ -37,6 +40,8 @@ func IsNotConfigured(err error) bool { return errors.Is(err, ErrNotConfigured) }
 func IsUnsupportedScope(err error) bool { return errors.Is(err, ErrUnsupportedScope) }
 
 func IsInvalidScopeRange(err error) bool { return errors.Is(err, ErrInvalidScopeRange) }
+
+func IsInvalidSelector(err error) bool { return legalholdselector.IsInvalid(err) }
 
 // Repository — persistence interface для Service. Реализация —
 // PGRepository. Тесты mock'ают через in-memory impl.
@@ -72,6 +77,25 @@ type ScopedRepository interface {
 	RejectReleaseInOrg(ctx context.Context, id, rejectorID, orgID string) (*Hold, error)
 	ListInOrg(ctx context.Context, orgID string) ([]Hold, error)
 	PendingOlderThanInOrg(ctx context.Context, threshold time.Duration, orgID string) ([]Hold, error)
+}
+
+type QueryPreviewRepository interface {
+	PreviewQueryScope(ctx context.Context, orgID, targetUserID string, compiled legalholdselector.Compiled) (QueryScopePreviewStats, error)
+}
+
+type QueryScopePreviewStats struct {
+	MatchedRows     int
+	OldestCreatedAt *time.Time
+	NewestCreatedAt *time.Time
+}
+
+type QueryScopePreviewResult struct {
+	ScopeType       string
+	SelectorHash    string
+	MatchedRows     int
+	OldestCreatedAt *time.Time
+	NewestCreatedAt *time.Time
+	Explanation     string
 }
 
 // Service — тонкая обёртка над repo. Валидация входа (non-empty
@@ -136,6 +160,35 @@ func (s *Service) CreateScopedHoldInOrg(ctx context.Context, targetUserID, caseR
 		return scoped.CreateInOrg(ctx, h, orgID)
 	}
 	return s.repo.Create(ctx, h)
+}
+
+func (s *Service) PreviewQueryScopeInOrg(ctx context.Context, targetUserID, orgID string, raw json.RawMessage) (QueryScopePreviewResult, error) {
+	if s == nil || s.repo == nil {
+		return QueryScopePreviewResult{}, ErrNotConfigured
+	}
+	if strings.TrimSpace(targetUserID) == "" {
+		return QueryScopePreviewResult{}, fmt.Errorf("target_user_id required: %w", ErrValidation)
+	}
+	previewRepo, ok := s.repo.(QueryPreviewRepository)
+	if !ok {
+		return QueryScopePreviewResult{}, ErrNotConfigured
+	}
+	compiled, err := legalholdselector.Compile(raw, legalholdselector.CompileOptions{ArgOffset: 3})
+	if err != nil {
+		return QueryScopePreviewResult{}, fmt.Errorf("%w: %w", ErrValidation, err)
+	}
+	stats, err := previewRepo.PreviewQueryScope(ctx, orgID, targetUserID, compiled)
+	if err != nil {
+		return QueryScopePreviewResult{}, err
+	}
+	return QueryScopePreviewResult{
+		ScopeType:       ScopeQuery,
+		SelectorHash:    compiled.Hash,
+		MatchedRows:     stats.MatchedRows,
+		OldestCreatedAt: stats.OldestCreatedAt,
+		NewestCreatedAt: stats.NewestCreatedAt,
+		Explanation:     "target user rows where " + compiled.Explanation,
+	}, nil
 }
 
 func normalizeScope(scopeType string, from, to *time.Time) (string, *time.Time, *time.Time, error) {

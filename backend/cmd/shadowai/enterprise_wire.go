@@ -251,6 +251,7 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			// approve/reject нужны для transition → active/released.
 			admin.HandleFunc("/legal-holds", legalHoldHandler.Create).Methods("POST")
 			admin.HandleFunc("/legal-holds", legalHoldHandler.List).Methods("GET")
+			admin.HandleFunc("/legal-holds/preview", legalHoldHandler.Preview).Methods("POST")
 			admin.HandleFunc("/legal-holds/{id}/approve", legalHoldHandler.Approve).Methods("POST")
 			admin.HandleFunc("/legal-holds/{id}/reject", legalHoldHandler.Reject).Methods("POST")
 			admin.HandleFunc("/legal-holds/{id}/release", legalHoldHandler.Release).Methods("POST")

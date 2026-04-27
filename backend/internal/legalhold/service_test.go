@@ -7,6 +7,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/shadowai/backend/internal/legalholdselector"
 )
 
 // memRepo — in-memory Repository для service-tests.
@@ -21,10 +23,15 @@ import (
 //   - "Blocking hold" для уникальности = pending OR active
 //     (partial-unique index в миграции 015).
 type memRepo struct {
-	holds   []Hold
-	nextID  int
-	failOn  string // "create"/"release"/"list"/"has"/"active"/"approve"/"reject"
-	failErr error
+	holds           []Hold
+	nextID          int
+	failOn          string // "create"/"release"/"list"/"has"/"active"/"approve"/"reject"
+	failErr         error
+	previewStats    QueryScopePreviewStats
+	previewErr      error
+	previewOrgID    string
+	previewUserID   string
+	previewCompiled legalholdselector.Compiled
 }
 
 func (m *memRepo) Create(_ context.Context, h *Hold) (*Hold, error) {
@@ -46,6 +53,16 @@ func (m *memRepo) Create(_ context.Context, h *Hold) (*Hold, error) {
 	h.IsActive = false
 	m.holds = append(m.holds, *h)
 	return h, nil
+}
+
+func (m *memRepo) PreviewQueryScope(_ context.Context, orgID, targetUserID string, compiled legalholdselector.Compiled) (QueryScopePreviewStats, error) {
+	m.previewOrgID = orgID
+	m.previewUserID = targetUserID
+	m.previewCompiled = compiled
+	if m.previewErr != nil {
+		return QueryScopePreviewStats{}, m.previewErr
+	}
+	return m.previewStats, nil
 }
 
 func (m *memRepo) Approve(_ context.Context, id, approverID string) (*Hold, error) {

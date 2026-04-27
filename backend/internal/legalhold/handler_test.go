@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -202,6 +203,95 @@ func TestCreate_QueryScopeUnsupported(t *testing.T) {
 	meta := rec.events[0].Metadata.(map[string]any)
 	if meta["error_code"] != "unsupported_scope_type" {
 		t.Fatalf("error_code = %v, want unsupported_scope_type", meta["error_code"])
+	}
+}
+
+func TestPreview_QueryScope_Success(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	oldest := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	newest := time.Date(2026, 4, 4, 11, 0, 0, 0, time.UTC)
+	repo.previewStats = QueryScopePreviewStats{
+		MatchedRows:     17,
+		OldestCreatedAt: &oldest,
+		NewestCreatedAt: &newest,
+	}
+	h.userLookup = stubUserOrgLookup{byID: map[string]*domain.User{
+		"u-target": {ID: "u-target", OrgID: "org-a", IsActive: true},
+	}}
+	body := `{
+		"target_user_id":"u-target",
+		"scope_type":"query_scope",
+		"scope_query":{
+			"v":1,
+			"all":[
+				{"field":"provider","op":"in","value":["openai","anthropic"]},
+				{"field":"policy_action","op":"eq","value":"blocked"}
+			]
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/legal-holds/preview", bytes.NewBufferString(body))
+	req = req.WithContext(auth.WithClaims(req.Context(), &auth.Claims{
+		UserID: "u-admin", Role: auth.RoleAdmin, OrgID: "org-a",
+	}))
+	w := httptest.NewRecorder()
+
+	h.Preview(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 0 {
+		t.Fatalf("preview created holds: %+v", repo.holds)
+	}
+	if repo.previewOrgID != "org-a" || repo.previewUserID != "u-target" {
+		t.Fatalf("preview scope org=%q user=%q", repo.previewOrgID, repo.previewUserID)
+	}
+	var resp previewResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ScopeType != ScopeQuery || resp.SelectorHash == "" || resp.MatchedRows != 17 {
+		t.Fatalf("response = %+v", resp)
+	}
+	if resp.OldestCreatedAt == nil || *resp.OldestCreatedAt != "2026-04-01T10:00:00Z" {
+		t.Fatalf("oldest = %#v", resp.OldestCreatedAt)
+	}
+	if !bytes.Contains([]byte(resp.Explanation), []byte("target user rows where")) {
+		t.Fatalf("explanation = %q", resp.Explanation)
+	}
+	if len(rec.events) != 1 || rec.events[0].Action != "preview_hold_scope" || !rec.events[0].Success {
+		t.Fatalf("events = %+v", rec.events)
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["selector_hash"] != resp.SelectorHash || meta["matched_rows"] != 17 {
+		t.Fatalf("metadata = %+v", meta)
+	}
+}
+
+func TestPreview_QueryScope_InvalidSelector(t *testing.T) {
+	h, repo, rec := setupHandler(t)
+	body := `{
+		"target_user_id":"u-target",
+		"scope_type":"query_scope",
+		"scope_query":{"v":1,"field":"org_id","op":"eq","value":"org-a"}
+	}`
+	req := adminCtx(httptest.NewRequest(http.MethodPost, "/api/legal-holds/preview", bytes.NewBufferString(body)), "u-admin")
+	w := httptest.NewRecorder()
+
+	h.Preview(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(repo.holds) != 0 {
+		t.Fatalf("preview created holds: %+v", repo.holds)
+	}
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	meta := rec.events[0].Metadata.(map[string]any)
+	if meta["error_code"] != "invalid_scope_query" {
+		t.Fatalf("error_code = %v, want invalid_scope_query", meta["error_code"])
 	}
 }
 
