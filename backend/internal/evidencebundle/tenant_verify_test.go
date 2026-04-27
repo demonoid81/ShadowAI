@@ -241,3 +241,54 @@ func TestVerifyTenantBundle_WrongSignatureFails(t *testing.T) {
 		t.Error("wrong signature key should produce SignaturesFailed")
 	}
 }
+
+func TestVerifyTenantBundle_SelectorManifest_Valid(t *testing.T) {
+	dir := buildTestTenantBundle(t, nil, nil, "")
+	line := selectorLine(t, "hold-tenant", "test-org", `{"v":1,"field":"provider","op":"eq","value":"openai"}`)
+	writeJSONL(t, dir+"/selector_manifest.jsonl", []any{line})
+	hashes, _ := ComputeBundleHashes(dir)
+	WriteManifest(dir, &BundleManifest{
+		Version:    BundleVersion,
+		ExportTime: time.Now().UTC(),
+		Tables:     []string{"audit_logs"},
+		OrgID:      "test-org",
+		FileSHA256: hashes,
+	})
+
+	res, err := VerifyTenantBundle(dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyTenantBundle: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("tenant bundle should verify: %+v", res)
+	}
+	if !res.SelectorManifest.OK || res.SelectorManifest.Checked != 1 {
+		t.Fatalf("selector manifest result = %+v, want OK checked=1", res.SelectorManifest)
+	}
+}
+
+func TestVerifyTenantBundle_SelectorManifest_TamperedSelectorFails(t *testing.T) {
+	dir := buildTestTenantBundle(t, nil, nil, "")
+	line := selectorLine(t, "hold-tenant", "test-org", `{"v":1,"field":"provider","op":"eq","value":"openai"}`)
+	line.SelectorJSON = json.RawMessage(`{"v":1,"field":"provider","op":"eq","value":"anthropic"}`)
+	writeJSONL(t, dir+"/selector_manifest.jsonl", []any{line})
+	hashes, _ := ComputeBundleHashes(dir)
+	WriteManifest(dir, &BundleManifest{
+		Version:    BundleVersion,
+		ExportTime: time.Now().UTC(),
+		Tables:     []string{"audit_logs"},
+		OrgID:      "test-org",
+		FileSHA256: hashes,
+	})
+
+	res, err := VerifyTenantBundle(dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyTenantBundle: %v", err)
+	}
+	if res.OK {
+		t.Fatal("tenant bundle with tampered selector should fail")
+	}
+	if res.SelectorManifest.OK || len(res.SelectorManifest.Fails) != 1 {
+		t.Fatalf("selector manifest result = %+v, want one failure", res.SelectorManifest)
+	}
+}

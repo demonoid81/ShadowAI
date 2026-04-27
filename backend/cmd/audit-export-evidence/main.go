@@ -10,6 +10,7 @@
 //   - File integrity via SHA256 hashes in bundle_manifest.json
 //   - Anchor seq_lo/seq_hi continuity (no coverage gaps)
 //   - chain_inventory.jsonl seq_no continuity (gap detection)
+//   - query_scope selector hash integrity in selector_manifest.jsonl
 //
 // What requires live infrastructure (documented in bundle README.txt):
 //   - W2 HMAC chain verification (requires AUDIT_CHAIN_SECRET + row content)
@@ -56,12 +57,12 @@ import (
 var exporterCommit string
 
 func main() {
-	outputFlag  := flag.String("output", "", "Output directory path (required)")
-	tableFlag   := flag.String("table", "all", "Table: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
-	pubKeyFile  := flag.String("pubkey-file", "", "Path to base64 Ed25519 public key for signature verification reports")
-	doZip       := flag.Bool("zip", false, "Create <output>.zip after writing directory")
-	orgIDFlag   := flag.String("org-id", "", "Export evidence for a single org (tenant export)")
-	globalFlag  := flag.Bool("global", false, "Export full evidence bundle across all orgs (privileged)")
+	outputFlag := flag.String("output", "", "Output directory path (required)")
+	tableFlag := flag.String("table", "all", "Table: audit_logs|admin_event_logs|legal_hold_events|audit_purge_runs|all")
+	pubKeyFile := flag.String("pubkey-file", "", "Path to base64 Ed25519 public key for signature verification reports")
+	doZip := flag.Bool("zip", false, "Create <output>.zip after writing directory")
+	orgIDFlag := flag.String("org-id", "", "Export evidence for a single org (tenant export)")
+	globalFlag := flag.Bool("global", false, "Export full evidence bundle across all orgs (privileged)")
 	flag.Parse()
 
 	exitCfg := func(format string, args ...any) {
@@ -140,6 +141,7 @@ func main() {
 	}
 
 	repo := chain.NewAnchorRepository(db)
+	selectorRepo := evidencebundle.NewSelectorManifestRepository(db)
 	dbFingerprint := dbFingerprint(dsn)
 
 	if tenantOrgID != "" {
@@ -243,6 +245,19 @@ func main() {
 		if err := writeNDJSON(filepath.Join(outDir, "chain_inventory.jsonl"), allInventory); err != nil {
 			exitErr("write chain_inventory.jsonl: %v", err)
 		}
+	}
+
+	selectorLines, err := selectorRepo.Fetch(ctx, tenantOrgID)
+	if err != nil {
+		exitErr("selector manifest: %v", err)
+	}
+	if err := writeNDJSON(filepath.Join(outDir, evidencebundle.SelectorManifestFilename), selectorLines); err != nil {
+		exitErr("write %s: %v", evidencebundle.SelectorManifestFilename, err)
+	}
+	if tenantOrgID != "" {
+		fmt.Printf("  legal_holds: %d query_scope selector manifests (org=%s)\n", len(selectorLines), tenantOrgID)
+	} else {
+		fmt.Printf("  legal_holds: %d query_scope selector manifests\n", len(selectorLines))
 	}
 
 	// Write public key if provided.
@@ -399,5 +414,3 @@ func writeJSON(path string, v any) error {
 	enc.SetEscapeHTML(false)
 	return enc.Encode(v)
 }
-
-

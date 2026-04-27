@@ -510,6 +510,17 @@ func printBundleResult(r evidencebundle.BundleVerifyResult, verbose bool) {
 		}
 	}
 
+	// Selector manifest.
+	sm := r.SelectorManifest
+	fmt.Printf("bundle selectors               %-6s checked=%d missing=%t fails=%d\n",
+		status(sm.OK), sm.Checked, sm.Missing, len(sm.Fails))
+	if verbose {
+		for _, f := range sm.Fails {
+			fmt.Printf("  SELECTOR_FAIL hold_id=%s org_id=%s reason=%s\n",
+				f.HoldID, f.OrgID, f.Reason)
+		}
+	}
+
 	// Range continuity per table.
 	for _, rc := range r.RangeContinuity {
 		fmt.Printf("bundle range  %-18s %-6s anchors=%d gaps=%d\n",
@@ -567,6 +578,15 @@ func printTenantBundleResult(r evidencebundle.TenantVerifyResult, verbose bool) 
 	if verbose {
 		for _, id := range r.SignaturesFailed {
 			fmt.Printf("  SIG_FAIL anchor_id=%s\n", id)
+		}
+	}
+	sm := r.SelectorManifest
+	fmt.Printf("tenant bundle selectors         %-6s checked=%d missing=%t fails=%d\n",
+		ok(sm.OK), sm.Checked, sm.Missing, len(sm.Fails))
+	if verbose {
+		for _, f := range sm.Fails {
+			fmt.Printf("  SELECTOR_FAIL hold_id=%s org_id=%s reason=%s\n",
+				f.HoldID, f.OrgID, f.Reason)
 		}
 	}
 }

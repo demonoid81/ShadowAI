@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/shadowai/backend/internal/chain"
+	"github.com/shadowai/backend/internal/legalholdselector"
 )
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,14 @@ func (b *testBundle) anchors(anchors []AnchorLine) *testBundle {
 func (b *testBundle) inventory(entries []ChainInventoryLine) *testBundle {
 	b.t.Helper()
 	b.writeSlice("chain_inventory.jsonl", len(entries), func(enc *json.Encoder, i int) {
+		enc.Encode(entries[i]) //nolint
+	})
+	return b
+}
+
+func (b *testBundle) selectors(entries []SelectorManifestLine) *testBundle {
+	b.t.Helper()
+	b.writeSlice("selector_manifest.jsonl", len(entries), func(enc *json.Encoder, i int) {
 		enc.Encode(entries[i]) //nolint
 	})
 	return b
@@ -120,6 +129,22 @@ func inventoryRange(table string, lo, hi int64) []ChainInventoryLine {
 	return result
 }
 
+func selectorLine(t *testing.T, holdID, orgID, raw string) SelectorManifestLine {
+	t.Helper()
+	compiled, err := legalholdselector.Compile(json.RawMessage(raw), legalholdselector.CompileOptions{})
+	if err != nil {
+		t.Fatalf("compile selector: %v", err)
+	}
+	return SelectorManifestLine{
+		HoldID:          holdID,
+		OrgID:           orgID,
+		ScopeType:       "query_scope",
+		SelectorHash:    compiled.Hash,
+		SelectorVersion: 1,
+		SelectorJSON:    json.RawMessage(compiled.NormalizedJSON),
+	}
+}
+
 // signAnchorLine signs an AnchorLine using chain.SignAnchor and returns the
 // signed copy with SignatureHex set.
 func signAnchorLine(t *testing.T, a AnchorLine, priv ed25519.PrivateKey, pubKeyID string) AnchorLine {
@@ -173,6 +198,102 @@ func TestVerifyBundle_FileIntegrity_TamperedFile(t *testing.T) {
 	}
 	if result.OK {
 		t.Error("overall result must be FAIL when file integrity fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Selector manifest tests
+// ---------------------------------------------------------------------------
+
+func TestVerifyBundle_SelectorManifest_Valid(t *testing.T) {
+	line := selectorLine(t, "hold-1", "org-a", `{"v":1,"field":"provider","op":"eq","value":"openai"}`)
+	b := newTestBundle(t).
+		anchors(nil).
+		inventory(nil).
+		selectors([]SelectorManifestLine{line}).
+		withManifest()
+
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	if !result.SelectorManifest.OK {
+		t.Fatalf("selector manifest should verify: %+v", result.SelectorManifest.Fails)
+	}
+	if result.SelectorManifest.Checked != 1 {
+		t.Fatalf("checked selectors = %d, want 1", result.SelectorManifest.Checked)
+	}
+	if !result.OK {
+		t.Fatalf("overall bundle should be OK: %+v", result)
+	}
+}
+
+func TestVerifyBundle_SelectorManifest_TamperedSelectorFails(t *testing.T) {
+	line := selectorLine(t, "hold-1", "org-a", `{"v":1,"field":"provider","op":"eq","value":"openai"}`)
+	line.SelectorJSON = json.RawMessage(`{"v":1,"field":"provider","op":"eq","value":"anthropic"}`)
+	b := newTestBundle(t).
+		anchors(nil).
+		inventory(nil).
+		selectors([]SelectorManifestLine{line}).
+		withManifest()
+
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	if result.SelectorManifest.OK {
+		t.Fatal("tampered selector JSON should fail selector manifest verification")
+	}
+	if len(result.SelectorManifest.Fails) != 1 {
+		t.Fatalf("selector fails = %d, want 1", len(result.SelectorManifest.Fails))
+	}
+	if result.OK {
+		t.Fatal("overall bundle must fail when selector hash mismatches selector_json")
+	}
+}
+
+func TestVerifyBundle_SelectorManifest_EmptyFileOKAndHasManifestHash(t *testing.T) {
+	b := newTestBundle(t).
+		anchors(nil).
+		inventory(nil).
+		selectors(nil).
+		withManifest()
+
+	manifest, err := ReadBundleManifest(b.dir)
+	if err != nil {
+		t.Fatalf("ReadBundleManifest: %v", err)
+	}
+	if _, ok := manifest.FileSHA256["selector_manifest.jsonl"]; !ok {
+		t.Fatal("selector_manifest.jsonl must be hashed in bundle_manifest.json")
+	}
+
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	if !result.SelectorManifest.OK || result.SelectorManifest.Checked != 0 {
+		t.Fatalf("empty selector manifest should be OK with checked=0: %+v", result.SelectorManifest)
+	}
+	if !result.OK {
+		t.Fatalf("overall bundle should be OK with empty selector manifest: %+v", result)
+	}
+}
+
+func TestVerifyBundle_SelectorManifest_MissingFileBackwardCompatible(t *testing.T) {
+	b := newTestBundle(t).
+		anchors(nil).
+		inventory(nil).
+		withManifest()
+
+	result, err := VerifyBundle(b.dir, nil)
+	if err != nil {
+		t.Fatalf("VerifyBundle: %v", err)
+	}
+	if !result.SelectorManifest.OK || !result.SelectorManifest.Missing {
+		t.Fatalf("missing selector_manifest.jsonl should be backward-compatible: %+v", result.SelectorManifest)
+	}
+	if !result.OK {
+		t.Fatalf("legacy bundle without selector_manifest.jsonl should remain OK: %+v", result)
 	}
 }
 

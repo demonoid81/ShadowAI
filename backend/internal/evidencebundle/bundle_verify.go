@@ -27,6 +27,7 @@ type BundleVerifyResult struct {
 
 	FileIntegrity       FileIntegrityResult
 	AnchorSigs          AnchorSigsResult
+	SelectorManifest    SelectorManifestResult
 	RangeContinuity     []RangeContinuityResult
 	InventoryContinuity []InventoryContinuityResult
 	InventoryCount      []InventoryCountResult
@@ -49,11 +50,11 @@ type FileIntegrityFail struct {
 
 // AnchorSigsResult covers Ed25519 signature verification across all anchors.
 type AnchorSigsResult struct {
-	OK           bool
-	Total        int
-	Unsigned     int // no signature field — informational
-	NoPubKey     int // signature present but no pubkey provided — not verified
-	Fails        []AnchorSigFail
+	OK       bool
+	Total    int
+	Unsigned int // no signature field — informational
+	NoPubKey int // signature present but no pubkey provided — not verified
+	Fails    []AnchorSigFail
 }
 
 // AnchorSigFail describes one anchor whose signature verification failed.
@@ -89,9 +90,9 @@ type InventoryContinuityResult struct {
 
 // InventoryCountResult covers anchor.RowCount vs actual inventory entries per anchor.
 type InventoryCountResult struct {
-	Table    string
-	OK       bool
-	Anchors  int
+	Table      string
+	OK         bool
+	Anchors    int
 	Mismatches []InventoryCountMismatch
 }
 
@@ -232,25 +233,30 @@ func VerifyBundle(dir string, pubKey ed25519.PublicKey) (BundleVerifyResult, err
 		inventory = nil
 	}
 
-	// 4. Try bundle public key if caller didn't provide one.
+	// 4. Verify selector_manifest.jsonl if present. Missing file is OK for
+	// legacy bundles; new exports always write it, even when empty.
+	res.SelectorManifest = checkSelectorManifest(dir)
+
+	// 5. Try bundle public key if caller didn't provide one.
 	if len(pubKey) == 0 {
 		pubKey, _ = readBundlePubKey(filepath.Join(dir, "public_key.b64"))
 	}
 
-	// 5. Anchor signature verification.
+	// 6. Anchor signature verification.
 	res.AnchorSigs = checkAnchorSigs(anchors, pubKey)
 
-	// 6. Anchor range continuity per table.
+	// 7. Anchor range continuity per table.
 	res.RangeContinuity = checkRangeContinuity(anchors)
 
-	// 7. Inventory seq continuity per table.
+	// 8. Inventory seq continuity per table.
 	res.InventoryContinuity = checkInventoryContinuity(inventory)
 
-	// 8. Inventory count vs anchor row_count.
+	// 9. Inventory count vs anchor row_count.
 	res.InventoryCount = checkInventoryCount(anchors, inventory)
 
 	// Overall OK: every sub-check that ran must be OK.
 	res.OK = res.FileIntegrity.OK &&
+		res.SelectorManifest.OK &&
 		res.AnchorSigs.OK &&
 		allRangeContinuityOK(res.RangeContinuity) &&
 		allInventoryContinuityOK(res.InventoryContinuity) &&

@@ -50,7 +50,11 @@ func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResul
 		}
 	}
 
-	// 2. Load anchors (for root lookup and sig verify).
+	// 2. Verify selector_manifest.jsonl if present. Legacy tenant bundles may
+	// not have it; current exports always write it.
+	res.SelectorManifest = checkSelectorManifest(dir)
+
+	// 3. Load anchors (for root lookup and sig verify).
 	anchors, err := readAnchorLines(filepath.Join(dir, "anchors.jsonl"))
 	if err != nil {
 		return res, fmt.Errorf("read anchors.jsonl: %w", err)
@@ -60,7 +64,7 @@ func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResul
 		anchorMap[anchorKey(a.Table, a.SeqLo, a.SeqHi)] = a
 	}
 
-	// 3. Verify Ed25519 signatures on anchors using chain.VerifyAnchorSignature
+	// 4. Verify Ed25519 signatures on anchors using chain.VerifyAnchorSignature
 	// (same canonical as ManifestCanonical — avoids any format divergence).
 	if pubKey != nil {
 		for _, a := range anchors {
@@ -74,7 +78,7 @@ func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResul
 		}
 	}
 
-	// 4. Read Merkle proofs and verify each one.
+	// 5. Read Merkle proofs and verify each one.
 	proofsPath := filepath.Join(dir, "merkle_proofs.jsonl")
 	proofsFile, err := os.Open(proofsPath)
 	if err != nil {
@@ -131,7 +135,7 @@ func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResul
 		return res, fmt.Errorf("scan merkle_proofs.jsonl: %w", err)
 	}
 
-	// 5. Cross-checks (forward + reverse).
+	// 6. Cross-checks (forward + reverse).
 
 	// Build tenant hash set for reverse proof validation.
 	tenantHashSet := make(map[string]bool) // table|seqNo → exists in tenant_chain_hashes.jsonl
@@ -229,7 +233,7 @@ func VerifyTenantBundle(dir string, pubKey ed25519.PublicKey) (TenantVerifyResul
 		return res, fmt.Errorf("scan tenant_chain_hashes.jsonl: %w", err)
 	}
 
-	res.OK = len(res.ProofsFailed) == 0 && len(res.SignaturesFailed) == 0
+	res.OK = res.SelectorManifest.OK && len(res.ProofsFailed) == 0 && len(res.SignaturesFailed) == 0
 	return res, nil
 }
 

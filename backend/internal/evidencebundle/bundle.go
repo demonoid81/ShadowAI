@@ -5,6 +5,7 @@
 //	bundle_manifest.json  — metadata + SHA256 of every file
 //	anchors.jsonl         — anchor records (Merkle root, signature, sink refs)
 //	chain_inventory.jsonl — chain digest inventory: seq_no + row_hash (no payload)
+//	selector_manifest.jsonl — query_scope legal hold selector JSON + selector_hash
 //	public_key.b64        — Ed25519 public key (if provided by exporter)
 //	reports/              — operator-side verification results (JSON)
 //	README.txt            — what can and cannot be verified offline
@@ -17,6 +18,8 @@
 //	    they can recompute Merkle roots and compare against anchors.jsonl
 //	  - chain_inventory.jsonl seq_no continuity (gap detection)
 //	  - Anchor range continuity (no gaps between anchor seq_hi/seq_lo)
+//	  - query_scope selector integrity: SHA256(normalized selector_json)
+//	    equals selector_hash
 //
 // What requires live infrastructure:
 //
@@ -334,6 +337,13 @@ merkle_proofs.jsonl  (tenant bundles only, T3/W6)
   Each proof contains: anchor range, leaf_hash_hex, siblings[], root_hex.
   Offline verification: leaf_hash + siblings → root_hex == anchor.merkle_root_hex.
 
+selector_manifest.jsonl
+  Query-scope legal hold selector manifest. One JSON object per query_scope hold:
+    hold_id, org_id, scope_type, selector_hash, selector_version, selector_json.
+  Tenant bundles include only selectors for their org_id. Global bundles include
+  all query_scope selectors. Offline verification recompiles selector_json,
+  normalizes it, and checks SHA256(normalized selector_json) == selector_hash.
+
 %s
 
 public_key.b64 (if present)
@@ -346,6 +356,7 @@ WHAT CAN BE VERIFIED OFFLINE (no DATABASE_URL required)
 --------------------------------------------------------
 %s
   File integrity: recompute SHA256 hashes and compare to bundle_manifest.json
+  Query-scope selector integrity: selector_manifest.jsonl hash checks
 
 WHAT REQUIRES LIVE INFRASTRUCTURE
 ----------------------------------
