@@ -313,8 +313,8 @@ conflict: `already_active` → `already_blocking`. Changelog 1.17
 **[gap] / [operational]** Что осталось вне scope или требует внешней
 интеграции:
 - Backup-freeze — infra-уровня, остаётся manual.
-- Hold-scope шире date-range (query-window/query-scope hold) —
-  roadmap. Date-range enforcement реализован в L6.
+- Evidence bundle selector manifest для `query_scope` — roadmap.
+  Runtime create/WORM/enforcement реализованы в L8.1a–L8.1c.
 - External email/webhook/ticket-routing на основе L7 SLA/DPO signals —
   operator-owned integration.
 - Bulk approvals/rejections реализованы в L5; UI для них остаётся out of scope.
@@ -379,6 +379,12 @@ review.
      уже удалены (допустимо: hold не существовал в момент
      purge).
    - **Manual pause НЕ требуется** для enterprise scheduler'а.
+   - **Query-scope holds** (`[implemented]`, PR-L8.1c): active и
+     release_pending holds с `scope_type="query_scope"` защищают
+     только audit rows, которые matching stored selector. Stored
+     selector компилируется через allowlist compiler; invalid/corrupt
+     selector aborts purge tick fail-closed и пишет admin event
+     `legal_hold_query_scope_compile_failed` без raw selector.
    - **Core-only CLI** (`cmd/audit-purge` без enterprise tag
      или внешний cron-wrapper вокруг CLI): `[manual]`. CLI не
      консультирует legal_holds (Core scope без enterprise
@@ -474,9 +480,10 @@ DPO/legal team по локальным правилам организации.
 
 ### 5.7 Planned improvements (v2+)
 
-- Hold-scope шире: per-query, per-conversation. Per-date-range enforcement
-  реализован в L6; design для `query_scope` зафиксирован в PR-L8 RFC,
-  implementation остаётся будущей работой.
+- Evidence bundle selector manifest для `query_scope`, чтобы auditor мог
+  сопоставить selector JSON/hash без live DB access.
+- Per-conversation hold scope, если появится stable conversation_id в
+  audit schema.
 - 4-eyes workflow для release реализован в L5.
 - External SLA routing — email/webhook/ticket creation на основе L7
   admin/SIEM/Prometheus signals.

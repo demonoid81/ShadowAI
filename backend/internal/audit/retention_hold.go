@@ -33,11 +33,48 @@ package audit
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/shadowai/backend/internal/adminaudit"
+	"github.com/shadowai/backend/internal/domain"
 	"github.com/shadowai/backend/internal/legalholdcoord"
+	"github.com/shadowai/backend/internal/legalholdselector"
 )
+
+type queryScopeHoldProtection struct {
+	HoldID          string
+	OrgID           string
+	TargetUserID    string
+	SelectorJSON    string
+	SelectorHash    string
+	SelectorVersion int
+}
+
+type queryScopeCompileFailure struct {
+	HoldID          string
+	OrgID           string
+	TargetUserID    string
+	SelectorHash    string
+	SelectorVersion int
+	Err             error
+}
+
+func (e *queryScopeCompileFailure) Error() string {
+	return fmt.Sprintf("legal hold query_scope compile failed for hold %s: %v", e.HoldID, e.Err)
+}
+
+func (e *queryScopeCompileFailure) Unwrap() error {
+	return e.Err
+}
+
+type queryContexter interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
 
 // PurgeOlderThanRespectingHoldsAndRecordRun — PR-L3 coordinated
 // purge. Выполняет всё в одной tx под `legalholdcoord.
@@ -74,33 +111,25 @@ func (r *Repository) PurgeOlderThanRespectingHoldsAndRecordRun(ctx context.Conte
 		return 0, err
 	}
 
+	queryScopes, err := r.loadQueryScopeHoldProtections(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	delQ, delArgs, err := buildHoldAwarePurgeDelete(cutoff, chunkSize, queryScopes)
+	if err != nil {
+		_ = tx.Rollback()
+		if recErr := r.recordQueryScopeCompileFailure(ctx, err); recErr != nil {
+			return 0, fmt.Errorf("%w; record compile failure: %v", err, recErr)
+		}
+		return 0, err
+	}
+
 	// PR-L6: whole_user защищает все строки target user. date_range
 	// защищает только строки, где created_at попадает в диапазон hold.
 	// release_pending остаётся юридически действующим до ApproveRelease.
-	const delQ = `DELETE FROM audit_logs WHERE id IN (
-	    SELECT id FROM audit_logs
-	    WHERE created_at < $1
-	      AND (user_id IS NULL
-	           OR NOT EXISTS (
-	             SELECT 1 FROM legal_holds lh
-	             WHERE lh.status IN ('active', 'release_pending')
-	               AND lh.target_user_id = audit_logs.user_id
-	               AND (
-	                 lh.scope_type = 'whole_user'
-	                 OR (
-	                   lh.scope_type = 'date_range'
-	                   AND lh.scope_date_from IS NOT NULL
-	                   AND lh.scope_date_to IS NOT NULL
-	                   AND audit_logs.created_at >= lh.scope_date_from
-	                   AND audit_logs.created_at <= lh.scope_date_to
-	                 )
-	               )
-	           ))
-	    LIMIT $2
-	)`
 	total := 0
 	for {
-		res, err := tx.ExecContext(ctx, delQ, cutoff, chunkSize)
+		res, err := tx.ExecContext(ctx, delQ, delArgs...)
 		if err != nil {
 			return total, fmt.Errorf("purge exec: %w", err)
 		}
@@ -172,30 +201,20 @@ func (r *Repository) PurgeOlderThanRespectingHolds(ctx context.Context, cutoff t
 	if chunkSize <= 0 {
 		return 0, fmt.Errorf("purge: chunkSize must be > 0, got %d", chunkSize)
 	}
+	queryScopes, err := r.loadQueryScopeHoldProtections(ctx, r.db)
+	if err != nil {
+		return 0, err
+	}
+	delQ, delArgs, err := buildHoldAwarePurgeDelete(cutoff, chunkSize, queryScopes)
+	if err != nil {
+		if recErr := r.recordQueryScopeCompileFailure(ctx, err); recErr != nil {
+			return 0, fmt.Errorf("%w; record compile failure: %v", err, recErr)
+		}
+		return 0, err
+	}
 	total := 0
-	const q = `DELETE FROM audit_logs WHERE id IN (
-	    SELECT id FROM audit_logs
-	    WHERE created_at < $1
-	      AND (user_id IS NULL
-	           OR NOT EXISTS (
-	             SELECT 1 FROM legal_holds lh
-	             WHERE lh.status IN ('active', 'release_pending')
-	               AND lh.target_user_id = audit_logs.user_id
-	               AND (
-	                 lh.scope_type = 'whole_user'
-	                 OR (
-	                   lh.scope_type = 'date_range'
-	                   AND lh.scope_date_from IS NOT NULL
-	                   AND lh.scope_date_to IS NOT NULL
-	                   AND audit_logs.created_at >= lh.scope_date_from
-	                   AND audit_logs.created_at <= lh.scope_date_to
-	                 )
-	               )
-	           ))
-	    LIMIT $2
-	)`
 	for {
-		res, err := r.db.ExecContext(ctx, q, cutoff, chunkSize)
+		res, err := r.db.ExecContext(ctx, delQ, delArgs...)
 		if err != nil {
 			return total, fmt.Errorf("purge exec: %w", err)
 		}
@@ -214,4 +233,136 @@ func (r *Repository) PurgeOlderThanRespectingHolds(ctx context.Context, cutoff t
 		}
 	}
 	return total, nil
+}
+
+func (r *Repository) loadQueryScopeHoldProtections(ctx context.Context, q queryContexter) ([]queryScopeHoldProtection, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT id::text,
+		        COALESCE(org_id::text, ''),
+		        target_user_id::text,
+		        COALESCE(scope_query_json::text, ''),
+		        COALESCE(scope_query_hash, ''),
+		        COALESCE(scope_query_version, 0)
+		   FROM legal_holds
+		  WHERE status IN ('active', 'release_pending')
+		    AND scope_type = 'query_scope'
+		  ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("purge load query_scope holds: %w", err)
+	}
+	defer rows.Close()
+
+	var out []queryScopeHoldProtection
+	for rows.Next() {
+		var h queryScopeHoldProtection
+		if err := rows.Scan(&h.HoldID, &h.OrgID, &h.TargetUserID, &h.SelectorJSON, &h.SelectorHash, &h.SelectorVersion); err != nil {
+			return nil, fmt.Errorf("purge scan query_scope hold: %w", err)
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func buildHoldAwarePurgeDelete(cutoff time.Time, chunkSize int, queryScopes []queryScopeHoldProtection) (string, []any, error) {
+	args := []any{cutoff, chunkSize}
+	var queryScopeClauses []string
+	for _, hold := range queryScopes {
+		if hold.SelectorVersion != 1 {
+			return "", nil, &queryScopeCompileFailure{
+				HoldID: hold.HoldID, OrgID: hold.OrgID, TargetUserID: hold.TargetUserID,
+				SelectorHash: hold.SelectorHash, SelectorVersion: hold.SelectorVersion,
+				Err: fmt.Errorf("unsupported selector version %d: %w", hold.SelectorVersion, legalholdselector.ErrInvalidSelector),
+			}
+		}
+		if strings.TrimSpace(hold.SelectorJSON) == "" {
+			return "", nil, &queryScopeCompileFailure{
+				HoldID: hold.HoldID, OrgID: hold.OrgID, TargetUserID: hold.TargetUserID,
+				SelectorHash: hold.SelectorHash, SelectorVersion: hold.SelectorVersion,
+				Err: fmt.Errorf("empty selector JSON: %w", legalholdselector.ErrInvalidSelector),
+			}
+		}
+
+		userArg := len(args) + 1
+		args = append(args, hold.TargetUserID)
+		compiled, err := legalholdselector.Compile(json.RawMessage(hold.SelectorJSON), legalholdselector.CompileOptions{
+			ArgOffset: len(args) + 1,
+		})
+		if err != nil {
+			return "", nil, &queryScopeCompileFailure{
+				HoldID: hold.HoldID, OrgID: hold.OrgID, TargetUserID: hold.TargetUserID,
+				SelectorHash: hold.SelectorHash, SelectorVersion: hold.SelectorVersion,
+				Err: err,
+			}
+		}
+		queryScopeClauses = append(queryScopeClauses,
+			fmt.Sprintf("(user_id = $%d AND (%s))", userArg, compiled.SQL),
+		)
+		args = append(args, compiled.Args...)
+	}
+
+	queryScopeProtection := ""
+	if len(queryScopeClauses) > 0 {
+		queryScopeProtection = "\n	      AND (user_id IS NULL OR NOT (" + strings.Join(queryScopeClauses, " OR ") + "))"
+	}
+
+	q := `DELETE FROM audit_logs WHERE id IN (
+	    SELECT id FROM audit_logs
+	    WHERE created_at < $1
+	      AND (user_id IS NULL
+	           OR NOT EXISTS (
+	             SELECT 1 FROM legal_holds lh
+	             WHERE lh.status IN ('active', 'release_pending')
+	               AND lh.target_user_id = audit_logs.user_id
+	               AND (
+	                 lh.scope_type = 'whole_user'
+	                 OR (
+	                   lh.scope_type = 'date_range'
+	                   AND lh.scope_date_from IS NOT NULL
+	                   AND lh.scope_date_to IS NOT NULL
+	                   AND audit_logs.created_at >= lh.scope_date_from
+	                   AND audit_logs.created_at <= lh.scope_date_to
+	                 )
+	               )
+	           ))` + queryScopeProtection + `
+	    LIMIT $2
+	)`
+	return q, args, nil
+}
+
+func (r *Repository) recordQueryScopeCompileFailure(ctx context.Context, err error) error {
+	var failure *queryScopeCompileFailure
+	if !asQueryScopeCompileFailure(err, &failure) {
+		return nil
+	}
+	meta, marshalErr := json.Marshal(map[string]any{
+		"error_code":       "invalid_query_scope_selector",
+		"hold_id":          failure.HoldID,
+		"selector_hash":    failure.SelectorHash,
+		"selector_version": failure.SelectorVersion,
+		"target_user_id":   failure.TargetUserID,
+		"error":            failure.Err.Error(),
+	})
+	if marshalErr != nil {
+		return marshalErr
+	}
+	adminRepo := adminaudit.NewRepository(r.db)
+	if len(r.chainSecret) > 0 {
+		adminRepo = adminRepo.WithChainSecret(string(r.chainSecret))
+	}
+	return adminRepo.Insert(ctx, &domain.AdminEvent{
+		Action:       "legal_hold_query_scope_compile_failed",
+		Resource:     "legal_hold",
+		TargetID:     failure.HoldID,
+		Path:         "purge",
+		Method:       "INTERNAL",
+		StatusCode:   500,
+		Success:      false,
+		MetadataJSON: string(meta),
+		OrgID:        failure.OrgID,
+		TargetOrgID:  failure.OrgID,
+	})
+}
+
+func asQueryScopeCompileFailure(err error, target **queryScopeCompileFailure) bool {
+	return errors.As(err, target)
 }

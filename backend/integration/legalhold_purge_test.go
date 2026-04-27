@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -350,5 +351,169 @@ func TestCoord_ReleasePendingStillProtects(t *testing.T) {
 	}
 	if !auditLogExists(t, db, auditID) {
 		t.Error("release_pending hold не защитил audit row")
+	}
+}
+
+func TestCoord_QueryScopeHold_ProtectsOnlyMatchingRows(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "query-scope@example.com")
+	oldTS := time.Now().UTC().Add(-48 * time.Hour)
+	matchingID := insertAuditLogWithFields(t, db, userID, oldTS, "openai", "blocked")
+	outsideID := insertAuditLogWithFields(t, db, userID, oldTS, "anthropic", "allowed")
+
+	hold := createQueryScopeHold(t, ctx, db, userID, `{
+		"v":1,
+		"all":[
+			{"field":"provider","op":"eq","value":"openai"},
+			{"field":"policy_action","op":"eq","value":"blocked"}
+		]
+	}`)
+	approveHold(t, ctx, db, hold.ID, "approver-query@example.com")
+
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx, time.Now().UTC().Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 row outside query_scope", deleted)
+	}
+	if !auditLogExists(t, db, matchingID) {
+		t.Error("matching query_scope row was purged")
+	}
+	if auditLogExists(t, db, outsideID) {
+		t.Error("outside query_scope row was not purged")
+	}
+}
+
+func TestCoord_QueryScopeReleasePending_StillProtectsMatchingRows(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "query-release-pending@example.com")
+	oldTS := time.Now().UTC().Add(-48 * time.Hour)
+	matchingID := insertAuditLogWithFields(t, db, userID, oldTS, "openai", "blocked")
+	outsideID := insertAuditLogWithFields(t, db, userID, oldTS, "openai", "allowed")
+
+	hold := createQueryScopeHold(t, ctx, db, userID, `{
+		"v":1,
+		"field":"policy_action",
+		"op":"eq",
+		"value":"blocked"
+	}`)
+	approverID := approveHold(t, ctx, db, hold.ID, "approver-query-release@example.com")
+	hRepo := legalhold.NewPGRepository(db)
+	if _, err := hRepo.Release(ctx, hold.ID, approverID); err != nil {
+		t.Fatalf("request release: %v", err)
+	}
+
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx, time.Now().UTC().Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 row outside query_scope", deleted)
+	}
+	if !auditLogExists(t, db, matchingID) {
+		t.Error("release_pending query_scope did not protect matching row")
+	}
+	if auditLogExists(t, db, outsideID) {
+		t.Error("outside query_scope row was not purged")
+	}
+}
+
+func TestCoord_QueryScopeInvalidStoredSelector_AbortsPurge(t *testing.T) {
+	db, teardown := startPostgres(t)
+	defer teardown()
+	applyAllMigrations(t, db)
+
+	ctx := context.Background()
+	userID := insertTestUser(t, db, "query-invalid@example.com")
+	oldTS := time.Now().UTC().Add(-48 * time.Hour)
+	matchingID := insertAuditLogWithFields(t, db, userID, oldTS, "openai", "blocked")
+	outsideID := insertAuditLogWithFields(t, db, userID, oldTS, "anthropic", "allowed")
+
+	hold := createQueryScopeHold(t, ctx, db, userID, `{
+		"v":1,
+		"field":"provider",
+		"op":"eq",
+		"value":"openai"
+	}`)
+	approveHold(t, ctx, db, hold.ID, "approver-query-invalid@example.com")
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE legal_holds
+		    SET scope_query_json = '{"v":1,"field":"user_id","op":"eq","value":"other-user"}'::jsonb
+		  WHERE id = $1`, hold.ID); err != nil {
+		t.Fatalf("corrupt stored selector: %v", err)
+	}
+
+	aRepo := audit.NewRepository(db)
+	deleted, err := aRepo.PurgeOlderThanRespectingHoldsAndRecordRun(ctx, time.Now().UTC().Add(-24*time.Hour), 100)
+	if err == nil {
+		t.Fatal("purge err = nil, want invalid stored selector error")
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 on fail-closed selector compile", deleted)
+	}
+	if !auditLogExists(t, db, matchingID) || !auditLogExists(t, db, outsideID) {
+		t.Fatal("purge deleted rows despite invalid stored selector")
+	}
+	assertAdminEventExists(t, db, "legal_hold_query_scope_compile_failed", hold.ID)
+}
+
+func insertAuditLogWithFields(t *testing.T, db *sql.DB, userID string, createdAt time.Time, provider, policyAction string) string {
+	t.Helper()
+	id := insertAuditLog(t, db, userID, createdAt)
+	if _, err := db.Exec(
+		`UPDATE audit_logs SET provider = $2, policy_action = $3 WHERE id = $1`,
+		id, provider, policyAction); err != nil {
+		t.Fatalf("update audit_log fields: %v", err)
+	}
+	return id
+}
+
+func createQueryScopeHold(t *testing.T, ctx context.Context, db *sql.DB, userID, selector string) *legalhold.Hold {
+	t.Helper()
+	hRepo := legalhold.NewPGRepository(db)
+	svc := legalhold.NewService(hRepo)
+	hold, _, err := svc.CreateQueryScopedHoldInOrg(
+		ctx, userID, "QUERY-SCOPE", "query scope purge protection", "", "", []byte(selector),
+	)
+	if err != nil {
+		t.Fatalf("create query_scope hold: %v", err)
+	}
+	return hold
+}
+
+func approveHold(t *testing.T, ctx context.Context, db *sql.DB, holdID, approverEmail string) string {
+	t.Helper()
+	approverID := insertTestUser(t, db, approverEmail)
+	hRepo := legalhold.NewPGRepository(db)
+	if _, err := hRepo.Approve(ctx, holdID, approverID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	return approverID
+}
+
+func assertAdminEventExists(t *testing.T, db *sql.DB, action, targetID string) {
+	t.Helper()
+	var exists bool
+	if err := db.QueryRow(
+		`SELECT EXISTS(
+		    SELECT 1 FROM admin_event_logs
+		     WHERE action = $1 AND target_id = $2 AND success = false
+		)`, action, targetID).Scan(&exists); err != nil {
+		t.Fatalf("query admin event: %v", err)
+	}
+	if !exists {
+		t.Fatalf("admin event %s for target %s not found", action, targetID)
 	}
 }
