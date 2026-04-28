@@ -38,14 +38,16 @@ config:
   #   Stage 1: shadow mode (14 days, 0 policy_action mismatches required)
   #   Stage 2: limited incremental canary (8 days)
   #   Stage 3: promotion review + operator sign-off
-  # Additional F7.6 constraint: Anthropic/Gemini/Ollama use identity-stub EmitSanitized —
-  # sanitize does NOT modify content for these providers (F7.x scope for full support).
+  # F7.8 constraint: unsafe cross-chunk sanitize verdicts block mid-stream;
+  # they do not retroactively rewrite bytes already emitted to the client.
   STREAMING_MODE: "buffered"
   # STREAMING_ALLOW_INCREMENTAL_IN_PROD: "true"   # explicit opt-in; complete proof window first
 
   FIREWALL_ENABLED: "true"
   # Semantic V2 shadow mode: do not enforce until corpus baseline is established.
   FIREWALL_SA_V2_ENABLED: "false"
+  # FIREWALL_SA_V2_SHADOW_ONLY: "true"      # Stage 1: observe would_block without enforcement
+  # FIREWALL_SA_V2_CORPUS_PATH: "/etc/shadowai/semantic_v2.json"
 
   # SIEM async delivery tuning (defaults shown; tune for your audit volume).
   # See docs/production-hardening.md §4 for sizing guidance.
@@ -88,6 +90,17 @@ autoscaling:
   enabled: true
   minReplicas: 3
   maxReplicas: 10
+
+firewallAlerts:
+  enabled: true
+  semanticV2:
+    failOpenRatio: 0.05
+    failOpenFor: "5m"
+    failOpenSeverity: warning
+    wouldBlockRatio: 0.02
+    wouldBlockFor: "30m"
+    wouldBlockSeverity: info
+    minRequestRate: 0.01
   targetCPUUtilizationPercentage: 65
   targetMemoryUtilizationPercentage: 75
 

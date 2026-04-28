@@ -2,7 +2,8 @@
 {{- $auditAlerts := and .Values.evidenceAuditReport.enabled .Values.evidenceAuditReport.alerts.enabled }}
 {{- $collectionAlerts := and .Values.evidenceCollection.enabled .Values.evidenceCollection.alerts.enabled }}
 {{- $legalHoldAlerts := .Values.legalHoldSLA.alerts.enabled }}
-{{- if or $exportAlerts $auditAlerts $collectionAlerts $legalHoldAlerts }}
+{{- $firewallAlerts := .Values.firewallAlerts.enabled }}
+{{- if or $exportAlerts $auditAlerts $collectionAlerts $legalHoldAlerts $firewallAlerts }}
 # PR-O4.1/O4.4: PrometheusRule for evidence pipeline alerting.
 # Requires kube-state-metrics (kube_job_status_failed, kube_cronjob_next_schedule_time).
 apiVersion: monitoring.coreos.com/v1
@@ -252,6 +253,55 @@ spec:
               {{ .Values.evidenceCollection.alerts.missingAfterSeconds | default 2678400 | int | divf 86400 | floor }} days.
               Check CronJob suspension status.
             runbook: "https://docs.shadowai.internal/runbooks/evidence-collection#missing"
+    {{- end }}
+
+    {{- if $firewallAlerts }}
+    - name: shadowai.firewall
+      interval: {{ .Values.firewallAlerts.evaluationInterval | default "1m" }}
+      rules:
+
+        - alert: SemanticV2FailOpenHigh
+          expr: |
+            (
+              rate(shadowai_semantic_v2_inspect_total{result="fail_open"}[10m])
+              /
+              rate(shadowai_semantic_v2_inspect_total[10m])
+            ) > {{ .Values.firewallAlerts.semanticV2.failOpenRatio | default 0.05 }}
+            and
+            rate(shadowai_semantic_v2_inspect_total[10m])
+              > {{ .Values.firewallAlerts.semanticV2.minRequestRate | default 0.01 }}
+          for: {{ .Values.firewallAlerts.semanticV2.failOpenFor | default "5m" }}
+          labels:
+            severity: {{ .Values.firewallAlerts.semanticV2.failOpenSeverity | default "warning" }}
+            team: security
+          annotations:
+            summary: "ShadowAI semantic_v2 fail-open rate is high"
+            description: >-
+              More than {{ mulf (.Values.firewallAlerts.semanticV2.failOpenRatio | default 0.05) 100 }}% of
+              semantic_v2 inspections are failing open. Embedding service or corpus
+              wiring is degraded; semantic detection is reduced.
+            runbook: "https://docs.shadowai.internal/runbooks/semantic-v2-promotion#fail-open"
+
+        - alert: SemanticV2WouldBlockHigh
+          expr: |
+            (
+              rate(shadowai_semantic_v2_inspect_total{result="would_block"}[30m])
+              /
+              rate(shadowai_semantic_v2_inspect_total[30m])
+            ) > {{ .Values.firewallAlerts.semanticV2.wouldBlockRatio | default 0.02 }}
+            and
+            rate(shadowai_semantic_v2_inspect_total[30m])
+              > {{ .Values.firewallAlerts.semanticV2.minRequestRate | default 0.01 }}
+          for: {{ .Values.firewallAlerts.semanticV2.wouldBlockFor | default "30m" }}
+          labels:
+            severity: {{ .Values.firewallAlerts.semanticV2.wouldBlockSeverity | default "info" }}
+            team: security
+          annotations:
+            summary: "ShadowAI semantic_v2 would_block rate needs review"
+            description: >-
+              semantic_v2 shadow_only mode is observing block-level matches. Review
+              audit samples before promoting FIREWALL_SA_V2_SHADOW_ONLY=false.
+            runbook: "https://docs.shadowai.internal/runbooks/semantic-v2-promotion#would-block-review"
     {{- end }}
 
 {{- end }}

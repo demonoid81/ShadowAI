@@ -115,6 +115,23 @@ spec:
             description: "{{ $value | humanizePercentage }} of SA_v2 inspections are failing open (embedding service degraded). Threat detection is reduced."
             runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/deploy-rollback.md#semantic-v2-degraded"
 
+        - alert: SemanticV2WouldBlockHigh
+          expr: |
+            (
+              rate(shadowai_semantic_v2_inspect_total{result="would_block"}[30m])
+              /
+              rate(shadowai_semantic_v2_inspect_total[30m])
+            ) > 0.02
+            and
+            rate(shadowai_semantic_v2_inspect_total[30m]) > 0.01
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "Semantic V2 would_block rate needs review"
+            description: "SA_v2 shadow_only mode is observing block-level matches. Review audit samples before enabling enforcement."
+            runbook_url: "https://github.com/shadowai/shadowai/blob/master/docs/runbooks/semantic-v2-promotion.md#would-block-review"
+
         - alert: FirewallBlockRateSpike
           expr: |
             rate(shadowai_firewall_decisions_total{action="block"}[10m])

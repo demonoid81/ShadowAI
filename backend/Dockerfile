@@ -75,6 +75,12 @@ RUN CGO_ENABLED=0 go build \
     -o /audit-access-review \
     ./cmd/audit-access-review
 
+# Build firewall-corpus-verify CLI (F8.1: semantic_v2 promotion gate).
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /firewall-corpus-verify \
+    ./cmd/firewall-corpus-verify
+
 # ---------------------------------------------------------------------------
 # Runtime image
 # ---------------------------------------------------------------------------
@@ -94,6 +100,7 @@ COPY --from=builder /evidence-upload        /usr/local/bin/evidence-upload
 COPY --from=builder /audit-evidence-report   /usr/local/bin/audit-evidence-report
 COPY --from=builder /audit-collect-evidence  /usr/local/bin/audit-collect-evidence
 COPY --from=builder /audit-access-review    /usr/local/bin/audit-access-review
+COPY --from=builder /firewall-corpus-verify /usr/local/bin/firewall-corpus-verify
 
 # SQL migrations baked into the image so the migrate init container
 # doesn't need a volume mount.

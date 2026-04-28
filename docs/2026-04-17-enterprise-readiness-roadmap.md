@@ -93,7 +93,7 @@
 9. **Alert coverage refinement**
    - Legal hold pending/SLA alerts.
    - SIEM queue/drop/retry dashboards.
-   - semantic_v2 `fail_open` / `would_block` promotion dashboards.
+   - semantic_v2 `fail_open` / `would_block` promotion dashboards. **[implemented: F8.1]**
    - Evidence audit report alerts are implemented, but operator docs still need final cleanup.
 
 ---

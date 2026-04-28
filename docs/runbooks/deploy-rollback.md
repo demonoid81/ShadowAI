@@ -198,6 +198,15 @@ kubectl set env deployment/shadowai FIREWALL_SA_V2_ENABLED=false
 # Re-enable after embedding service recovers.
 ```
 
+### Semantic V2 Would-Block Review
+
+**Alert:** `SemanticV2WouldBlockHigh`
+
+Do not automatically promote to enforce while this alert is active. Review
+samples using [semantic-v2-promotion.md](semantic-v2-promotion.md#would-block-review),
+adjust corpus/thresholds if needed, rerun `firewall-bench --with-embeddings`,
+then restart the shadow-only evidence window.
+
 ### Streaming Shadow Mismatch
 
 **Alert:** `StreamingShadowMismatchHigh`

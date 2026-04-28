@@ -66,6 +66,33 @@ export FIREWALL_SA_V2_CORPUS_PATH=./firewall_corpus/semantic_v2.json
 # "semantic_v2: registered (provider=ollama model=nomic-embed-text dim=768 corpus_items=~50)"
 ```
 
+## Pre-promotion validation
+
+Перед включением `FIREWALL_SA_V2_ENABLED=true` в production проверьте manifest
+без запуска backend:
+
+```bash
+firewall-corpus-verify \
+  --corpus ./firewall_corpus/semantic_v2.json \
+  --expect-provider ollama \
+  --expect-model nomic-embed-text \
+  --expect-dimension 768 \
+  --min-items 50 \
+  --require-category prompt_injection \
+  --require-category jailbreak
+```
+
+Для behavior-gate дополнительно запустите:
+
+```bash
+firewall-bench \
+  --with-embeddings \
+  --data ./testdata/firewall_bench \
+  --baseline ./testdata/firewall_bench/baseline.json
+```
+
+Полный promotion process: `docs/runbooks/semantic-v2-promotion.md`.
+
 ## Обновление corpus
 
 Расширить `patterns/*.txt` (добавить строки или новый файл-категорию) →
@@ -148,9 +175,6 @@ dot-product, который равен cosine только для unit-length в
 
 ## Roadmap (v2+)
 
-- `cmd/firewall-corpus-verify` — отдельный command для validation'а
-  committed manifest'а (shape + dimension + normalization) без
-  запуска backend.
 - Auto-regen как part of CI job (requires Ollama-sidecar).
 - Multiple corpus per-category support (например, разные thresholds
   для prompt_injection vs content_moderation).

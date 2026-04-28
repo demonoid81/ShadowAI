@@ -180,6 +180,28 @@ legalHoldSLA:
     releasePendingFor: "5m"
     dsarBlockedFor: "1m"
 
+# F8.1: Firewall/security alerts. Enable when semantic_v2 is enabled in
+# shadow_only or enforce mode and Prometheus scrapes /metrics.
+firewallAlerts:
+  enabled: false
+  evaluationInterval: "1m"
+  semanticV2:
+    # fail_open means embedding failed and semantic_v2 allowed the request.
+    # Keep this close to zero before promotion to enforce.
+    failOpenRatio: 0.05
+    failOpenFor: "5m"
+    failOpenSeverity: warning
+
+    # would_block is emitted only when FIREWALL_SA_V2_SHADOW_ONLY=true and
+    # similarity reaches block_threshold. It is the review queue for promotion,
+    # not an automatic production incident.
+    wouldBlockRatio: 0.02
+    wouldBlockFor: "30m"
+    wouldBlockSeverity: info
+
+    # Ignore near-zero traffic windows to avoid noisy ratios.
+    minRequestRate: 0.01
+
 # PR-O4.1: Automated evidence bundle export + offline verification CronJob.
 # Exports WORM evidence bundles on a schedule, verifies them offline, and alerts
 # on failure. Use in conjunction with auditVerifyCron for full compliance coverage.

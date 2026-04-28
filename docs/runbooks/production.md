@@ -182,6 +182,11 @@ promtool query instant \
 kubectl set env deployment/shadowai FIREWALL_SA_V2_ENABLED=false
 ```
 
+Promotion from shadow-only to enforce requires the F8.1 checklist in
+[semantic-v2-promotion.md](semantic-v2-promotion.md): corpus verification,
+`firewall-bench --with-embeddings`, reviewed `would_block` samples, and enabled
+Prometheus alerts.
+
 ### Streaming mode
 
 | Setting | Notes |
@@ -205,6 +210,7 @@ Promote to incremental only when `shadowai_streaming_shadow_mismatch_total / com
 | `AuditVerifyJobFailed` | critical | Run `audit-verify --verbose` manually; engage security if chain break |
 | `SIEMBatchDeliveryFailing` | critical | Check SIEM endpoint connectivity |
 | `SemanticV2FailOpenHigh` | warning | Check embedding service; disable SA_v2 temporarily |
+| `SemanticV2WouldBlockHigh` | info | Review shadow-only samples before enforcement |
 | `StreamingShadowMismatchHigh` | warning | Do NOT promote to incremental; investigate root cause |
 
 Full alert runbooks: [deploy-rollback.md](deploy-rollback.md)

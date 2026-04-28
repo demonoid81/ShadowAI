@@ -207,9 +207,16 @@ If you enable `FIREWALL_JUDGE_ENABLED: "true"`, all streaming traffic falls back
 
 ### Shadow mode (semantic_v2)
 
-`FIREWALL_SA_V2_ENABLED: "false"` is the recommended default until shadow traffic
-corpus establishes a stable baseline. Shadow mode (`shadow_only`) records mismatches
-without blocking; use `shadowai_shadow_mismatch_total` to track before enabling enforcement.
+`FIREWALL_SA_V2_ENABLED: "false"` is the safe default. To promote semantic_v2:
+validate the corpus with `firewall-corpus-verify`, run
+`firewall-bench --with-embeddings`, then enable `FIREWALL_SA_V2_ENABLED=true`
+with `FIREWALL_SA_V2_SHADOW_ONLY=true`. Do not set shadow-only to false until
+the review window in `docs/runbooks/semantic-v2-promotion.md` is complete.
+
+Required promotion signals:
+- `shadowai_semantic_v2_inspect_total{result="fail_open"}` near zero
+- `shadowai_semantic_v2_inspect_total{result="would_block"}` samples reviewed
+- Helm `firewallAlerts.enabled=true` or equivalent Prometheus alerts installed
 
 ---
 
