@@ -14,6 +14,34 @@
     "internalDb": "Внутренние БД",
     "logout": "Выйти"
   },
+  "layout": {
+    "console": "Enterprise Security Console",
+    "posture": "Статус платформы",
+    "postureReady": "Готово к enterprise pilot",
+    "postureText": "Контуры identity, governance, evidence и runtime protection включены в единую контрольную плоскость.",
+    "groups": {
+      "observe": "Observe",
+      "govern": "Govern",
+      "protect": "Protect",
+      "operate": "Operate"
+    },
+    "navCaptions": {
+      "dashboard": "Risk, spend, posture",
+      "audit": "WORM evidence trail",
+      "policies": "Provider/model control",
+      "budget": "Spend guardrails",
+      "providers": "Vendor connectivity",
+      "firewall": "LLM security runtime",
+      "internalDb": "Data boundary tools",
+      "users": "Identity lifecycle"
+    },
+    "signals": {
+      "tenant": "Tenant isolation",
+      "worm": "WORM evidence",
+      "byok": "BYOK audit payloads",
+      "prod": "PROD1 validated"
+    }
+  },
   "auth": {
     "signIn": "Войти",
     "signingIn": "Вход...",
@@ -39,6 +67,67 @@
   },
   "dashboard": {
     "title": "Дашборд",
+    "consoleTitle": "Единая контрольная плоскость для LLM security, governance и audit evidence.",
+    "consoleSubtitle": "ShadowAI теперь выглядит как то, чем является по backend-возможностям: enterprise security console для безопасного использования LLM в организациях.",
+    "readiness": "Production readiness",
+    "operatorValidated": "Go / no-go pack",
+    "tags": {
+      "firewall": "LLM Firewall",
+      "evidence": "Tamper-evident evidence",
+      "tenant": "Tenant isolation",
+      "byok": "BYOK"
+    },
+    "readinessItems": {
+      "policy": "Governance и org budgets",
+      "evidence": "WORM chain и anchors",
+      "identity": "OIDC, SCIM, MFA",
+      "prod": "Deployment validation"
+    },
+    "cards": {
+      "protect": {
+        "kicker": "Protect",
+        "title": "Runtime LLM Firewall",
+        "body": "Streaming inspection, sanitize/block outcomes, semantic shadow rollout и audit-ready policy decisions.",
+        "badge": "F7/F8",
+        "signal": "Incremental protection with production gate"
+      },
+      "govern": {
+        "kicker": "Govern",
+        "title": "Provider and budget control",
+        "body": "Per-org allowlists, role/context scoped routing, department sensitivity и aggregate org budget caps.",
+        "badge": "G4",
+        "signal": "Policy cache and org isolation enabled"
+      },
+      "evidence": {
+        "kicker": "Evidence",
+        "title": "Tamper-evident audit chain",
+        "body": "HMAC chain, Merkle anchors, Ed25519 manifests, Object Lock bundles and offline auditor verification.",
+        "badge": "W8",
+        "signal": "WORM posture with portable bundles"
+      },
+      "operate": {
+        "kicker": "Operate",
+        "title": "Identity and production controls",
+        "body": "OIDC, SCIM, admin MFA, break-glass, production validation and evidence collection runbooks.",
+        "badge": "PROD1",
+        "signal": "Operator workflow is validation-driven"
+      }
+    },
+    "trafficKicker": "Observe",
+    "trafficTitle": "LLM traffic and cost telemetry",
+    "trafficSubtitle": "Existing dashboard data, now framed as control-plane signal",
+    "securityKicker": "Security posture",
+    "securityTitle": "Signals that matter before go-live",
+    "identityKicker": "Identity privacy",
+    "maskedIdentityNote": "PII-minimized: masked email + stable user id",
+    "signals": {
+      "blockRate": "Firewall block rate",
+      "blockRateDetail": "Derived from total and blocked request counters.",
+      "siem": "SIEM delivery layer",
+      "siemDetail": "Async batching, retry and backpressure controls are implemented.",
+      "streaming": "Streaming safety track",
+      "streamingDetail": "Incremental mode remains gated by proof-window criteria."
+    },
     "totalRequests": "Всего запросов",
     "blockedRequests": "Заблокировано",
     "totalCost": "Общая стоимость",

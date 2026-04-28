@@ -1,3 +1,74 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html {
+    background: #020617;
+  }
+
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(circle at 12% 0%, rgba(34, 211, 238, 0.12), transparent 34rem),
+      radial-gradient(circle at 88% 12%, rgba(16, 185, 129, 0.10), transparent 30rem),
+      #020617;
+    font-family: "Aptos", "IBM Plex Sans", "Segoe UI", sans-serif;
+    font-feature-settings: "ss01", "cv05";
+  }
+}
+
+@layer components {
+  .bg-console {
+    background:
+      linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.98)),
+      #020617;
+  }
+
+  .brand-mark {
+    @apply grid h-12 w-12 place-items-center rounded-2xl border border-cyan-200/25 bg-cyan-200/10 text-sm font-black tracking-[0.22em] text-cyan-100 shadow-[0_0_34px_rgba(34,211,238,0.16)];
+  }
+
+  .status-dot {
+    @apply inline-block h-2.5 w-2.5 rounded-full shadow-[0_0_14px_currentColor];
+  }
+
+  .trust-pill {
+    @apply flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-slate-300;
+  }
+
+  .hero-panel {
+    @apply relative overflow-hidden rounded-[2rem] border border-white/10 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40 sm:p-8 lg:p-10;
+  }
+
+  .hero-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(120deg, rgba(34, 211, 238, 0.14), transparent 38%),
+      radial-gradient(circle at 78% 20%, rgba(16, 185, 129, 0.20), transparent 18rem),
+      radial-gradient(circle at 58% 120%, rgba(245, 158, 11, 0.10), transparent 24rem);
+    pointer-events: none;
+  }
+
+  .tag-chip {
+    @apply rounded-full border border-cyan-200/20 bg-cyan-200/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100;
+  }
+
+  .posture-card {
+    @apply rounded-3xl border border-white/10 bg-white/[0.045] p-5 shadow-xl shadow-slate-950/20 backdrop-blur-xl transition-transform duration-200 hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.065];
+  }
+
+  .console-card {
+    @apply rounded-3xl border border-white/10 bg-slate-950/65 p-5 shadow-xl shadow-slate-950/25 backdrop-blur-xl sm:p-6;
+  }
+
+  .section-kicker {
+    @apply text-xs font-semibold uppercase tracking-[0.24em] text-cyan-200/60;
+  }
+
+  .section-title {
+    @apply mt-2 text-xl font-semibold text-white;
+  }
+}
