@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/shadowai/backend/internal/dlp"
@@ -120,6 +121,60 @@ func TestIncrementalEngine_CrossChunkPattern(t *testing.T) {
 	if !v.Block {
 		t.Fatalf("expected Block after window contains full pattern; got %+v; window=%q",
 			v, e.window.Window())
+	}
+}
+
+// TestIncrementalEngine_CrossChunkPIISanitize_FailClosed — F7.8:
+// если DLP находит sanitizable PII только на sliding-window склейке
+// двух chunks, текущий delta нельзя безопасно переписать: первая
+// половина уже могла быть отправлена клиенту. Такой sanitize verdict
+// должен fail-close'иться в mid-stream block, а не silently emit'ить
+// вторую половину без redaction.
+func TestIncrementalEngine_CrossChunkPIISanitize_FailClosed(t *testing.T) {
+	e := newIncrementalEngine(nil, dlp.NewService("enforce"), "gpt-4o", "openai", "u-1")
+
+	v1 := e.EvaluateDelta(context.Background(), "contact user@")
+	if v1.Block || v1.Sanitize {
+		t.Fatalf("partial PII should not block/sanitize yet, got %+v", v1)
+	}
+
+	v2 := e.EvaluateDelta(context.Background(), "example.com")
+	if !v2.Block {
+		t.Fatalf("cross-chunk PII sanitize must fail closed, got %+v", v2)
+	}
+	if v2.Sanitize {
+		t.Fatalf("cross-chunk PII must not return Sanitize=true, got %+v", v2)
+	}
+	if v2.InspectorName != "dlp" {
+		t.Errorf("InspectorName = %q, want dlp", v2.InspectorName)
+	}
+	if !strings.Contains(v2.Reason, "cross-chunk") {
+		t.Errorf("Reason = %q, want cross-chunk marker", v2.Reason)
+	}
+	if e.Sanitized() {
+		t.Error("engine.Sanitized() should remain false for blocked cross-chunk sanitize")
+	}
+}
+
+// TestIncrementalEngine_PriorSanitizedFinding_DoesNotBlockNextCleanDelta —
+// regression guard: after a full PII value inside one delta was sanitized,
+// the raw value can remain in the sliding window. A subsequent clean delta
+// must not be blocked or re-sanitized just because the prior finding is still
+// visible in that window.
+func TestIncrementalEngine_PriorSanitizedFinding_DoesNotBlockNextCleanDelta(t *testing.T) {
+	e := newIncrementalEngine(nil, dlp.NewService("enforce"), "gpt-4o", "openai", "u-1")
+
+	v1 := e.EvaluateDelta(context.Background(), "contact user@example.com")
+	if !v1.Sanitize || v1.Block {
+		t.Fatalf("same-delta PII should sanitize, got %+v", v1)
+	}
+
+	v2 := e.EvaluateDelta(context.Background(), " thanks")
+	if v2.Block || v2.Sanitize {
+		t.Fatalf("clean delta after prior sanitize should pass, got %+v", v2)
+	}
+	if !e.Sanitized() {
+		t.Error("engine.Sanitized() should preserve stream-level sanitize state")
 	}
 }
 

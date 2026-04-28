@@ -70,6 +70,11 @@ type incrementalEngine struct {
 	// Если хотя бы один delta был sanitized, audit PolicyAction=sanitized.
 	sanitized          bool
 	sanitizedInspector string
+
+	// streamOffset — byte offset начала следующего delta в полном
+	// streaming text. Нужен F7.8, чтобы понять, найден ли sensitive
+	// range целиком в текущем delta или пересекает уже emitted bytes.
+	streamOffset int
 }
 
 // newIncrementalEngine создаёт engine с default inspection window.
@@ -99,8 +104,12 @@ func (e *incrementalEngine) EvaluateDelta(ctx context.Context, delta string) inc
 	if delta == "" {
 		return incrementalVerdict{}
 	}
+	deltaStartAbs := e.streamOffset
 	e.window.Append(delta)
+	e.streamOffset += len(delta)
+	deltaEndAbs := e.streamOffset
 	text := e.window.Window()
+	windowStartAbs := e.streamOffset - len(text)
 
 	// 1. Firewall pipeline — response phase.
 	if e.firewallPipeline != nil {
@@ -144,10 +153,23 @@ func (e *incrementalEngine) EvaluateDelta(ctx context.Context, delta string) inc
 				}
 			case firewall.ActionSanitize:
 				// PR-F7.5: sanitize the current DELTA (not the window).
-				// The window triggered the pattern but we replace only
-				// the current delta content in the emitted frame.
-				// Cross-chunk PII spanning multiple deltas → F7.6 scope.
+				// F7.8: if the finding crosses a chunk boundary, we cannot
+				// retroactively redact already emitted bytes, so fail closed.
 				if e.dlpSvc != nil {
+					if len(decision.Findings) > 0 {
+						hasCurrent, unsafe := sanitizeFindingCoverage(
+							firewallFindingSpans(decision.Findings),
+							windowStartAbs,
+							deltaStartAbs,
+							deltaEndAbs,
+						)
+						if unsafe {
+							return unsafeCrossChunkSanitizeVerdict(decision.InspectorName, decision.Reason)
+						}
+						if !hasCurrent {
+							break
+						}
+					}
 					deltaFindings := pii.Scan(delta)
 					sanitizedDelta := e.dlpSvc.Sanitize(delta, deltaFindings)
 					e.sanitized = true
@@ -182,6 +204,18 @@ func (e *incrementalEngine) EvaluateDelta(ctx context.Context, delta string) inc
 			}
 		case dlp.DLPActionSanitize:
 			// PR-F7.5: sanitize the current delta.
+			hasCurrent, unsafe := sanitizeFindingCoverage(
+				dlpFindingSpans(dec.Findings),
+				windowStartAbs,
+				deltaStartAbs,
+				deltaEndAbs,
+			)
+			if unsafe {
+				return unsafeCrossChunkSanitizeVerdict("dlp", dec.Reason)
+			}
+			if !hasCurrent {
+				break
+			}
 			deltaFindings := pii.Scan(delta)
 			sanitizedDelta := e.dlpSvc.Sanitize(delta, deltaFindings)
 			e.sanitized = true

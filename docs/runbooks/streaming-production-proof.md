@@ -363,10 +363,12 @@ Approval: ___________________
 
 F7.7 removes the previous Anthropic/Gemini/Ollama identity-stub limitation.
 When the firewall/DLP triggers a sanitize verdict, provider-specific emitters
-rewrite the current text delta frame. The remaining known caveat is
-cross-chunk PII: if a sensitive value is split across multiple deltas, F7.7
-does not yet rewrite the full sliding-window match. Keep sanitize sample review
-mandatory until F7.8 closes that gap or routes unsafe cases to a safe fallback.
+rewrite the current text delta frame. F7.8 adds a safe fallback for cross-chunk
+PII: if the sliding-window finding spans bytes that may already have been
+emitted, the stream is blocked mid-flight instead of emitting a partially
+redacted value. This is intentionally conservative; it prevents silent leakage
+but does not retroactively rewrite previously emitted bytes. Keep sanitize and
+mid-stream block sample review mandatory during the production proof window.
 
 ---
 

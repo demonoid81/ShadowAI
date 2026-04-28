@@ -194,6 +194,48 @@ func TestProxyChat_Incremental_Sanitize_SanitizedFrameIsValidJSON(t *testing.T) 
 	}
 }
 
+// TestProxyChat_Incremental_Sanitize_CrossChunkPII_BlocksMidstream —
+// F7.8 end-to-end guard: an email split across two SSE deltas cannot be
+// safely redacted in-place because the first half may already be emitted.
+// The safe fallback is a mid-stream block before emitting the completing
+// chunk.
+func TestProxyChat_Incremental_Sanitize_CrossChunkPII_BlocksMidstream(t *testing.T) {
+	splitPIIStream := []byte(
+		`data: {"id":"c-split","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"contact user@"},"finish_reason":null}]}` + "\n\n" +
+			`data: {"id":"c-split","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"example.com"},"finish_reason":null}]}` + "\n\n" +
+			`data: [DONE]` + "\n\n")
+
+	pipeline := firewall.NewPipeline()
+	th := buildF72Handler(t, splitPIIStream, pipeline, "incremental")
+	defer th.cleanup()
+
+	rec := doF72Stream(th.h, t)
+	th.flushAudit()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200 (stream already started)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: error") {
+		t.Fatalf("cross-chunk PII should emit terminal error frame, body=%q", body)
+	}
+	if strings.Contains(body, "example.com") {
+		t.Fatalf("completing PII chunk was emitted before block: %s", body)
+	}
+
+	entries := th.auditRepo.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Outcome != OutcomeStreamBlockedMidflight {
+		t.Errorf("Outcome = %q, want %q", e.Outcome, OutcomeStreamBlockedMidflight)
+	}
+	if e.PolicyAction != string(dlp.DLPActionBlock) {
+		t.Errorf("PolicyAction = %q, want %q", e.PolicyAction, string(dlp.DLPActionBlock))
+	}
+}
+
 // TestProxyChat_Incremental_Sanitize_CMJudge_BufferedFallback —
 // CM+judge config must remain buffered_fallback regardless of PII in stream.
 // Regression guard: F7.5 must NOT change CM+judge fallback behavior.

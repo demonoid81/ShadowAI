@@ -295,7 +295,7 @@ evidenceAuditReport:
 | Limit | Description | Mitigation / Future work |
 |-------|-------------|--------------------------|
 | Governance cache multi-replica lag | Policy updates visible in ≤ 60s on all replicas | Reduce TTL or restart pod for immediate propagation; distributed invalidation is future work |
-| Streaming incremental: cross-chunk PII sanitize | F7.7 sanitizes the current delta frame; PII split across multiple chunks is not yet window-rewritten | Keep proof-window audit review mandatory; implement F7.8 cross-chunk sanitize or safe fallback before removing the prod gate |
+| Streaming incremental: cross-chunk PII sanitize | F7.8 fail-closes unsafe sanitize verdicts when a sensitive match spans already emitted chunks. It does not retroactively rewrite bytes that were already sent | Keep proof-window audit review mandatory; monitor `stream_blocked_midflight` / `shadowai_streaming_midstream_block_total` for cross-chunk spikes before removing the prod gate |
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
 | Legal hold selector privacy | Portable evidence bundles include `selector_manifest.jsonl` for query-scope auditor explainability. The v1 bundle exports selector JSON plus hash; it does not yet offer a hash-only or BYOK-encrypted selector export mode | Use tenant-scoped exports for least disclosure; use WORM `legal_hold_events` selector hash for integrity; defer hash-only/BYOK selector bundles to L8.2/BYOK |
 | BYOK: not implemented | Payload fields are plaintext (BYOK1 is design only) | See BYOK1 RFC; implement BYOK2 after customer requirement |
