@@ -207,7 +207,7 @@ Acceptance criteria:
 
 - Удаление buffered streaming path до production proof window.
 - Большой analytics UI до завершения SOC/control mapping.
-- Full BYOK implementation — RFC завершён (BYOK1), реализация в BYOK2 после customer requirement и KMS provider decision.
+- Full BYOK implementation — BYOK2 v1 закрывает new-write audit payload encryption через Vault Transit; per-tenant DEK epochs, legacy sweep и дополнительные payload classes остаются v2+.
 - Multi-region active-active до key rotation / evidence restore automation.
 - Поддержка SAML остаётся customer-dependent после IAM1; текущий supported path — OIDC + SCIM.
 
@@ -225,6 +225,7 @@ Acceptance criteria:
 8. ~~**GA1 — Hardened default / scale pass**~~ ✅ → `docs/production-hardening.md`
 9. ~~**F7.6 — Streaming production proof window**~~ ✅ → `docs/runbooks/streaming-production-proof.md`
 10. **SOC2.1 — Evidence collection automation** ← current → `docs/runbooks/evidence-collection.md`
+11. ~~**BYOK2 — KMS-backed audit payload encryption v1**~~ ✅
 
 ---
 
@@ -234,6 +235,6 @@ Acceptance criteria:
 
 - **До enterprise pilot:** фундаментальные blockers закрыты; нужен только deployment-specific checklist и clean docs.
 - **До signed production:** ✅ все закрыты.
-- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; остаются BYOK2 (после customer demand) и L6 (scoped holds).
+- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 закрыт для audit payload new writes; остаются v2+ BYOK sweep/DEK epochs и customer-specific identity/compliance deltas.
 
-Следующий recommended work item: **F7.6 streaming proof window** (оперативная задача: запустить и пройти 30-day process), затем **BYOK2** или **L6**.
+Следующий recommended work item после BYOK2: v2+ key lifecycle/sweep либо deployment-specific production validation.

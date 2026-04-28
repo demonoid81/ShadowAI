@@ -241,7 +241,7 @@ audit engagement.
 | Formal Security Policy documentation | A.5.1 | Technical controls exist; policy document not yet written |
 | Business Continuity / Disaster Recovery plan | A.5.30 | DB backup/restore drill documented; formal BCP not written |
 | Vendor assessment for LLM providers | CC9.2 | VRM1 process package exists; legal/commercial due diligence remains operator-owned |
-| BYOK / customer-managed encryption | C1.2 | Roadmap; not yet implemented |
+| BYOK / customer-managed encryption | C1.2 | BYOK2 v1 implemented for new `audit_logs.request_body` / `response_body` writes via Vault Transit envelopes; legacy sweep and non-audit payload classes remain roadmap |
 
 ---
 
@@ -297,7 +297,7 @@ that legal/commercial due diligence remains operator-owned.
 - Do not say "SOC 2 compliant" — ShadowAI has not been audited.
 - Do not say "ISO 27001 certified" — ShadowAI has not been certified.
 - Do not promise automated alerts without confirming operator Prometheus setup.
-- Do not reference W7 (key rotation) or BYOK as current controls.
+- Do not overstate BYOK: current BYOK2 scope is audit request/response payload encryption for new writes, not full customer-managed encryption for every data class.
 
 ---
 

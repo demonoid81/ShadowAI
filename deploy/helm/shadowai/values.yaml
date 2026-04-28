@@ -47,6 +47,12 @@ config:
   DSAR_DPO_SIGNAL_ENABLED: "true"
   STREAMING_MODE: "buffered"
   FIREWALL_ENABLED: "true"
+  BYOK_ENABLED: "false"
+  BYOK_PROVIDER: ""        # production BYOK: "vault_transit"
+  BYOK_VAULT_ADDR: ""      # пример: "https://vault.vault.svc:8200"
+  BYOK_VAULT_MOUNT: "transit"
+  BYOK_VAULT_KEY_NAME: ""  # пример: "shadowai-audit-payload"
+  BYOK_TIMEOUT: "5s"
 
   # W8: Additional independent anchor sink (opt-in, default disabled).
   # Enable to publish signed Merkle anchor manifests to a second independent backend.

@@ -396,28 +396,31 @@ The `kid` field itself must be indexed for efficient sweep queries.
 
 ## 12. Open Questions
 
-These questions must be resolved before BYOK implementation begins:
+BYOK2 v1 resolution:
 
-1. **KMS provider list**: Which KMS backends to support first? AWS KMS, GCP CKMS, HashiCorp
-   Vault, and customer-managed (Bring Your Own KMS via KMIP) are all viable; each has
-   different SDK surface area.
+- First backend: HashiCorp Vault Transit.
+- First fields: `audit_logs.request_body` and `audit_logs.response_body`.
+- Rollout: new-writes-only + dual-read legacy plaintext/envelope.
+- Deferred: per-tenant DEK epoch storage, background re-encryption sweep, searchable encryption, legal-hold selector encryption.
 
-2. **DEK caching TTL**: What is the acceptable window for in-memory DEK exposure? 
+Remaining questions for BYOK v2+:
+
+1. **DEK caching TTL**: What is the acceptable window for in-memory DEK exposure?
    Shorter TTL → more KMS calls; longer TTL → larger breach window.
 
-3. **Payload audit depth**: Should `request_body` / `response_body` be included in
+2. **Payload audit depth**: Should `request_body` / `response_body` be included in
    Merkle-hashed row inventory (using ciphertext as the leaf), or remain outside the
    chain entirely? Including ciphertext in Merkle provides stronger proof-of-content-existence.
 
-4. **Legal hold notes**: Are `holds.reason` and `holds.case_ref` considered payload
+3. **Legal hold notes**: Are `holds.reason` and `holds.case_ref` considered payload
    (encrypt) or metadata (keep plaintext)? The design here assumes metadata; if they are
    payload, legal hold events need separate treatment.
 
-5. **DSAR compliance with encrypted payload**: If a user's request_body is encrypted with
+4. **DSAR compliance with encrypted payload**: If a user's request_body is encrypted with
    a key the user cannot directly obtain, does erasure need to include key deletion
    ("cryptographic erasure") in addition to data deletion?
 
-6. **Searchable encryption**: Some regulated use cases require query on encrypted fields
+5. **Searchable encryption**: Some regulated use cases require query on encrypted fields
    (e.g., "all requests from user X" on an encrypted user_id). Is tokenization
    (HMAC-truncated `user_id` → `user_id_token` stored plaintext) acceptable as a substitute?
 
@@ -443,10 +446,8 @@ These questions must be resolved before BYOK implementation begins:
 
 When implementation begins:
 
-1. Define KMS abstraction interface (`kms.Client`: Wrap, Unwrap, GenerateDEK, ListKeyVersions)
-2. Implement envelope encode/decode library (pure crypto, no DB)
-3. Integrate into `audit.Repository.Insert` as optional middleware (feature-flagged)
-4. Implement background re-encryption sweep job
-5. Add `encrypted_fields` to bundle manifest format
-6. Extend `audit-verify` to handle encrypted envelopes (verify chain without decrypting)
-7. Document operational runbook for KMS provisioning and key rotation
+1. Implement per-tenant DEK epoch metadata (`kid` → tenant/key epoch) on top of the BYOK2 envelope.
+2. Implement background re-encryption sweep job for legacy plaintext rows.
+3. Add `encrypted_fields` to bundle manifest format.
+4. Extend operator tooling with decrypt-on-demand flow for authorized tenant auditors.
+5. Add additional customer KMS backends after provider-specific requirements are known.

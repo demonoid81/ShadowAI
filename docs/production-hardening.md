@@ -60,6 +60,7 @@ cause the application to refuse startup (`ValidateStartupConfig` exits with code
 | *(optional)* `scimBearerToken` | `SCIM_BEARER_TOKEN` | 32+ chars | SCIM provisioning endpoint |
 | *(optional)* `s3AccessKeyID` + `s3SecretAccessKey` | — | — | S3 evidence storage (O4.2) |
 | *(optional)* `anchorPubKey` | — | 32 bytes base64 | Ed25519 anchor verification (W4.1) |
+| *(optional)* `byokVaultToken` | `BYOK_VAULT_TOKEN` | Vault token policy-scoped to transit encrypt/decrypt | BYOK2 audit payload encryption when `BYOK_ENABLED=true` |
 
 **Never** put these in `values.yaml` or `values-prod.yaml`. Use:
 ```bash
@@ -309,7 +310,7 @@ evidenceAuditReport:
 | Streaming incremental: cross-chunk PII sanitize | F7.8 fail-closes unsafe sanitize verdicts when a sensitive match spans already emitted chunks. It does not retroactively rewrite bytes that were already sent | Keep proof-window audit review mandatory; monitor `stream_blocked_midflight` / `shadowai_streaming_midstream_block_total` for cross-chunk spikes before removing the prod gate |
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
 | Legal hold selector privacy | Portable evidence bundles include `selector_manifest.jsonl` for query-scope auditor explainability. The v1 bundle exports selector JSON plus hash; it does not yet offer a hash-only or BYOK-encrypted selector export mode | Use tenant-scoped exports for least disclosure; use WORM `legal_hold_events` selector hash for integrity; defer hash-only/BYOK selector bundles to L8.2/BYOK |
-| BYOK: not implemented | Payload fields are plaintext (BYOK1 is design only) | See BYOK1 RFC; implement BYOK2 after customer requirement |
+| BYOK: partial v1 | BYOK2 encrypts `audit_logs.request_body` and `audit_logs.response_body` for new writes through Vault Transit envelopes. Legacy rows are dual-read plaintext until a future sweep; legal-hold selectors are not encrypted yet | Enable `BYOK_ENABLED=true` with `BYOK_PROVIDER=vault_transit`; keep tenant-scoped exports for least disclosure; plan v2 DEK epochs/background re-encryption if legacy payloads must be converted |
 | No formal pen test | SEC1 provides a scoped LLM security validation package, but no external assessor has executed it yet | Schedule external validation before regulated-industry go-live; use `docs/security/llm-red-team-validation-package.md` |
 | Single immudb anchor sink | Second independent anchor sink improves WORM durability | W7 documents this as known gap |
 | Restore drill: manual | `audit-verify --restore-drill` automates the commands but drill execution is still manual | Document drill date in incident log; quarterly cadence recommended |

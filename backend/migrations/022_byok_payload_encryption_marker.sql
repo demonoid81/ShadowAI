@@ -1,0 +1,4 @@
+-- PR-BYOK2: audit payload encryption хранится в существующих TEXT-колонках
+-- (audit_logs.request_body, audit_logs.response_body) как self-describing
+-- BYOK envelopes. Schema change не требуется; migration фиксирует rollout
+-- boundary для operators и schema_migrations.

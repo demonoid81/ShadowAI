@@ -230,7 +230,7 @@ Date closed:
   completed.
 - Streaming incremental safe fallback blocks unsafe cross-chunk sanitize cases;
   it does not rewrite bytes already emitted.
-- BYOK/KMS payload encryption is not implemented unless BYOK2 is completed.
+- BYOK/KMS payload encryption is available for new audit request/response payload writes when BYOK2 is enabled with Vault Transit. Legacy rows, legal-hold selectors and non-audit payload classes are outside this validation package unless explicitly included in the tested environment.
 - SAML is not implemented; OIDC/SCIM are the current enterprise identity paths.
 - Vendor risk review for LLM providers is a separate process.
 - No LLM firewall can guarantee prevention of all future jailbreak variants.

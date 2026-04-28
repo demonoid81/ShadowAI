@@ -210,6 +210,18 @@ type Config struct {
 	// Shadow/dev: допускается пустой (chain disabled, reduced guarantee).
 	AuditChainSecret string
 
+	// BYOK2: KMS-backed confidentiality layer для audit payload fields.
+	// V1 шифрует audit_logs.request_body и audit_logs.response_body после
+	// WORM canonicalization, поэтому chain verification не требует KMS.
+	BYOKEnabled      bool
+	BYOKProvider     string // vault_transit | static_aes_gcm (только dev/test)
+	BYOKVaultAddr    string
+	BYOKVaultToken   string
+	BYOKVaultMount   string
+	BYOKVaultKeyName string
+	BYOKTimeout      time.Duration
+	BYOKStaticKeyB64 string // только dev/test; в prod отклоняется
+
 	// PR-F7.1 (streaming architecture, см. docs/rfcs/2026-04-pr-f7-*).
 	// StreamingMode: "buffered" | "incremental" | "shadow".
 	//   - buffered     — текущее поведение (full-buffer scan перед
@@ -452,6 +464,16 @@ func Load() *Config {
 		DSARDPOSignalEnabled:            getEnv("DSAR_DPO_SIGNAL_ENABLED", "true") == "true",
 		AuditChainSecret:                getEnv("AUDIT_CHAIN_SECRET", ""),
 
+		// BYOK2: шифрование audit payload.
+		BYOKEnabled:      getEnv("BYOK_ENABLED", "false") == "true",
+		BYOKProvider:     getEnv("BYOK_PROVIDER", ""),
+		BYOKVaultAddr:    getEnv("BYOK_VAULT_ADDR", ""),
+		BYOKVaultToken:   getEnv("BYOK_VAULT_TOKEN", ""),
+		BYOKVaultMount:   getEnv("BYOK_VAULT_MOUNT", "transit"),
+		BYOKVaultKeyName: getEnv("BYOK_VAULT_KEY_NAME", ""),
+		BYOKTimeout:      getDuration("BYOK_TIMEOUT", 5*time.Second),
+		BYOKStaticKeyB64: getEnv("BYOK_STATIC_KEY_B64", ""),
+
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",
 		FirewallPIEnabled:            getEnv("FIREWALL_PI_ENABLED", "true") == "true",
@@ -558,6 +580,22 @@ func (c *Config) ValidateStartupConfig() error {
 	}
 	if c.AuditRetentionDays == 0 && !c.AuditAllowNoRetentionInProd {
 		errs = append(errs, "AUDIT_RETENTION_DAYS=0 requires AUDIT_ALLOW_NO_RETENTION_IN_PROD=true in prod")
+	}
+	if c.BYOKEnabled {
+		if strings.TrimSpace(c.BYOKProvider) != "vault_transit" {
+			errs = append(errs, "BYOK_PROVIDER must be vault_transit in prod when BYOK_ENABLED=true")
+		}
+		if strings.TrimSpace(c.BYOKVaultAddr) == "" {
+			errs = append(errs, "BYOK_ENABLED=true requires BYOK_VAULT_ADDR in prod")
+		} else if pointsToLocalhost(c.BYOKVaultAddr) {
+			errs = append(errs, "BYOK_VAULT_ADDR must not point to localhost/loopback in prod")
+		}
+		if strings.TrimSpace(c.BYOKVaultToken) == "" {
+			errs = append(errs, "BYOK_ENABLED=true requires BYOK_VAULT_TOKEN in prod")
+		}
+		if strings.TrimSpace(c.BYOKVaultKeyName) == "" {
+			errs = append(errs, "BYOK_ENABLED=true requires BYOK_VAULT_KEY_NAME in prod")
+		}
 	}
 
 	// PR-S1.1: SIEM prod guards.

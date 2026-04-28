@@ -90,6 +90,12 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.existingSecret }}
                   key: redisUrl
+            - name: BYOK_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: byokVaultToken
+                  optional: true
           # All non-secret config from ConfigMap (keys are already SCREAMING_SNAKE_CASE).
           envFrom:
             - configMapRef:

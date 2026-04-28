@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/shadowai/backend/internal/byok"
 	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/domain"
 )
@@ -43,8 +44,9 @@ func (r *Repository) ScrubUserDataTx(ctx context.Context, tx *sql.Tx, userID str
 }
 
 type Repository struct {
-	db          *sql.DB
-	chainSecret []byte // nil/empty = chain disabled
+	db               *sql.DB
+	chainSecret      []byte // nil/empty = chain disabled
+	payloadEncryptor byok.Encryptor
 }
 
 func NewRepository(db *sql.DB) *Repository {
@@ -56,6 +58,12 @@ func NewRepository(db *sql.DB) *Repository {
 func (r *Repository) WithChainSecret(secret string) *Repository {
 	c := *r
 	c.chainSecret = []byte(secret)
+	return &c
+}
+
+func (r *Repository) WithPayloadEncryptor(enc byok.Encryptor) *Repository {
+	c := *r
+	c.payloadEncryptor = enc
 	return &c
 }
 
@@ -74,10 +82,14 @@ func (r *Repository) Insert(ctx context.Context, log *domain.AuditLog) error {
 	if orgID == "" {
 		orgID = domain.DefaultOrgID
 	}
-	_, err := r.db.ExecContext(ctx,
+	requestBody, responseBody, err := r.preparePayloadsForWrite(ctx, log)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx,
 		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, org_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
-		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
+		log.ID, log.UserID, requestBody, responseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
 		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
 		log.Outcome, log.FallbackReason, log.UsageSource, orgID)
@@ -117,6 +129,11 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 		createdAt.Unix(), orgIDForCanon,
 	)
 
+	requestBody, responseBody, err := r.preparePayloadsForWrite(ctx, log)
+	if err != nil {
+		return fmt.Errorf("audit chain: encrypt payloads: %w", err)
+	}
+
 	seqNo, rowHash, err := chain.AcquireSlot(ctx, tx,
 		chain.TableAuditLogs, "audit_logs", chain.SeqAuditLogs,
 		canonical, r.chainSecret)
@@ -140,7 +157,7 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO audit_logs (id, user_id, request_body, response_body, model, provider, endpoint, status_code, prompt_tokens, completion_tokens, total_tokens, cost_usd, pii_detected, pii_types, policy_action, shadow_decisions_json, duration_ms, outcome, fallback_reason, usage_source, seq_no, row_hash, created_at, org_id, canonical_version)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,'v2')`,
-		log.ID, log.UserID, log.RequestBody, log.ResponseBody, log.Model, log.Provider, log.Endpoint,
+		log.ID, log.UserID, requestBody, responseBody, log.Model, log.Provider, log.Endpoint,
 		log.StatusCode, log.PromptTokens, log.CompletionTokens, log.TotalTokens, log.CostUSD,
 		log.PIIDetected, pq.Array(log.PIITypes), log.PolicyAction, shadowJSON, log.DurationMs,
 		log.Outcome, log.FallbackReason, log.UsageSource,
@@ -161,8 +178,9 @@ func (r *Repository) insertWithChain(ctx context.Context, log *domain.AuditLog, 
 // Если chainSecret пустой — пишет обычный INSERT без chain fields.
 // recordPurgeRunChained writes a chained audit_purge_runs row.
 // orgID and scope express the tenant scope of this purge operation (PR-T2.4):
-//   scope='org'    — org-specific purge (orgID = tenant UUID)
-//   scope='global' — full-deployment purge (orgID = DefaultOrgID or "")
+//
+//	scope='org'    — org-specific purge (orgID = tenant UUID)
+//	scope='global' — full-deployment purge (orgID = DefaultOrgID or "")
 func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cutoff time.Time, rowsDeleted int, target, orgID, scope string) error {
 	runID := uuid.New().String()
 	completedAt := time.Now().UTC()
@@ -201,7 +219,6 @@ func (r *Repository) recordPurgeRunChained(ctx context.Context, tx *sql.Tx, cuto
 		runID, cutoff, rowsDeleted, completedAt, target, seqArg, hashArg, orgID, scope)
 	return err
 }
-
 
 func (r *Repository) List(ctx context.Context, limit, offset int, orgID, userID, model, policyAction, hasShadow string) ([]domain.AuditLog, int, error) {
 	where := []string{"1=1"}
@@ -289,6 +306,9 @@ func (r *Repository) List(ctx context.Context, limit, offset int, orgID, userID,
 		}
 		if shadowJSON.Valid {
 			l.ShadowDecisionsJSON = shadowJSON.String
+		}
+		if err := r.decryptPayloadsAfterRead(ctx, &l); err != nil {
+			return nil, 0, err
 		}
 		logs = append(logs, l)
 	}
