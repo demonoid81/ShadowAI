@@ -74,45 +74,59 @@ func (GeminiDecoder) Decode(ctx context.Context, r io.Reader, emit func(Event) e
 				},
 			})
 		}
-		// Usage: Gemini может прислать и usage, и текст в одном
-		// frame'е. Приоритет (RFC §17.4) в F7.1: если есть непустой
-		// usage — эмитим usage_update (Event.RawBytes всё равно
-		// содержит полный frame, включая delta text, identity
-		// preserved для emitter'а).
+		var usage *Usage
 		if gf.UsageMetadata != nil && (gf.UsageMetadata.PromptTokenCount > 0 ||
 			gf.UsageMetadata.CandidatesTokenCount > 0 ||
 			gf.UsageMetadata.TotalTokenCount > 0) {
-			return emit(Event{
-				Type:     EventUsageUpdate,
-				RawBytes: f.Raw,
-				Usage: &Usage{
-					PromptTokens:     gf.UsageMetadata.PromptTokenCount,
-					CompletionTokens: gf.UsageMetadata.CandidatesTokenCount,
-					TotalTokens:      gf.UsageMetadata.TotalTokenCount,
-					Model:            gf.ModelVersion,
-				},
-				Meta: metaWithModel(gf.ModelVersion),
-			})
-		}
-		// finishReason non-empty → message_stop (но содержимое текста
-		// тоже может быть; F7.1 приоритизирует stop над delta, чтобы
-		// F7.2 получила terminal signal).
-		for _, c := range gf.Candidates {
-			if c.FinishReason != "" {
-				return emit(Event{
-					Type:     EventMessageStop,
-					RawBytes: f.Raw,
-					Meta:     metaWithModel(gf.ModelVersion),
-				})
+			usage = &Usage{
+				PromptTokens:     gf.UsageMetadata.PromptTokenCount,
+				CompletionTokens: gf.UsageMetadata.CandidatesTokenCount,
+				TotalTokens:      gf.UsageMetadata.TotalTokenCount,
+				Model:            gf.ModelVersion,
 			}
 		}
-		// Default: delta text — склеиваем все parts всех candidates.
-		var textBuf bytes.Buffer
+		var (
+			textBuf   bytes.Buffer
+			hasFinish bool
+		)
 		for _, c := range gf.Candidates {
+			if c.FinishReason != "" {
+				hasFinish = true
+			}
 			for _, p := range c.Content.Parts {
 				textBuf.WriteString(p.Text)
 			}
 		}
+		// Text wins over usage/finishReason so response-side inspection
+		// cannot be bypassed by frames that carry accounting metadata.
+		if textBuf.Len() > 0 {
+			return emit(Event{
+				Type:     EventDeltaText,
+				Text:     textBuf.String(),
+				RawBytes: f.Raw,
+				Usage:    usage,
+				Meta:     metaWithModel(gf.ModelVersion),
+			})
+		}
+		if usage != nil {
+			return emit(Event{
+				Type:     EventUsageUpdate,
+				RawBytes: f.Raw,
+				Usage:    usage,
+				Meta:     metaWithModel(gf.ModelVersion),
+			})
+		}
+		// finishReason non-empty → message_stop (но содержимое текста
+		// уже обработано выше как delta_text, чтобы inspection увидела
+		// content before terminal signal).
+		if hasFinish {
+			return emit(Event{
+				Type:     EventMessageStop,
+				RawBytes: f.Raw,
+				Meta:     metaWithModel(gf.ModelVersion),
+			})
+		}
+		// Default: delta text — склеиваем все parts всех candidates.
 		return emit(Event{
 			Type:     EventDeltaText,
 			Text:     textBuf.String(),

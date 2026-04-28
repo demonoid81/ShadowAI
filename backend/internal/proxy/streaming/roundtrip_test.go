@@ -185,6 +185,27 @@ func TestRoundTrip_Gemini_UsageInFinalFrame(t *testing.T) {
 	}
 }
 
+func TestRoundTrip_Gemini_TextWithUsage_ClassifiedAsDeltaText(t *testing.T) {
+	input := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"email user@example.com"}],"role":"model"}}],"modelVersion":"gemini-1.5-pro","usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1,"totalTokenCount":5}}` + "\n\n")
+	adapter := mustAdapter(t, "gemini")
+	_, events, err := roundTrip(adapter, input)
+	if err != nil {
+		t.Fatalf("roundTrip: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(events), events)
+	}
+	if events[0].Type != EventDeltaText {
+		t.Fatalf("Gemini text+usage Type = %s, want %s", events[0].Type, EventDeltaText)
+	}
+	if events[0].Text != "email user@example.com" {
+		t.Fatalf("Gemini text+usage Text = %q", events[0].Text)
+	}
+	if events[0].Usage == nil || events[0].Usage.TotalTokens != 5 {
+		t.Fatalf("Gemini text+usage must retain usage metadata, got %+v", events[0].Usage)
+	}
+}
+
 // TestRoundTrip_Malformed_EmitsUnknownChunk.
 func TestRoundTrip_Malformed_EmitsUnknownChunk(t *testing.T) {
 	a := mustAdapter(t, "openai")
@@ -358,6 +379,27 @@ func TestEmitSanitized_Gemini_DeltaText_ReplacesContent(t *testing.T) {
 	}
 	if !strings.Contains(output, `"modelVersion":"gemini-1.5-pro"`) || !strings.Contains(output, `"role":"model"`) {
 		t.Fatalf("Gemini sanitize lost structural fields: %s", output)
+	}
+}
+
+func TestEmitSanitized_Gemini_TextWithUsage_PreservesUsage(t *testing.T) {
+	original := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"email user@example.com"}],"role":"model"}}],"modelVersion":"gemini-1.5-pro","usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1,"totalTokenCount":5}}` + "\n\n")
+	sanitized := "[redacted:email]"
+	events := decodeEvents(t, "gemini", original)
+	if len(events) != 1 || events[0].Type != EventDeltaText {
+		t.Fatalf("expected one delta event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := mustAdapter(t, "gemini").Emitter.EmitSanitized(context.Background(), &out, events[0], sanitized); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, sanitized) || strings.Contains(output, "user@example.com") {
+		t.Fatalf("Gemini text+usage sanitize failed: %s", output)
+	}
+	if !strings.Contains(output, `"usageMetadata"`) || !strings.Contains(output, `"totalTokenCount":5`) {
+		t.Fatalf("Gemini text+usage sanitize lost usage metadata: %s", output)
 	}
 }
 
