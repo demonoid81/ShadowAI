@@ -380,6 +380,80 @@
       "exportTenant": "Tenant-scoped evidence bundle",
       "purgeTenant": "Tenant-scoped purge",
       "verifyTenant": "Offline tenant bundle verification"
+    },
+    "manage": {
+      "accessKicker": "Access",
+      "accessTitle": "Tenant control is available only to admin/global_admin",
+      "accessBody": "Regular users cannot manage organizations, SCIM tokens or org budgets. The UI hides actions fail-safe, while the backend remains source of truth.",
+      "orgsKicker": "Organizations",
+      "orgsTitle": "Organizations",
+      "orgsBody": "global_admin sees every organization. Tenant admin loads only its own org_id from authenticated claims.",
+      "createOrg": "Create org",
+      "name": "Name",
+      "slug": "Slug",
+      "save": "Save",
+      "empty": "No organizations found.",
+      "active": "Active",
+      "inactive": "Inactive",
+      "detailKicker": "Org detail",
+      "noSelection": "No organization selected",
+      "selectOrg": "Select an organization to manage SCIM tokens and org budget.",
+      "metadata": "Metadata",
+      "orgId": "Org ID",
+      "updated": "Updated"
+    },
+    "scim": {
+      "kicker": "SCIM onboarding",
+      "title": "SCIM bearer tokens",
+      "body": "The token is bound to an organization through scim_tokens. Plaintext is shown only once after creation.",
+      "label": "Label",
+      "create": "Create token",
+      "oneTimeTitle": "One-time plaintext token",
+      "oneTimeBody": "Copy the token into the IdP now. After this message is cleared, the frontend cannot show it again.",
+      "clearPlain": "Hide token",
+      "empty": "No SCIM tokens created.",
+      "created": "Created",
+      "lastUsed": "Last used",
+      "unlabeled": "Unlabeled",
+      "never": "Never",
+      "revoke": "Revoke",
+      "revokeConfirm": "Revoke this SCIM token? IdP provisioning with this token will stop working."
+    },
+    "budget": {
+      "kicker": "Org budget",
+      "title": "Aggregate spend cap",
+      "body": "The cap applies to aggregate user spend for the organization. In enforce mode the proxy atomically reserves budget before the provider call.",
+      "limit": "Monthly limit, USD",
+      "mode": "Mode",
+      "modes": {
+        "disabled": "disabled — baseline spend only",
+        "observe": "observe — soft exceeded event",
+        "enforce": "enforce — hard block at cap"
+      },
+      "save": "Save budget",
+      "spent": "Spent",
+      "remaining": "Remaining",
+      "period": "Period"
+    },
+    "errors": {
+      "forbidden": "You do not have permission for this operation.",
+      "notFound": "Organization or token not found.",
+      "conflict": "Data conflict: slug or identity is already in use.",
+      "missingOrg": "JWT claims do not contain org_id. Tenant admin UI cannot determine the own organization.",
+      "loadFailed": "Failed to load organizations.",
+      "saveFailed": "Failed to save organization.",
+      "tokensFailed": "Failed to load SCIM tokens.",
+      "tokenCreateFailed": "Failed to create SCIM token.",
+      "tokenRevokeFailed": "Failed to revoke SCIM token.",
+      "budgetFailed": "Failed to load org budget.",
+      "budgetSaveFailed": "Failed to save org budget."
+    },
+    "messages": {
+      "orgCreated": "Organization created.",
+      "orgSaved": "Organization saved.",
+      "tokenCreated": "SCIM token created. Plaintext is shown once.",
+      "tokenRevoked": "SCIM token revoked.",
+      "budgetSaved": "Org budget saved."
     }
   },
   "compliance": {
@@ -718,6 +792,8 @@
   },
   "common": {
     "loading": "Loading...",
+    "saving": "Saving...",
+    "cancel": "Cancel",
     "error": "Error",
     "success": "Success",
     "confirm": "Confirm",

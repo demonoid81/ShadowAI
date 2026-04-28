@@ -6,6 +6,10 @@ interface JWTClaims {
   user_id?: string
   email?: string
   role?: string
+  org_id?: string
+  department?: string
+  mfa_verified?: boolean
+  break_glass?: boolean
   exp?: number
 }
 
@@ -26,7 +30,8 @@ export const useAuthStore = defineStore('auth', () => {
 
   const claims = computed(() => (token.value ? parseJWT(token.value) : null))
   const role = computed(() => claims.value?.role ?? '')
-  const isAdmin = computed(() => role.value === 'admin')
+  const isGlobalAdmin = computed(() => role.value === 'global_admin')
+  const isAdmin = computed(() => role.value === 'admin' || isGlobalAdmin.value)
 
   async function login(email: string, password: string) {
     const { data } = await api.post('/auth/login', { email, password })
@@ -40,5 +45,5 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('token')
   }
 
-  return { token, user, claims, role, isAdmin, login, logout }
+  return { token, user, claims, role, isAdmin, isGlobalAdmin, login, logout }
 })

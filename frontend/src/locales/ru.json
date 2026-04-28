@@ -380,6 +380,80 @@
       "exportTenant": "Tenant-scoped evidence bundle",
       "purgeTenant": "Tenant-scoped purge",
       "verifyTenant": "Offline tenant bundle verification"
+    },
+    "manage": {
+      "accessKicker": "Доступ",
+      "accessTitle": "Tenant control доступен только admin/global_admin",
+      "accessBody": "Обычные пользователи не могут управлять организациями, SCIM tokens или org budgets. UI скрывает действия fail-safe, но backend остаётся источником истины.",
+      "orgsKicker": "Organizations",
+      "orgsTitle": "Организации",
+      "orgsBody": "global_admin видит все организации. Tenant admin загружает только свой org_id из authenticated claims.",
+      "createOrg": "Создать org",
+      "name": "Название",
+      "slug": "Slug",
+      "save": "Сохранить",
+      "empty": "Организации не найдены.",
+      "active": "Активен",
+      "inactive": "Отключён",
+      "detailKicker": "Org detail",
+      "noSelection": "Организация не выбрана",
+      "selectOrg": "Выберите организацию, чтобы управлять SCIM token и org budget.",
+      "metadata": "Metadata",
+      "orgId": "Org ID",
+      "updated": "Обновлено"
+    },
+    "scim": {
+      "kicker": "SCIM onboarding",
+      "title": "SCIM bearer tokens",
+      "body": "Token привязан к организации через scim_tokens. Plaintext показывается только один раз после создания.",
+      "label": "Label",
+      "create": "Создать token",
+      "oneTimeTitle": "One-time plaintext token",
+      "oneTimeBody": "Скопируйте token в IdP сейчас. После закрытия этого сообщения frontend не сможет показать его повторно.",
+      "clearPlain": "Скрыть token",
+      "empty": "SCIM tokens не созданы.",
+      "created": "Создан",
+      "lastUsed": "Последнее использование",
+      "unlabeled": "Без label",
+      "never": "Никогда",
+      "revoke": "Отозвать",
+      "revokeConfirm": "Отозвать SCIM token? IdP provisioning с этим token перестанет работать."
+    },
+    "budget": {
+      "kicker": "Org budget",
+      "title": "Aggregate spend cap",
+      "body": "Лимит применяется к суммарному spend пользователей организации. В enforce mode proxy резервирует бюджет атомарно до provider call.",
+      "limit": "Monthly limit, USD",
+      "mode": "Mode",
+      "modes": {
+        "disabled": "disabled — только baseline spend",
+        "observe": "observe — soft exceeded event",
+        "enforce": "enforce — hard block at cap"
+      },
+      "save": "Сохранить budget",
+      "spent": "Spent",
+      "remaining": "Remaining",
+      "period": "Period"
+    },
+    "errors": {
+      "forbidden": "Недостаточно прав для этой операции.",
+      "notFound": "Организация или token не найдены.",
+      "conflict": "Конфликт данных: slug или identity уже используется.",
+      "missingOrg": "В JWT claims нет org_id. Tenant admin UI не может определить собственную организацию.",
+      "loadFailed": "Не удалось загрузить организации.",
+      "saveFailed": "Не удалось сохранить организацию.",
+      "tokensFailed": "Не удалось загрузить SCIM tokens.",
+      "tokenCreateFailed": "Не удалось создать SCIM token.",
+      "tokenRevokeFailed": "Не удалось отозвать SCIM token.",
+      "budgetFailed": "Не удалось загрузить org budget.",
+      "budgetSaveFailed": "Не удалось сохранить org budget."
+    },
+    "messages": {
+      "orgCreated": "Организация создана.",
+      "orgSaved": "Организация сохранена.",
+      "tokenCreated": "SCIM token создан. Plaintext показан один раз.",
+      "tokenRevoked": "SCIM token отозван.",
+      "budgetSaved": "Org budget сохранён."
     }
   },
   "compliance": {
@@ -718,6 +792,8 @@
   },
   "common": {
     "loading": "Загрузка...",
+    "saving": "Сохранение...",
+    "cancel": "Отмена",
     "error": "Ошибка",
     "success": "Успешно",
     "confirm": "Подтвердить",
