@@ -72,7 +72,7 @@ build-enterprise:
 
 # Explicit CLI build gate — these binaries are all baked into the runtime image.
 build-cli:
-	cd backend && for cmd in audit-verify audit-export-evidence evidence-upload audit-evidence-report audit-collect-evidence audit-access-review firewall-corpus-verify migrate; do \
+	cd backend && for cmd in audit-verify audit-export-evidence evidence-upload audit-evidence-report audit-collect-evidence audit-access-review audit-byok-sweep firewall-corpus-verify migrate; do \
 		echo "Building $$cmd..."; \
 		CGO_ENABLED=0 go build -ldflags="-w -s" -o /dev/null ./cmd/$$cmd; \
 	done

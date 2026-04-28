@@ -241,7 +241,7 @@ audit engagement.
 | Formal Security Policy documentation | A.5.1 | Technical controls exist; policy document not yet written |
 | Business Continuity / Disaster Recovery plan | A.5.30 | DB backup/restore drill documented; formal BCP not written |
 | Vendor assessment for LLM providers | CC9.2 | VRM1 process package exists; legal/commercial due diligence remains operator-owned |
-| BYOK / customer-managed encryption | C1.2 | BYOK2 v1 implemented for new `audit_logs.request_body` / `response_body` writes via Vault Transit envelopes; legacy sweep and non-audit payload classes remain roadmap |
+| BYOK / customer-managed encryption | C1.2 | BYOK2 v1 implemented for new `audit_logs.request_body` / `response_body` writes via Vault Transit envelopes; BYOK2.1 provides explicit legacy sweep; non-audit payload classes and DEK epochs remain roadmap |
 
 ---
 

@@ -400,8 +400,9 @@ BYOK2 v1 resolution:
 
 - First backend: HashiCorp Vault Transit.
 - First fields: `audit_logs.request_body` and `audit_logs.response_body`.
-- Rollout: new-writes-only + dual-read legacy plaintext/envelope.
-- Deferred: per-tenant DEK epoch storage, background re-encryption sweep, searchable encryption, legal-hold selector encryption.
+- Rollout: new writes encrypted; BYOK2.1 adds explicit operator `audit-byok-sweep`
+  for legacy plaintext rows.
+- Deferred: per-tenant DEK epoch storage, searchable encryption, legal-hold selector encryption.
 
 Remaining questions for BYOK v2+:
 
@@ -447,7 +448,6 @@ Remaining questions for BYOK v2+:
 When implementation begins:
 
 1. Implement per-tenant DEK epoch metadata (`kid` → tenant/key epoch) on top of the BYOK2 envelope.
-2. Implement background re-encryption sweep job for legacy plaintext rows.
-3. Add `encrypted_fields` to bundle manifest format.
-4. Extend operator tooling with decrypt-on-demand flow for authorized tenant auditors.
-5. Add additional customer KMS backends after provider-specific requirements are known.
+2. Add `encrypted_fields` to bundle manifest format.
+3. Extend operator tooling with decrypt-on-demand flow for authorized tenant auditors.
+4. Add additional customer KMS backends after provider-specific requirements are known.
