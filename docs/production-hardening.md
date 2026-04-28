@@ -7,6 +7,7 @@ mandatory secrets and alerts, and known limits for a medium enterprise ShadowAI 
 It is the single reference for production-readiness validation before go-live.
 
 Related: [`docs/runbooks/production.md`](runbooks/production.md) · [`docs/evidence-export-runbook.md`](evidence-export-runbook.md) · [`deploy/helm/shadowai/values-prod.yaml`](../deploy/helm/shadowai/values-prod.yaml)
+· [`docs/runbooks/production-validation.md`](runbooks/production-validation.md)
 
 ---
 
@@ -344,23 +345,34 @@ Run this before each production deployment:
 # 1. Helm validate
 make helm-validate
 
-# 2. Enterprise tests
+# 2. PROD1 preflight validation
+shadowai-prod-validate \
+  --chart ./deploy/helm/shadowai \
+  --values ./deploy/helm/shadowai/values-prod.yaml \
+  --release shadowai \
+  --namespace shadowai \
+  --existing-secret shadowai-secrets \
+  --image-tag "$IMAGE_TAG" \
+  --format json \
+  --output prod1-preflight.json
+
+# 3. Enterprise tests
 go test -tags enterprise ./... -count=1
 
-# 3. Smoke tests (requires Postgres + Redis)
+# 4. Smoke tests (requires Postgres + Redis)
 go test -tags 'enterprise smoke' ./smoke/... -count=1
 
-# 4. Evidence chain verify (against restored DB if doing restore drill)
+# 5. Evidence chain verify (against restored DB if doing restore drill)
 audit-verify --restore-drill --table all --pubkey-file ./anchor-pubkey.b64 --verbose
 
-# 5. Retention audit report (against evidence S3 bucket)
+# 6. Retention audit report (against evidence S3 bucket)
 audit-evidence-report \
   --bucket <prod-bucket> \
   --require-lock \
   --min-retention-days 90 \
   --format json
 
-# 6. Confirm mandatory secrets exist in cluster
+# 7. Confirm mandatory secrets exist in cluster
 kubectl get secret shadowai-secrets -n <namespace> \
   -o jsonpath='{.data}' | jq 'keys'
 ```

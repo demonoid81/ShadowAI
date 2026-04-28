@@ -87,6 +87,12 @@ RUN CGO_ENABLED=0 go build \
     -o /firewall-corpus-verify \
     ./cmd/firewall-corpus-verify
 
+# PROD1: CLI для deployment-specific go/no-go validation.
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /shadowai-prod-validate \
+    ./cmd/shadowai-prod-validate
+
 # ---------------------------------------------------------------------------
 # Runtime image
 # ---------------------------------------------------------------------------
@@ -108,6 +114,7 @@ COPY --from=builder /audit-collect-evidence  /usr/local/bin/audit-collect-eviden
 COPY --from=builder /audit-access-review    /usr/local/bin/audit-access-review
 COPY --from=builder /audit-byok-sweep       /usr/local/bin/audit-byok-sweep
 COPY --from=builder /firewall-corpus-verify /usr/local/bin/firewall-corpus-verify
+COPY --from=builder /shadowai-prod-validate /usr/local/bin/shadowai-prod-validate
 
 # SQL migrations baked into the image so the migrate init container
 # doesn't need a volume mount.

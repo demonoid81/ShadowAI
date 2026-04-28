@@ -14,6 +14,7 @@ and pre-launch checklist.
 | Situation | Runbook |
 |-----------|---------|
 | Production hardening / defaults | [production-hardening.md](../production-hardening.md) |
+| Production go/no-go validation | [production-validation.md](production-validation.md) |
 | Streaming incremental rollout | [streaming-production-proof.md](streaming-production-proof.md) |
 | Deploy / rollback | [deploy-rollback.md](deploy-rollback.md) |
 | Emergency admin access | [break-glass.md](break-glass.md) |
@@ -55,6 +56,7 @@ helm upgrade --install shadowai ./deploy/helm/shadowai \
 Reference: [deploy-rollback.md](deploy-rollback.md)  
 Checklist: [deploy/helm/shadowai/docs/deploy-checklist.md](../../deploy/helm/shadowai/docs/deploy-checklist.md)  
 Secrets: [deploy/helm/shadowai/docs/secret-matrix.md](../../deploy/helm/shadowai/docs/secret-matrix.md)
+Go/no-go validation: [production-validation.md](production-validation.md)
 
 ---
 

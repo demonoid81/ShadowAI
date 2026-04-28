@@ -39,10 +39,11 @@
 | Enterprise identity IAM1 | ✅ | SAML gap assessment: OIDC + SCIM are supported; SAML is customer-dependent future adapter, not a current capability |
 | LLM provider vendor-risk VRM1 | ✅ | operator-owned provider assessment process, approved-provider register template, governance integration guidance |
 | Governance invalidation G2.3 | ✅ | Redis pub/sub org-scoped invalidation removes multi-replica TTL lag for policy updates; TTL remains fallback |
+| Production validation PROD1 | ✅ | `shadowai-prod-validate` go/no-go pack: Helm render, rollout, health/readiness, bundle verification and S3 retention posture |
 
 ### Что это означает
 
-- **Enterprise pilot ready:** да, для controlled self-hosted или dedicated-tenant deployment, если operator выполняет production checklist и secrets/bootstrap корректны.
+- **Enterprise pilot ready:** да, для controlled self-hosted или dedicated-tenant deployment, если operator выполняет production checklist, PROD1 validation и secrets/bootstrap корректны.
 - **Signed production ready:** близко к да. Остались в основном documentation/control-mapping и performance hardening, а не фундаментальные security gaps.
 - **Compliance evidence story:** сильная. Есть tamper-evident DB chain, external anchors, signed manifests, S3 Object Lock и portable auditor bundles.
 - **Multi-tenant posture:** базовый product-complete. Есть org boundary в runtime, SCIM, audit, governance, purge/export и tenant proofs.
@@ -229,6 +230,7 @@ Acceptance criteria:
 11. ~~**BYOK2 — KMS-backed audit payload encryption v1**~~ ✅
 12. ~~**BYOK2.1 — Legacy audit payload re-encryption sweep**~~ ✅
 13. ~~**SOC2.4 — stale W7/W8/BYOK control gap cleanup**~~ ✅
+14. ~~**PROD1 — deployment-specific production validation pack**~~ ✅ → `docs/runbooks/production-validation.md`
 
 ---
 
@@ -236,8 +238,8 @@ Acceptance criteria:
 
 Главный принцип теперь:
 
-- **До enterprise pilot:** фундаментальные blockers закрыты; нужен только deployment-specific checklist и clean docs.
+- **До enterprise pilot:** фундаментальные blockers закрыты; PROD1 добавляет deployment-specific go/no-go validation pack.
 - **До signed production:** ✅ все закрыты.
 - **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 + BYOK2.1 sweep закрыты для audit payload; остаются v2+ BYOK DEK epochs и customer-specific identity/compliance deltas.
 
-Следующий recommended work item: deployment-specific production validation или v2+ BYOK DEK epochs, если customer требует full key lifecycle.
+Следующий recommended work item: v2+ BYOK DEK epochs или формальный external validation / pen-test execution, если customer требует audit-grade independent assessment.
