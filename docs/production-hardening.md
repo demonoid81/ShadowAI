@@ -244,7 +244,8 @@ Token is returned once. Store in IdP SCIM connector immediately.
 ### Global admin scope
 
 `global_admin` role can read cross-tenant chain fields and manage holds, but:
-- Cannot decrypt tenant payload (BYOK1 design)
+- Cannot decrypt BYOK-protected tenant payload by role alone; decrypt requires
+  access to the configured KMS/Vault Transit key
 - Cannot approve holds for which they are the creator (4-eyes)
 - Cannot approve release of a hold they requested (L5 4-eyes for release)
 - Admin events from global_admin operations are tagged with `source_org_id`/`target_org_id`
@@ -311,6 +312,10 @@ evidenceAuditReport:
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
 | Legal hold selector privacy | Portable evidence bundles include `selector_manifest.jsonl` for query-scope auditor explainability. The v1 bundle exports selector JSON plus hash; it does not yet offer a hash-only or BYOK-encrypted selector export mode | Use tenant-scoped exports for least disclosure; use WORM `legal_hold_events` selector hash for integrity; defer hash-only/BYOK selector bundles to L8.2/BYOK |
 | BYOK: partial v1 | BYOK2 encrypts `audit_logs.request_body` and `audit_logs.response_body` for new writes through Vault Transit envelopes. BYOK2.1 adds an explicit `audit-byok-sweep` CLI for legacy rows; legal-hold selectors are not encrypted yet | Enable `BYOK_ENABLED=true` with `BYOK_PROVIDER=vault_transit`; run `audit-byok-sweep --dry-run` then `audit-byok-sweep --limit N` during a maintenance window; keep tenant-scoped exports for least disclosure; plan v2 DEK epochs for full BYOK lifecycle |
+| Evidence witness independence is configuration-dependent | W8 supports additional independent anchor sinks, but a deployment can still run with only one configured sink | Configure `AUDIT_ANCHOR_ADDITIONAL_SINKS` for regulated deployments and alert on degraded sink writes |
+| Restore drill evidence is operator-owned | `audit-verify --restore-drill` automates verification, but the product does not automatically attest that the drill was executed and archived | Run quarterly, store output in the compliance evidence package, and link it from the incident/compliance log |
+| No formal pen test | SEC1 provides a scoped LLM security validation package, but no external assessor has executed it yet | Schedule external validation before regulated-industry go-live; use `docs/security/llm-red-team-validation-package.md` |
+| No SAML support | OIDC + SCIM are the supported enterprise identity path. IAM1 documents SAML as customer-dependent, not implemented | Use `docs/security/saml-enterprise-identity-gap-assessment.md` in security reviews; implement SAML only after target customer IdP metadata and claims contract are available |
 
 BYOK legacy sweep example:
 
@@ -328,10 +333,6 @@ audit-byok-sweep --database-url "$DATABASE_URL" --limit 1000
 Important: the sweep updates payload columns only. WORM canonical hashes remain valid
 because request/response bodies are not canonical fields; the sweep does not add
 proof-of-content-existence for historical plaintext payloads.
-| No formal pen test | SEC1 provides a scoped LLM security validation package, but no external assessor has executed it yet | Schedule external validation before regulated-industry go-live; use `docs/security/llm-red-team-validation-package.md` |
-| Single immudb anchor sink | Second independent anchor sink improves WORM durability | W7 documents this as known gap |
-| Restore drill: manual | `audit-verify --restore-drill` automates the commands but drill execution is still manual | Document drill date in incident log; quarterly cadence recommended |
-| No SAML support | OIDC + SCIM are the supported enterprise identity path. IAM1 documents SAML as customer-dependent, not implemented | Use `docs/security/saml-enterprise-identity-gap-assessment.md` in security reviews; implement SAML only after target customer IdP metadata and claims contract are available |
 
 ---
 

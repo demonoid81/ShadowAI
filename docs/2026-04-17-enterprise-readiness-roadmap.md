@@ -76,11 +76,11 @@
    - Release 4-eyes.
    - SLA escalation, bulk approvals, pending queue operations.
 
-6. **W7: evidence operations hardening**
-   - Key rotation для `AUDIT_CHAIN_SECRET` и Ed25519 anchor signing.
-   - Automated restore verification drill.
-   - Optional second independent anchor sink.
-   - Evidence audit reports as archived artifacts, если аудиторам нужен scheduled report bundle, а не только Job logs/manual output.
+6. **W7/W8: evidence operations hardening** ✅
+   - Keyring verification для `AUDIT_CHAIN_SECRET` и Ed25519 anchor signing.
+   - `audit-verify --restore-drill` для воспроизводимой restore verification.
+   - Additional independent anchor sinks через W8/W8.1.
+   - Evidence audit reports and scheduled evidence collection artifacts.
 
 ### Compliance / Enterprise Review
 
@@ -142,19 +142,20 @@ Acceptance criteria:
 - Streaming sanitize не требует full-buffer fallback для базовых text deltas.
 - Operators видят rollout safety через metrics/audit outcomes.
 
-### PR-W7: Key Rotation and Restore Automation
+### PR-W7/W8: Key Rotation, Restore Automation and Multi-Sink Witness
 
 Scope:
 
-- Chain/signing key rotation policy.
-- Verifier support for key epochs.
-- Scheduled restore verification job or documented automation.
-- Optional second sink support if required by target customers.
+- Chain/signing keyring verification.
+- Restore verification command.
+- Optional second sink support for regulated deployments.
+- Evidence retention/audit reports.
 
 Acceptance criteria:
 
-- Rotation не ломает старую evidence verification.
-- Restore drill можно запускать воспроизводимо без ручного runbook-heavy процесса.
+- Rotation не ломает старую evidence verification. ✅
+- Restore drill можно запускать воспроизводимо без ручного runbook-heavy процесса. ✅
+- Additional sinks configurable without breaking single-sink deployments. ✅
 
 ### PR-L5: Legal Hold Advanced Workflow
 
@@ -208,7 +209,7 @@ Acceptance criteria:
 - Удаление buffered streaming path до production proof window.
 - Большой analytics UI до завершения SOC/control mapping.
 - Full BYOK implementation — BYOK2 v1 закрывает new-write audit payload encryption через Vault Transit; BYOK2.1 добавляет explicit legacy sweep; per-tenant DEK epochs и дополнительные payload classes остаются v2+.
-- Multi-region active-active до key rotation / evidence restore automation.
+- Multi-region active-active остаётся отдельной architecture track после single-region evidence controls.
 - Поддержка SAML остаётся customer-dependent после IAM1; текущий supported path — OIDC + SCIM.
 
 ---
@@ -224,9 +225,10 @@ Acceptance criteria:
 7. ~~**BYOK1 — KMS / BYOK design**~~ ✅ → `docs/rfcs/2026-04-pr-byok1-kms-byok-design.md`
 8. ~~**GA1 — Hardened default / scale pass**~~ ✅ → `docs/production-hardening.md`
 9. ~~**F7.6 — Streaming production proof window**~~ ✅ → `docs/runbooks/streaming-production-proof.md`
-10. **SOC2.1 — Evidence collection automation** ← current → `docs/runbooks/evidence-collection.md`
+10. ~~**SOC2.1 — Evidence collection automation**~~ ✅ → `docs/runbooks/evidence-collection.md`
 11. ~~**BYOK2 — KMS-backed audit payload encryption v1**~~ ✅
 12. ~~**BYOK2.1 — Legacy audit payload re-encryption sweep**~~ ✅
+13. ~~**SOC2.4 — stale W7/W8/BYOK control gap cleanup**~~ ✅
 
 ---
 
@@ -238,4 +240,4 @@ Acceptance criteria:
 - **До signed production:** ✅ все закрыты.
 - **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 + BYOK2.1 sweep закрыты для audit payload; остаются v2+ BYOK DEK epochs и customer-specific identity/compliance deltas.
 
-Следующий recommended work item после BYOK2: v2+ key lifecycle/sweep либо deployment-specific production validation.
+Следующий recommended work item: deployment-specific production validation или v2+ BYOK DEK epochs, если customer требует full key lifecycle.

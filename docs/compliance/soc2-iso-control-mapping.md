@@ -118,7 +118,7 @@ it describes:
 | **Evidence artifacts** | `audit_chain_anchors` table. Anchor checkpoint files (`anchors.ndjson`). Evidence bundle: `audit-export-evidence --global` or `--org-id`. Offline verification: `audit-verify --bundle <dir> --verbose`. Retention posture: `audit-evidence-report --bucket ... --require-lock --min-retention-days 90`. S3 Object Lock metadata: `aws s3api head-object ...` (see runbook §2). |
 | **Owner** | Platform team |
 | **Cadence** | Chain: continuous (per insert). Anchor scheduler: configurable batch interval. Evidence bundle: nightly CronJob. Retention posture report: weekly CronJob (`evidence-audit-report`). |
-| **Residual gap** | Key rotation for `AUDIT_CHAIN_SECRET` and Ed25519 signing keys is manual / not automated (W7 roadmap item). Only one immudb sink in default configuration; second independent anchor sink is documented as a roadmap item. Restore verification drill is manual (runbook §6); no automated scheduled drill. |
+| **Residual gap** | Chain/signing keyring verification and `audit-verify --restore-drill` are implemented, and W8 supports additional anchor sinks. Remaining gaps are operational: operators must execute rotations, configure independent sinks where required, run scheduled restore drills and retain the resulting evidence. |
 
 ---
 
@@ -230,9 +230,9 @@ audit engagement.
 | SOC 2 Type I / II audit engagement | All | No third-party auditor engaged |
 | ISO 27001 certification | All | No certification body engaged |
 | Automated SIEM delivery failure alert | Security monitoring | Prometheus rule must be operator-configured |
-| Key rotation automation for chain secret / Ed25519 signing key | Evidence integrity | Manual runbook; W7 roadmap item |
-| Automated restore verification drill | Evidence integrity, A1.3 | Manual runbook; W7 roadmap item |
-| Independent second anchor sink | Evidence integrity | Single immudb sink; optional second sink in roadmap |
+| Key rotation execution evidence | Evidence integrity | Keyring verification exists; operator must execute rotation and retain evidence |
+| Restore drill execution evidence | Evidence integrity, A1.3 | `audit-verify --restore-drill` exists; operator must schedule and archive results |
+| Independent second anchor sink configuration | Evidence integrity | W8 additional sinks are supported; operator must configure them for regulated deployments |
 | Legal hold query-scope beyond date-range | Data retention | Query-scope selector language design is captured in PR-L8 RFC; implementation remains roadmap. Date-range enforcement is implemented in L6 |
 | SAST / SCA in CI | Change management | Not integrated; operator can add |
 | Two-person code review enforcement | Change management | GitHub branch protection: operator-managed |
