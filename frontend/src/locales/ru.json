@@ -15,6 +15,7 @@
     "tenants": "Tenants",
     "compliance": "Compliance",
     "operations": "Operations",
+    "settings": "Настройки",
     "internalDb": "Внутренние БД",
     "logout": "Выйти"
   },
@@ -41,6 +42,7 @@
       "evidence": "Chain-of-custody",
       "compliance": "Auditor workflow",
       "operations": "Go/no-go controls",
+      "settings": "Control posture",
       "internalDb": "Data boundary tools",
       "users": "Identity lifecycle"
     },
@@ -494,6 +496,126 @@
       "restore": "Restore drill verification",
       "byok": "BYOK legacy payload sweep",
       "smoke": "Enterprise smoke suite"
+    }
+  },
+  "settings": {
+    "title": "Settings & Admin Control Center для production posture без раскрытия секретов.",
+    "subtitle": "Read-only экран связывает runtime signals, configuration checklists и operator next steps. Он не меняет env-параметры и не показывает зелёный статус там, где backend signal отсутствует.",
+    "boundaryKicker": "Read-only boundary",
+    "boundaryText": "Настройки в этом релизе показывают posture и источники проверки. Secrets, tokens, API keys и KMS credentials не выводятся и не редактируются из браузера.",
+    "tags": {
+      "readOnly": "read-only",
+      "noSecrets": "no secrets",
+      "liveSignals": "live signals",
+      "checklists": "operator checklists"
+    },
+    "status": {
+      "loading": "loading",
+      "ok": "live ok",
+      "warn": "review",
+      "error": "failed",
+      "unknown": "unknown",
+      "checklist": "checklist"
+    },
+    "liveKicker": "Live signals",
+    "liveTitle": "Только endpoints с реальным backend signal",
+    "refresh": "Обновить signals",
+    "refreshing": "Обновление...",
+    "live": {
+      "readiness": {
+        "kicker": "Readiness",
+        "title": "DB / Redis readiness",
+        "source": "Source: GET /api/ready",
+        "loading": "Проверяется readiness endpoint.",
+        "ok": "DB и Redis доступны; service может принимать traffic.",
+        "failed": "Readiness вернул degraded status.",
+        "failedWithChecks": "Readiness degraded: failed checks — {checks}.",
+        "unknown": "Readiness signal недоступен из frontend."
+      },
+      "firewall": {
+        "kicker": "LLM Firewall",
+        "title": "Inspector runtime status",
+        "source": "Source: GET /proxy/firewall/status",
+        "loading": "Загружается firewall pipeline.",
+        "ok": "Firewall включён; enabled inspectors: {enabled}/{total}.",
+        "disabled": "Firewall endpoint доступен, но pipeline сообщает disabled.",
+        "unknown": "Firewall status недоступен или пользователь не имеет admin access."
+      },
+      "audit": {
+        "kicker": "Audit retention",
+        "title": "Audit privacy / purge posture",
+        "source": "Source: GET /api/audit/status",
+        "loading": "Загружается audit retention status.",
+        "ok": "Payload mode: {mode}; retention: {days} days; purged rows total: {purged}.",
+        "unknown": "Audit status недоступен или пользователь не имеет admin access."
+      },
+      "providers": {
+        "kicker": "Providers",
+        "title": "Provider connectivity snapshot",
+        "source": "Source: GET /proxy/providers/connectivity",
+        "loading": "Загружается provider connectivity snapshot.",
+        "ok": "Reachable providers: {reachable}/{total}; review signals: {problems}.",
+        "none": "Provider registry пуст или connectivity snapshot ещё не создан.",
+        "unknown": "Provider connectivity недоступен или пользователь не имеет admin access."
+      }
+    },
+    "controls": {
+      "identity": {
+        "title": "Identity controls",
+        "body": "OIDC, SCIM, MFA, break-glass и token invalidation управляются backend config и отдельными auth endpoints. UX4 только показывает, что это control family, без secret exposure.",
+        "source": "Check: OIDC/SCIM/MFA env + auth runbooks"
+      },
+      "siem": {
+        "title": "SIEM delivery",
+        "body": "Async SIEM queue, retry, backpressure и delivery metrics являются production controls. Здесь они отображаются как checklist до появления отдельного status API.",
+        "source": "Check: SIEM env, Prometheus alerts, admin events"
+      },
+      "evidence": {
+        "title": "Evidence / WORM",
+        "body": "HMAC chain, Merkle anchors, signed manifests, additional sinks и Object Lock проверяются CLI/CronJob reports, а не браузерным secret config.",
+        "source": "Check: audit-verify, evidence export, retention report"
+      },
+      "streaming": {
+        "title": "Streaming / firewall gates",
+        "body": "Incremental streaming promotion остаётся gated. Settings показывает operator boundary, а фактическое решение требует F7.6 proof-window metrics.",
+        "source": "Check: /proxy/firewall/status + streaming runbook"
+      },
+      "byok": {
+        "title": "BYOK audit payloads",
+        "body": "BYOK использует Vault Transit для audit request/response payloads. Vault endpoint/token никогда не отображаются в UI.",
+        "source": "Check: BYOK env + audit-byok-sweep"
+      },
+      "production": {
+        "title": "Production validation",
+        "body": "Go/no-go состояние формируется production validation pack, Helm render, smoke и evidence checks. UI не заменяет release gate.",
+        "source": "Check: shadowai-prod-validate + smoke suite"
+      }
+    },
+    "noSecretsKicker": "Secret safety",
+    "noSecretsTitle": "Что этот экран намеренно не показывает",
+    "noSecrets": {
+      "items": {
+        "apiKeys": "Provider API keys, SIEM tokens, SCIM bearer tokens и break-glass secret hashes.",
+        "tokens": "OIDC client secrets, JWT signing secret, audit chain secret и signing private keys.",
+        "endpoints": "Sensitive KMS/Vault credentials и internal service tokens.",
+        "runtime": "Editable env/config mutations из браузера — это отдельный audited workflow, не UX4."
+      }
+    },
+    "nextKicker": "Next implementation",
+    "nextTitle": "Какие фронтовые gaps закрываются после UX4",
+    "next": {
+      "tenant": {
+        "title": "UX5 Tenant Admin",
+        "body": "Организации, SCIM tokens и org budgets станут интерактивными вместо overview."
+      },
+      "auth": {
+        "title": "UX6 Auth UX",
+        "body": "MFA challenge/setup, OIDC login, break-glass и profile security будут доведены до backend contract."
+      },
+      "ops": {
+        "title": "UX10 Live operations",
+        "body": "Operations и dashboard получат честное разделение live metrics и static capability posture."
+      }
     }
   },
   "users": {

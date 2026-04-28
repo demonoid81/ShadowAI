@@ -29,6 +29,7 @@ const router = createRouter({
         { path: 'evidence', component: () => import('../pages/EvidencePage.vue') },
         { path: 'compliance', component: () => import('../pages/CompliancePage.vue') },
         { path: 'operations', component: () => import('../pages/OperationsPage.vue') },
+        { path: 'settings', component: () => import('../pages/SettingsPage.vue') },
         { path: 'internal-db', component: () => import('../pages/InternalDbPage.vue') }
       ]
     }

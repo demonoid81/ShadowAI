@@ -15,6 +15,7 @@
     "tenants": "Tenants",
     "compliance": "Compliance",
     "operations": "Operations",
+    "settings": "Settings",
     "internalDb": "Internal DB",
     "logout": "Logout"
   },
@@ -41,6 +42,7 @@
       "evidence": "Chain-of-custody",
       "compliance": "Auditor workflow",
       "operations": "Go/no-go controls",
+      "settings": "Control posture",
       "internalDb": "Data boundary tools",
       "users": "Identity lifecycle"
     },
@@ -494,6 +496,126 @@
       "restore": "Restore drill verification",
       "byok": "BYOK legacy payload sweep",
       "smoke": "Enterprise smoke suite"
+    }
+  },
+  "settings": {
+    "title": "Settings & Admin Control Center for production posture without exposing secrets.",
+    "subtitle": "A read-only view connecting runtime signals, configuration checklists and operator next steps. It does not mutate env settings and does not show green status when no backend signal exists.",
+    "boundaryKicker": "Read-only boundary",
+    "boundaryText": "Settings in this release show posture and verification sources. Secrets, tokens, API keys and KMS credentials are not displayed or edited from the browser.",
+    "tags": {
+      "readOnly": "read-only",
+      "noSecrets": "no secrets",
+      "liveSignals": "live signals",
+      "checklists": "operator checklists"
+    },
+    "status": {
+      "loading": "loading",
+      "ok": "live ok",
+      "warn": "review",
+      "error": "failed",
+      "unknown": "unknown",
+      "checklist": "checklist"
+    },
+    "liveKicker": "Live signals",
+    "liveTitle": "Only endpoints with real backend signals",
+    "refresh": "Refresh signals",
+    "refreshing": "Refreshing...",
+    "live": {
+      "readiness": {
+        "kicker": "Readiness",
+        "title": "DB / Redis readiness",
+        "source": "Source: GET /api/ready",
+        "loading": "Checking readiness endpoint.",
+        "ok": "DB and Redis are reachable; service can accept traffic.",
+        "failed": "Readiness returned degraded status.",
+        "failedWithChecks": "Readiness degraded: failed checks — {checks}.",
+        "unknown": "Readiness signal is unavailable from the frontend."
+      },
+      "firewall": {
+        "kicker": "LLM Firewall",
+        "title": "Inspector runtime status",
+        "source": "Source: GET /proxy/firewall/status",
+        "loading": "Loading firewall pipeline.",
+        "ok": "Firewall is enabled; enabled inspectors: {enabled}/{total}.",
+        "disabled": "Firewall endpoint is reachable, but pipeline reports disabled.",
+        "unknown": "Firewall status is unavailable or the user lacks admin access."
+      },
+      "audit": {
+        "kicker": "Audit retention",
+        "title": "Audit privacy / purge posture",
+        "source": "Source: GET /api/audit/status",
+        "loading": "Loading audit retention status.",
+        "ok": "Payload mode: {mode}; retention: {days} days; purged rows total: {purged}.",
+        "unknown": "Audit status is unavailable or the user lacks admin access."
+      },
+      "providers": {
+        "kicker": "Providers",
+        "title": "Provider connectivity snapshot",
+        "source": "Source: GET /proxy/providers/connectivity",
+        "loading": "Loading provider connectivity snapshot.",
+        "ok": "Reachable providers: {reachable}/{total}; review signals: {problems}.",
+        "none": "Provider registry is empty or connectivity snapshot has not been created.",
+        "unknown": "Provider connectivity is unavailable or the user lacks admin access."
+      }
+    },
+    "controls": {
+      "identity": {
+        "title": "Identity controls",
+        "body": "OIDC, SCIM, MFA, break-glass and token invalidation are governed by backend config and dedicated auth endpoints. UX4 shows the control family without exposing secrets.",
+        "source": "Check: OIDC/SCIM/MFA env + auth runbooks"
+      },
+      "siem": {
+        "title": "SIEM delivery",
+        "body": "Async SIEM queue, retry, backpressure and delivery metrics are production controls. They are shown as a checklist until a dedicated status API exists.",
+        "source": "Check: SIEM env, Prometheus alerts, admin events"
+      },
+      "evidence": {
+        "title": "Evidence / WORM",
+        "body": "HMAC chain, Merkle anchors, signed manifests, additional sinks and Object Lock are verified through CLI/CronJob reports, not browser secret config.",
+        "source": "Check: audit-verify, evidence export, retention report"
+      },
+      "streaming": {
+        "title": "Streaming / firewall gates",
+        "body": "Incremental streaming promotion remains gated. Settings shows the operator boundary; the actual decision requires F7.6 proof-window metrics.",
+        "source": "Check: /proxy/firewall/status + streaming runbook"
+      },
+      "byok": {
+        "title": "BYOK audit payloads",
+        "body": "BYOK uses Vault Transit for audit request/response payloads. Vault endpoint/token are never displayed in the UI.",
+        "source": "Check: BYOK env + audit-byok-sweep"
+      },
+      "production": {
+        "title": "Production validation",
+        "body": "Go/no-go status is produced by the production validation pack, Helm render, smoke and evidence checks. UI does not replace the release gate.",
+        "source": "Check: shadowai-prod-validate + smoke suite"
+      }
+    },
+    "noSecretsKicker": "Secret safety",
+    "noSecretsTitle": "What this view intentionally does not show",
+    "noSecrets": {
+      "items": {
+        "apiKeys": "Provider API keys, SIEM tokens, SCIM bearer tokens and break-glass secret hashes.",
+        "tokens": "OIDC client secrets, JWT signing secret, audit chain secret and signing private keys.",
+        "endpoints": "Sensitive KMS/Vault credentials and internal service tokens.",
+        "runtime": "Editable env/config mutations from the browser are a separate audited workflow, not UX4."
+      }
+    },
+    "nextKicker": "Next implementation",
+    "nextTitle": "Frontend gaps that follow UX4",
+    "next": {
+      "tenant": {
+        "title": "UX5 Tenant Admin",
+        "body": "Organizations, SCIM tokens and org budgets become interactive instead of overview-only."
+      },
+      "auth": {
+        "title": "UX6 Auth UX",
+        "body": "MFA challenge/setup, OIDC login, break-glass and profile security are aligned with the backend contract."
+      },
+      "ops": {
+        "title": "UX10 Live operations",
+        "body": "Operations and dashboard get an honest split between live metrics and static capability posture."
+      }
     }
   },
   "users": {
