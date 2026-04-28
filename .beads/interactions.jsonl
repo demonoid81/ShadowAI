@@ -40,3 +40,5 @@
 {"id":"int-e9dea1a7","kind":"field_change","created_at":"2026-04-28T15:11:27.668961938Z","actor":"Mikhail","issue_id":"ShadowAI-h4x","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
 {"id":"int-3e153ce5","kind":"field_change","created_at":"2026-04-28T17:05:07.565572839Z","actor":"Mikhail","issue_id":"ShadowAI-8xd","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-5cb95c11","kind":"field_change","created_at":"2026-04-28T17:10:37.525888817Z","actor":"Mikhail","issue_id":"ShadowAI-8xd","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
+{"id":"int-49decb67","kind":"field_change","created_at":"2026-04-28T17:27:33.249975073Z","actor":"Mikhail","issue_id":"ShadowAI-kh2","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-82b1d37e","kind":"field_change","created_at":"2026-04-28T17:30:53.650332817Z","actor":"Mikhail","issue_id":"ShadowAI-kh2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}

@@ -162,6 +162,13 @@ const navGroups = computed(() => {
       ]
     },
     {
+      key: 'evidence',
+      labelKey: 'layout.groups.evidence',
+      items: [
+        { to: '/evidence', code: 'EV', labelKey: 'nav.evidence', captionKey: 'layout.navCaptions.evidence', adminOnly: true }
+      ]
+    },
+    {
       key: 'operate',
       labelKey: 'layout.groups.operate',
       items: [

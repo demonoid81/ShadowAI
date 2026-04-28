@@ -11,6 +11,7 @@
     "users": "Пользователи",
     "providers": "Провайдеры",
     "firewall": "Файрвол",
+    "evidence": "Evidence",
     "internalDb": "Внутренние БД",
     "logout": "Выйти"
   },
@@ -23,6 +24,7 @@
       "observe": "Observe",
       "govern": "Govern",
       "protect": "Protect",
+      "evidence": "Evidence",
       "operate": "Operate"
     },
     "navCaptions": {
@@ -32,6 +34,7 @@
       "budget": "Spend guardrails",
       "providers": "Vendor connectivity",
       "firewall": "LLM security runtime",
+      "evidence": "Chain-of-custody",
       "internalDb": "Data boundary tools",
       "users": "Identity lifecycle"
     },
@@ -191,6 +194,116 @@
     "monthlySpend": "Расходы за месяц",
     "tokenUsage": "Использование токенов",
     "noBudget": "Бюджет не настроен."
+  },
+  "evidence": {
+    "title": "Chain-of-custody evidence для аудиторов и операторов.",
+    "subtitle": "Этот экран показывает, как ShadowAI превращает audit rows в проверяемые evidence bundles: HMAC chain, Merkle anchors, signed manifests, independent sinks и Object Lock retention.",
+    "contractKicker": "Evidence contract",
+    "tags": {
+      "chain": "HMAC chain",
+      "anchor": "Merkle anchors",
+      "signatures": "Ed25519 signatures",
+      "objectLock": "Object Lock"
+    },
+    "contracts": {
+      "db": {
+        "label": "DB tamper detection",
+        "detail": "Gap или row rewrite детектируются verifier-ом через seq_no и HMAC continuity."
+      },
+      "external": {
+        "label": "External witness",
+        "detail": "Anchors подписываются и публикуются в file/immudb/additional sinks для независимого witness layer."
+      },
+      "bundle": {
+        "label": "Portable auditor bundle",
+        "detail": "Global и tenant bundles проверяются offline без live DB доступа; tenant bundle не раскрывает cross-tenant row hashes."
+      }
+    },
+    "controls": {
+      "chain": {
+        "title": "Hash chain on audit tables",
+        "body": "Все ключевые audit таблицы получают seq_no и row_hash; verifier ловит gaps и chain breaks.",
+        "artifact": "Artifact: audit_logs, admin_event_logs, legal_hold_events, audit_purge_runs"
+      },
+      "anchors": {
+        "title": "Signed Merkle anchors",
+        "body": "Scheduler строит Merkle root по row_hash ranges и подписывает manifest через Ed25519 key id.",
+        "artifact": "Artifact: audit_chain_anchors + signed manifest"
+      },
+      "sinks": {
+        "title": "Independent witness sinks",
+        "body": "Primary sink сохраняет backward compatibility; W8 additional sinks показывают degraded posture при partial failure.",
+        "artifact": "Artifact: file://, immudb://, audit_chain_anchor_sinks"
+      },
+      "objectLock": {
+        "title": "S3 Object Lock retention",
+        "body": "Evidence export uploads verified bundles only; Object Lock mode/retention/hold проверяются report CLI.",
+        "artifact": "Artifact: evidence-export CronJob + audit-evidence-report"
+      },
+      "bundle": {
+        "title": "Offline evidence bundle",
+        "body": "Bundle содержит manifest hashes, anchors, chain inventory или tenant Merkle proofs и public key.",
+        "artifact": "Artifact: audit-export-evidence + audit-verify --bundle"
+      },
+      "validation": {
+        "title": "Production go/no-go validation",
+        "body": "PROD1 связывает live rollout, readiness, bundle verification и retention posture в один report.",
+        "artifact": "Artifact: shadowai-prod-validate report"
+      }
+    },
+    "pipelineKicker": "Evidence pipeline",
+    "pipelineTitle": "От audit row до переносимого bundle",
+    "pipelineNote": "Схема показывает capability contract. Для live проверки оператор запускает команды ниже и архивирует output.",
+    "pipeline": {
+      "rows": {
+        "title": "Audit rows",
+        "body": "Proxy, admin, legal hold и purge events пишутся в scoped tables."
+      },
+      "chain": {
+        "title": "HMAC continuity",
+        "body": "Row hash связывает текущий canonical row с предыдущим tip."
+      },
+      "merkle": {
+        "title": "Merkle range",
+        "body": "Anchor root покрывает contiguous seq_no range."
+      },
+      "sign": {
+        "title": "Signed manifest",
+        "body": "Ed25519 signature covers sink_ref and anchor fields."
+      },
+      "sink": {
+        "title": "Witness sinks",
+        "body": "file/immudb/additional sinks получают один signed manifest."
+      },
+      "bundle": {
+        "title": "Auditor bundle",
+        "body": "Offline verifier проверяет signatures, hashes, ranges and proofs."
+      }
+    },
+    "commandsKicker": "Operator commands",
+    "commandsTitle": "Проверки, которые дают реальные evidence artifacts",
+    "commands": {
+      "verifyBundle": "Offline bundle verification",
+      "exportTenant": "Tenant-scoped export",
+      "retention": "S3 retention posture",
+      "prodValidate": "Production validation"
+    },
+    "operatorKicker": "Caveats",
+    "operatorTitle": "Что UI не должен переобещать",
+    "notes": {
+      "notLive": {
+        "title": "Это не live monitoring",
+        "body": "UX2 показывает реализованный control model. Для фактического статуса нужны CLI reports, CronJob status и Prometheus alerts."
+      },
+      "independentSink": {
+        "title": "Second sink is configuration-dependent",
+        "body": "W8 поддерживает additional sinks, но regulated deployment должен явно настроить независимый witness."
+      },
+      "restoreDrill": {
+        "title": "Restore drill remains operator-owned",
+        "body": "Команда автоматизирована, но расписание, запуск и хранение результата остаются операционным контролем."
+      }
+    }
   },
   "users": {
     "title": "Пользователи",
