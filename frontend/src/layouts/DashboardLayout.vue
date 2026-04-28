@@ -167,6 +167,8 @@ const navGroups = computed(() => {
       labelKey: 'layout.groups.evidence',
       items: [
         { to: '/evidence', code: 'EV', labelKey: 'nav.evidence', captionKey: 'layout.navCaptions.evidence', adminOnly: true },
+        { to: '/legal-holds', code: 'LH', labelKey: 'nav.legalHolds', captionKey: 'layout.navCaptions.legalHolds', adminOnly: true },
+        { to: '/admin-events', code: 'AE', labelKey: 'nav.adminEvents', captionKey: 'layout.navCaptions.adminEvents', adminOnly: true },
         { to: '/compliance', code: 'CO', labelKey: 'nav.compliance', captionKey: 'layout.navCaptions.compliance', adminOnly: true }
       ]
     },

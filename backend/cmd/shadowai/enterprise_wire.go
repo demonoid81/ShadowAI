@@ -257,9 +257,14 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			admin.HandleFunc("/legal-holds", legalHoldHandler.Create).Methods("POST")
 			admin.HandleFunc("/legal-holds", legalHoldHandler.List).Methods("GET")
 			admin.HandleFunc("/legal-holds/preview", legalHoldHandler.Preview).Methods("POST")
+			admin.HandleFunc("/legal-holds/bulk-approve", legalHoldHandler.BulkApprove).Methods("POST")
+			admin.HandleFunc("/legal-holds/bulk-reject", legalHoldHandler.BulkReject).Methods("POST")
+			admin.HandleFunc("/legal-holds/pending-sla", legalHoldHandler.PendingSLA).Methods("GET")
 			admin.HandleFunc("/legal-holds/{id}/approve", legalHoldHandler.Approve).Methods("POST")
 			admin.HandleFunc("/legal-holds/{id}/reject", legalHoldHandler.Reject).Methods("POST")
 			admin.HandleFunc("/legal-holds/{id}/release", legalHoldHandler.Release).Methods("POST")
+			admin.HandleFunc("/legal-holds/{id}/approve-release", legalHoldHandler.ApproveRelease).Methods("POST")
+			admin.HandleFunc("/legal-holds/{id}/reject-release", legalHoldHandler.RejectRelease).Methods("POST")
 		},
 
 		// PR-W3: enterprise tables добавляются к anchor scheduler'у.

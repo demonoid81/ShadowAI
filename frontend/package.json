@@ -8,6 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "test:tenant-ui": "rm -rf /tmp/shadowai-tenant-ui-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-tenant-ui-test --noEmit false --types node src/utils/tenantUi.ts tests/tenantUi.test.ts && node /tmp/shadowai-tenant-ui-test/tests/tenantUi.test.js",
     "test:auth-flow": "rm -rf /tmp/shadowai-auth-flow-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-auth-flow-test --noEmit false --types node src/utils/authFlow.ts tests/authFlow.test.ts && node /tmp/shadowai-auth-flow-test/tests/authFlow.test.js",
+    "test:legal-hold-ui": "rm -rf /tmp/shadowai-legal-hold-ui-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-legal-hold-ui-test --noEmit false --types node src/utils/legalHoldUi.ts tests/legalHoldUi.test.ts && node /tmp/shadowai-legal-hold-ui-test/tests/legalHoldUi.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
