@@ -309,7 +309,7 @@ evidenceAuditReport:
 | No formal pen test | SEC1 provides a scoped LLM security validation package, but no external assessor has executed it yet | Schedule external validation before regulated-industry go-live; use `docs/security/llm-red-team-validation-package.md` |
 | Single immudb anchor sink | Second independent anchor sink improves WORM durability | W7 documents this as known gap |
 | Restore drill: manual | `audit-verify --restore-drill` automates the commands but drill execution is still manual | Document drill date in incident log; quarterly cadence recommended |
-| No SAML support | OIDC only | SAML not planned unless required by target customers |
+| No SAML support | OIDC + SCIM are the supported enterprise identity path. IAM1 documents SAML as customer-dependent, not implemented | Use `docs/security/saml-enterprise-identity-gap-assessment.md` in security reviews; implement SAML only after target customer IdP metadata and claims contract are available |
 
 ---
 

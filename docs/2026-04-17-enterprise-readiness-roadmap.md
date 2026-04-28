@@ -36,6 +36,7 @@
 | CI / release gates | ✅ | core/enterprise/integration/smoke tests, Docker build, Helm validate, migration smoke, security jobs |
 | Prod config hardening | ✅ | startup fail-fast for unsafe production config across auth/SIEM/legalhold/WORM/SA_v2/OIDC/SCIM |
 | LLM security validation SEC1 | ✅ | external assessor package: scope, rules of engagement, attack matrix, safe test corpus, evidence workflow and remediation template |
+| Enterprise identity IAM1 | ✅ | SAML gap assessment: OIDC + SCIM are supported; SAML is customer-dependent future adapter, not a current capability |
 
 ### Что это означает
 
@@ -206,7 +207,7 @@ Acceptance criteria:
 - Большой analytics UI до завершения SOC/control mapping.
 - Full BYOK implementation — RFC завершён (BYOK1), реализация в BYOK2 после customer requirement и KMS provider decision.
 - Multi-region active-active до key rotation / evidence restore automation.
-- Поддержка SAML, если OIDC покрывает целевые IdP.
+- Поддержка SAML остаётся customer-dependent после IAM1; текущий supported path — OIDC + SCIM.
 
 ---
 

@@ -70,7 +70,7 @@ it describes:
 | **Evidence artifacts** | `admin_event_logs` rows for every login success/fail, OIDC config change, role sync change; SIEM mirror delivers events in real time. Auth config in `internal/auth/` and `internal/oidc/`. |
 | **Owner** | Platform / security team |
 | **Cadence** | Continuous (every login/change). SCIM sync on IdP push. |
-| **Residual gap** | SAML not supported (OIDC only). IdP-side MFA enforcement is operator responsibility; ShadowAI enforces `amr`/`acr` claim presence, not MFA strength. No session timeout currently configurable beyond JWT expiry. |
+| **Residual gap** | SAML SSO is not implemented; IAM1 classifies it as customer-dependent future work, with OIDC + SCIM as the supported enterprise path. IdP-side MFA enforcement is operator responsibility; ShadowAI enforces `amr`/`acr` claim presence, not MFA strength. No session timeout currently configurable beyond JWT expiry. |
 
 ---
 
@@ -237,7 +237,7 @@ audit engagement.
 | SAST / SCA in CI | Change management | Not integrated; operator can add |
 | Two-person code review enforcement | Change management | GitHub branch protection: operator-managed |
 | Database-layer row-level security | Tenant isolation | Application-level only |
-| SAML IdP support | Access control | OIDC only |
+| SAML IdP support | Access control | Not implemented; IAM1 assessment documents customer-dependent implementation path |
 | Formal Security Policy documentation | A.5.1 | Technical controls exist; policy document not yet written |
 | Business Continuity / Disaster Recovery plan | A.5.30 | DB backup/restore drill documented; formal BCP not written |
 | Vendor assessment for LLM providers | CC9.2 | Governance policy controls usage; no formal TPRM process |
