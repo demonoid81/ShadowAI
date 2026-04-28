@@ -217,10 +217,10 @@ func (h *Handler) runIncrementalStreamTransport(
 //     fallbackReason пустой.
 //   - useIncremental=false: caller остаётся на buffered branch.
 //     fallbackReason заполнен одним из:
-//       * FallbackReasonUnsupportedProvider (provider без adapter'а);
-//       * reason из streamingCapability (CM+judge → "judge_inspector");
-//       * пустая строка, если streamingMode != "incremental" (не
-//         fallback, а обычный buffered-режим).
+//   - FallbackReasonUnsupportedProvider (provider без adapter'а);
+//   - reason из streamingCapability (CM+judge → "judge_inspector");
+//   - пустая строка, если streamingMode != "incremental" (не
+//     fallback, а обычный buffered-режим).
 //     Caller обязан thread reason в local переменную и использовать
 //     её при final audit write (compound marker
 //     streaming_buffered_fallback:<original_action>).
@@ -273,9 +273,9 @@ func (h *Handler) shouldUseIncrementalStream(providerName string) (streaming.Ada
 //  6. Operator sign-off: security team and platform lead have reviewed
 //     streaming sanitize audit samples from shadow mode.
 //
-// Current F7.5 status: criteria 5 is NOT fully met (Anthropic/Gemini/Ollama
-// use identity-stub EmitSanitized). Production rollout for those providers
-// requires F7.6+ full implementation.
+// Current F7.7 status: criteria 5 is met for tier-1 providers
+// (OpenAI-compatible, Anthropic, Gemini, Ollama). The gate still remains until
+// proof-window evidence and operator sign-off satisfy the remaining criteria.
 //
 // composeBufferedFallbackMarker: удалён в PR-F7.3. Заменён на
 // structured outcome/fallback_reason fields в domain.AuditLog

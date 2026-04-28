@@ -339,7 +339,7 @@ as a permanent production default.
 [ ] Minimum sample size: ≥ 500 incremental requests per target provider (verified)
 [ ] Low-traffic providers explicitly scoped out (if < 500 samples after 30 days)
 [ ] Sanitize event sample reviewed in audit_logs (policy_action = "sanitized")
-[ ] Anthropic/Gemini/Ollama: EmitSanitized is identity stub → sanitize does NOT modify payload for these providers; confirm this is acceptable or exclude from incremental until F7.x
+[ ] Anthropic/Gemini/Ollama: provider-specific EmitSanitized covered by F7.7 tests; sample sanitized frames reviewed in audit_logs
 [ ] Production hardening doc §6 promotion criteria reviewed: docs/production-hardening.md
 [ ] Rollback procedure tested in staging
 [ ] Incident log entry created with metrics evidence and sign-off
@@ -356,17 +356,17 @@ Approval: ___________________
 | Provider | Incremental adapter | EmitSanitized | Promotion note |
 |---------|--------------------|--------------|----|
 | openai / groq / mistral / openrouter | ✅ Full (F7.1) | ✅ Full (F7.5) | Eligible for full promotion |
-| anthropic | ✅ Full (F7.1) | ⚠️ Identity stub (F7.5) | Sanitize does not modify content; acceptable only if sanitize events are rare |
-| gemini | ✅ Full (F7.1) | ⚠️ Identity stub (F7.5) | Same as Anthropic |
-| ollama | ✅ Full (F7.1) | ⚠️ Identity stub (F7.5) | Same as Anthropic |
+| anthropic | ✅ Full (F7.1) | ✅ Full (F7.7) | Review sanitized `content_block_delta` samples |
+| gemini | ✅ Full (F7.1) | ✅ Full (F7.7) | Review sanitized `candidates[].content.parts[].text` samples |
+| ollama | ✅ Full (F7.1) | ✅ Full (F7.7) | Review sanitized `message.content` / `response` samples |
 | CM+judge enabled | N/A | N/A | Always falls back to buffered (`reason=judge_inspector`); not a candidate for incremental |
 
-For Anthropic/Gemini/Ollama with identity-stub `EmitSanitized`: when the firewall/DLP
-triggers a sanitize verdict on incremental traffic for these providers, the frame is
-emitted unchanged (no content mutation). The audit record correctly shows
-`policy_action=sanitized` but the client receives the unsanitized content.
-**This must be explicitly accepted by the security team before promotion for these providers.**
-Full sanitize support for Anthropic/Gemini/Ollama is deferred to F7.x.
+F7.7 removes the previous Anthropic/Gemini/Ollama identity-stub limitation.
+When the firewall/DLP triggers a sanitize verdict, provider-specific emitters
+rewrite the current text delta frame. The remaining known caveat is
+cross-chunk PII: if a sensitive value is split across multiple deltas, F7.7
+does not yet rewrite the full sliding-window match. Keep sanitize sample review
+mandatory until F7.8 closes that gap or routes unsafe cases to a safe fallback.
 
 ---
 

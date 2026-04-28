@@ -13,10 +13,11 @@ import (
 // на строку, terminator — `\n`.
 //
 // Map (Ollama /api/chat format):
-//   message.content (done=false)  → EventDeltaText
-//   done=true + eval_count        → EventUsageUpdate + EventMessageStop
-//   error поле                    → EventProviderError
-//   malformed line                → EventUnknownChunk
+//
+//	message.content (done=false)  → EventDeltaText
+//	done=true + eval_count        → EventUsageUpdate + EventMessageStop
+//	error поле                    → EventProviderError
+//	malformed line                → EventUnknownChunk
 //
 // Ollama шлёт финальный frame c `done:true` и usage (eval_count,
 // prompt_eval_count). В терминах normalized events это и
@@ -42,8 +43,8 @@ type ollamaFrame struct {
 	Response string `json:"response"` // /api/generate shape
 	Done     bool   `json:"done"`
 	// Usage fields (присутствуют в финальном frame):
-	PromptEvalCount int `json:"prompt_eval_count"`
-	EvalCount       int `json:"eval_count"`
+	PromptEvalCount int    `json:"prompt_eval_count"`
+	EvalCount       int    `json:"eval_count"`
 	Error           string `json:"error"`
 }
 
@@ -148,10 +149,53 @@ func normalizeOllama(of ollamaFrame, raw []byte) Event {
 // OllamaEmitter — identity NDJSON emitter.
 type OllamaEmitter struct{}
 
-// EmitSanitized — PR-F7.5 stub. Identity passthrough; full sanitize
-// re-encoding for Ollama NDJSON is planned for F7.6+.
-func (e OllamaEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, _ string) error {
-	return e.Emit(ctx, w, ev)
+// EmitSanitized replaces /api/chat message.content or /api/generate response
+// while preserving the NDJSON line shape. Non-text / empty delta events remain
+// identity.
+func (e OllamaEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, sanitizedText string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ev.Type != EventDeltaText || len(ev.RawBytes) == 0 || ev.Text == "" {
+		return e.Emit(ctx, w, ev)
+	}
+	payload := bytes.TrimSpace(ev.RawBytes)
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &outer); err != nil {
+		return fmt.Errorf("streaming: ollama sanitize: unmarshal outer: %w", err)
+	}
+	sanitizedJSON, err := json.Marshal(sanitizedText)
+	if err != nil {
+		return fmt.Errorf("streaming: ollama sanitize: marshal text: %w", err)
+	}
+	if messageRaw, ok := outer["message"]; ok && len(messageRaw) > 0 {
+		var message map[string]json.RawMessage
+		if err := json.Unmarshal(messageRaw, &message); err != nil {
+			return fmt.Errorf("streaming: ollama sanitize: unmarshal message: %w", err)
+		}
+		if _, ok := message["content"]; !ok {
+			return fmt.Errorf("streaming: ollama sanitize: missing message.content")
+		}
+		message["content"] = sanitizedJSON
+		newMessage, err := json.Marshal(message)
+		if err != nil {
+			return fmt.Errorf("streaming: ollama sanitize: marshal message: %w", err)
+		}
+		outer["message"] = newMessage
+	} else if _, ok := outer["response"]; ok {
+		outer["response"] = sanitizedJSON
+	} else {
+		return fmt.Errorf("streaming: ollama sanitize: missing message.content or response")
+	}
+	newPayload, err := json.Marshal(outer)
+	if err != nil {
+		return fmt.Errorf("streaming: ollama sanitize: marshal outer: %w", err)
+	}
+	if _, err := w.Write(append(newPayload, '\n')); err != nil {
+		return err
+	}
+	flushIfPossible(w)
+	return nil
 }
 
 func (OllamaEmitter) Emit(ctx context.Context, w io.Writer, ev Event) error {

@@ -1,14 +1,17 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/shadowai/backend/internal/dlp"
 	"github.com/shadowai/backend/internal/firewall"
+	"github.com/shadowai/backend/internal/proxy/streaming"
 )
 
 // ---------------------------------------------------------------------------
@@ -255,4 +258,64 @@ func TestProxyChat_Incremental_Sanitize_IncrementalEngine_SanitizeVerdict(t *tes
 		v.Sanitize, v.SanitizedText, v.InspectorName)
 }
 
+func TestRunIncrementalStreamTransport_Sanitize_NonOpenAIProviders(t *testing.T) {
+	cases := []struct {
+		provider string
+		model    string
+		input    []byte
+	}{
+		{
+			provider: "anthropic",
+			model:    "claude-3-5-sonnet",
+			input: []byte(
+				"event: content_block_delta\n" +
+					`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"email user@example.com"}}` + "\n\n"),
+		},
+		{
+			provider: "gemini",
+			model:    "gemini-1.5-pro",
+			input:    []byte(`data: {"candidates":[{"content":{"parts":[{"text":"email user@example.com"}],"role":"model"}}],"modelVersion":"gemini-1.5-pro"}` + "\n\n"),
+		},
+		{
+			provider: "ollama",
+			model:    "llama3",
+			input:    []byte(`{"model":"llama3","message":{"role":"assistant","content":"email user@example.com"},"done":false}` + "\n"),
+		},
+	}
 
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			adapter, ok := streaming.AdapterForProvider(tc.provider)
+			if !ok {
+				t.Fatalf("adapter missing for %s", tc.provider)
+			}
+			engine := newIncrementalEngine(nil, dlp.NewService("enforce"), tc.model, tc.provider, "user-1")
+			rec := httptest.NewRecorder()
+
+			res := (&Handler{}).runIncrementalStreamTransport(
+				context.Background(),
+				rec,
+				http.Header{"Content-Type": []string{"text/event-stream"}},
+				bytes.NewReader(tc.input),
+				http.StatusOK,
+				tc.provider,
+				adapter,
+				engine,
+			)
+
+			if res.TransportErr != nil {
+				t.Fatalf("TransportErr: %v", res.TransportErr)
+			}
+			if !res.Sanitized {
+				t.Fatalf("transport result Sanitized=false")
+			}
+			body := rec.Body.String()
+			if strings.Contains(body, "user@example.com") {
+				t.Fatalf("%s sanitized output still contains PII: %s", tc.provider, body)
+			}
+			if !strings.Contains(body, "redacted") {
+				t.Fatalf("%s sanitized output missing redaction marker: %s", tc.provider, body)
+			}
+		})
+	}
+}

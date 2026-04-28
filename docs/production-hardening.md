@@ -189,14 +189,14 @@ config:
   # STREAMING_ALLOW_INCREMENTAL_IN_PROD: "true"  # explicit opt-in; see below
 ```
 
-**Before enabling incremental streaming in production**, verify all F7.5 promotion criteria
+**Before enabling incremental streaming in production**, verify all F7.7 promotion criteria
 (documented in `backend/internal/proxy/handler_streaming_incremental.go`):
 
 1. Error budget: `streaming_emit_fail_total` + `streaming_decoder_fatal_total` rate < 0.1% for 30 days
 2. Fallback rate: `streaming_fallback_total{reason="unsupported_provider"}` ≈ 0
 3. Sanitize correctness: `shadowai_streaming_midstream_sanitize_total` reviewed in shadow mode for 30 days
 4. Bytes-identity: `TestRoundTrip_BytesIdentity` passes on the version being promoted
-5. Provider coverage: all production providers have full `EmitSanitized` (Anthropic/Gemini/Ollama use identity stub in F7.5 — do NOT enable incremental in prod for these providers until F7.6)
+5. Provider coverage: all production providers have full `EmitSanitized` (tier-1 providers: OpenAI-compatible, Anthropic, Gemini, Ollama)
 6. Security team sign-off on sanitize audit samples
 
 ### CM+judge fallback
@@ -295,7 +295,7 @@ evidenceAuditReport:
 | Limit | Description | Mitigation / Future work |
 |-------|-------------|--------------------------|
 | Governance cache multi-replica lag | Policy updates visible in ≤ 60s on all replicas | Reduce TTL or restart pod for immediate propagation; distributed invalidation is future work |
-| Streaming incremental: Anthropic/Gemini/Ollama sanitize | `EmitSanitized` is identity stub for non-OpenAI adapters (F7.5) | Do not enable incremental prod for these providers; full implementation in F7.6 |
+| Streaming incremental: cross-chunk PII sanitize | F7.7 sanitizes the current delta frame; PII split across multiple chunks is not yet window-rewritten | Keep proof-window audit review mandatory; implement F7.8 cross-chunk sanitize or safe fallback before removing the prod gate |
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
 | Legal hold selector privacy | Portable evidence bundles include `selector_manifest.jsonl` for query-scope auditor explainability. The v1 bundle exports selector JSON plus hash; it does not yet offer a hash-only or BYOK-encrypted selector export mode | Use tenant-scoped exports for least disclosure; use WORM `legal_hold_events` selector hash for integrity; defer hash-only/BYOK selector bundles to L8.2/BYOK |
 | BYOK: not implemented | Payload fields are plaintext (BYOK1 is design only) | See BYOK1 RFC; implement BYOK2 after customer requirement |

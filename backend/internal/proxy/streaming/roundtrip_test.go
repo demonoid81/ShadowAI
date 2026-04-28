@@ -9,7 +9,8 @@ import (
 
 // TestRoundTrip_BytesIdentity — ядро F7.1 (RFC §8.6 acceptance
 // criteria §20 / decisions §21). Для каждого canonical fixture:
-//   decode(X) → emit каждого Event в порядке → получаем X (byte-identical).
+//
+//	decode(X) → emit каждого Event в порядке → получаем X (byte-identical).
 //
 // Это regression guard для identity-preservation на allow path.
 // Любое изменение adapter'а, которое нарушит identity (re-encoding
@@ -310,6 +311,140 @@ func TestEmitSanitized_OpenAI_StopFrame_Identity(t *testing.T) {
 	}
 }
 
+func TestEmitSanitized_Anthropic_DeltaText_ReplacesContent(t *testing.T) {
+	original := []byte(
+		"event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"email user@example.com"}}` + "\n\n")
+	sanitized := "[redacted:email]"
+	events := decodeEvents(t, "anthropic", original)
+	if len(events) != 1 || events[0].Type != EventDeltaText {
+		t.Fatalf("expected one delta event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := mustAdapter(t, "anthropic").Emitter.EmitSanitized(context.Background(), &out, events[0], sanitized); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+	output := out.String()
+	if !strings.HasPrefix(output, "event: content_block_delta\n") || !strings.HasSuffix(output, "\n\n") {
+		t.Fatalf("invalid Anthropic SSE output: %q", output)
+	}
+	if !strings.Contains(output, sanitized) || strings.Contains(output, "user@example.com") {
+		t.Fatalf("Anthropic sanitize failed: %s", output)
+	}
+	if !strings.Contains(output, `"type":"content_block_delta"`) || !strings.Contains(output, `"type":"text_delta"`) {
+		t.Fatalf("Anthropic sanitize lost structural fields: %s", output)
+	}
+}
+
+func TestEmitSanitized_Gemini_DeltaText_ReplacesContent(t *testing.T) {
+	original := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"email user@example.com"},{"text":" more"}],"role":"model"}}],"modelVersion":"gemini-1.5-pro"}` + "\n\n")
+	sanitized := "[redacted:email]"
+	events := decodeEvents(t, "gemini", original)
+	if len(events) != 1 || events[0].Type != EventDeltaText {
+		t.Fatalf("expected one delta event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := mustAdapter(t, "gemini").Emitter.EmitSanitized(context.Background(), &out, events[0], sanitized); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+	output := out.String()
+	if !strings.HasPrefix(output, "data: ") || !strings.HasSuffix(output, "\n\n") {
+		t.Fatalf("invalid Gemini SSE output: %q", output)
+	}
+	if !strings.Contains(output, sanitized) || strings.Contains(output, "user@example.com") || strings.Contains(output, " more") {
+		t.Fatalf("Gemini sanitize failed: %s", output)
+	}
+	if !strings.Contains(output, `"modelVersion":"gemini-1.5-pro"`) || !strings.Contains(output, `"role":"model"`) {
+		t.Fatalf("Gemini sanitize lost structural fields: %s", output)
+	}
+}
+
+func TestEmitSanitized_OllamaChat_DeltaText_ReplacesContent(t *testing.T) {
+	original := []byte(`{"model":"llama3","message":{"role":"assistant","content":"email user@example.com"},"done":false}` + "\n")
+	sanitized := "[redacted:email]"
+	events := decodeEvents(t, "ollama", original)
+	if len(events) != 1 || events[0].Type != EventDeltaText {
+		t.Fatalf("expected one delta event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := mustAdapter(t, "ollama").Emitter.EmitSanitized(context.Background(), &out, events[0], sanitized); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+	output := out.String()
+	if !strings.HasSuffix(output, "\n") {
+		t.Fatalf("Ollama output must remain NDJSON line: %q", output)
+	}
+	if !strings.Contains(output, sanitized) || strings.Contains(output, "user@example.com") {
+		t.Fatalf("Ollama chat sanitize failed: %s", output)
+	}
+	if !strings.Contains(output, `"role":"assistant"`) || !strings.Contains(output, `"model":"llama3"`) {
+		t.Fatalf("Ollama chat sanitize lost structural fields: %s", output)
+	}
+}
+
+func TestEmitSanitized_OllamaGenerate_DeltaText_ReplacesResponse(t *testing.T) {
+	original := []byte(`{"model":"llama3","response":"email user@example.com","done":false}` + "\n")
+	sanitized := "[redacted:email]"
+	events := decodeEvents(t, "ollama", original)
+	if len(events) != 1 || events[0].Type != EventDeltaText {
+		t.Fatalf("expected one delta event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := mustAdapter(t, "ollama").Emitter.EmitSanitized(context.Background(), &out, events[0], sanitized); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, sanitized) || strings.Contains(output, "user@example.com") {
+		t.Fatalf("Ollama generate sanitize failed: %s", output)
+	}
+	if strings.Contains(output, `"message"`) {
+		t.Fatalf("Ollama generate sanitize must not synthesize chat message: %s", output)
+	}
+}
+
+func TestEmitSanitized_Anthropic_EmptyDelta_Identity(t *testing.T) {
+	original := []byte(
+		"event: content_block_start\n" +
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n")
+	events := decodeEvents(t, "anthropic", original)
+	if len(events) != 1 || events[0].Type != EventDeltaText || events[0].Text != "" {
+		t.Fatalf("expected empty delta event, got %+v", events)
+	}
+
+	var out bytes.Buffer
+	if err := mustAdapter(t, "anthropic").Emitter.EmitSanitized(context.Background(), &out, events[0], "MUTATED"); err != nil {
+		t.Fatalf("EmitSanitized: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), original) {
+		t.Fatalf("empty Anthropic delta must remain identity:\nwant %q\n got %q", original, out.Bytes())
+	}
+}
+
+func TestEmitSanitized_NonOpenAI_MalformedDelta_ReturnsError(t *testing.T) {
+	cases := []string{"anthropic", "gemini", "ollama"}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			ev := Event{
+				Type:     EventDeltaText,
+				Text:     "email user@example.com",
+				RawBytes: []byte("data: {not-json}\n\n"),
+			}
+			var out bytes.Buffer
+			err := mustAdapter(t, name).Emitter.EmitSanitized(context.Background(), &out, ev, "[redacted:email]")
+			if err == nil {
+				t.Fatal("EmitSanitized must fail on malformed delta JSON")
+			}
+			if out.Len() != 0 {
+				t.Fatalf("malformed sanitize must not emit partial bytes: %q", out.String())
+			}
+		})
+	}
+}
+
 // TestEmitSanitized_AllAdapters_NonDeltaText_Identity — regression guard:
 // all adapters must emit identity for non-delta_text events in EmitSanitized.
 func TestEmitSanitized_AllAdapters_NonDeltaText_Identity(t *testing.T) {
@@ -359,4 +494,17 @@ func mustAdapter(t *testing.T, name string) Adapter {
 		t.Fatalf("no adapter for provider %q", name)
 	}
 	return a
+}
+
+func decodeEvents(t *testing.T, provider string, input []byte) []Event {
+	t.Helper()
+	adapter := mustAdapter(t, provider)
+	var events []Event
+	if err := adapter.Decoder.Decode(context.Background(), bytes.NewReader(input), func(ev Event) error {
+		events = append(events, ev)
+		return nil
+	}); err != nil {
+		t.Fatalf("%s decode: %v", provider, err)
+	}
+	return events
 }

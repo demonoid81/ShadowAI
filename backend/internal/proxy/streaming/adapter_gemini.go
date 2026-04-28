@@ -12,9 +12,10 @@ import (
 // frame'ы с GenerateContentResponse JSON.
 //
 // Map:
-//   candidates[].content.parts[].text → EventDeltaText (склейка parts)
-//   usageMetadata (non-empty)         → EventUsageUpdate (параллельно)
-//   finishReason non-empty             → EventMessageStop (последний)
+//
+//	candidates[].content.parts[].text → EventDeltaText (склейка parts)
+//	usageMetadata (non-empty)         → EventUsageUpdate (параллельно)
+//	finishReason non-empty             → EventMessageStop (последний)
 //
 // Особенность: Gemini может слать usageMetadata в intermediate
 // frame'ах (не только в последнем). Round-trip всё равно identity —
@@ -124,10 +125,108 @@ func (GeminiDecoder) Decode(ctx context.Context, r io.Reader, emit func(Event) e
 // GeminiEmitter — identity.
 type GeminiEmitter struct{}
 
-// EmitSanitized — PR-F7.5 stub. Identity passthrough; full sanitize
-// re-encoding for Gemini SSE is planned for F7.6+.
-func (e GeminiEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, _ string) error {
-	return e.Emit(ctx, w, ev)
+// EmitSanitized replaces Gemini candidates[].content.parts[].text while
+// preserving the data-only SSE frame shape. Non-text / empty delta events
+// remain identity.
+func (e GeminiEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, sanitizedText string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ev.Type != EventDeltaText || len(ev.RawBytes) == 0 || ev.Text == "" {
+		return e.Emit(ctx, w, ev)
+	}
+	frame, err := parseSingleSSEFrame(ev.RawBytes, "gemini sanitize")
+	if err != nil {
+		return err
+	}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(frame.Data, &outer); err != nil {
+		return fmt.Errorf("streaming: gemini sanitize: unmarshal outer: %w", err)
+	}
+	candidatesRaw, ok := outer["candidates"]
+	if !ok || len(candidatesRaw) == 0 {
+		return fmt.Errorf("streaming: gemini sanitize: missing candidates")
+	}
+	var candidates []json.RawMessage
+	if err := json.Unmarshal(candidatesRaw, &candidates); err != nil {
+		return fmt.Errorf("streaming: gemini sanitize: unmarshal candidates: %w", err)
+	}
+	replaced := false
+	sanitizedJSON, err := json.Marshal(sanitizedText)
+	if err != nil {
+		return fmt.Errorf("streaming: gemini sanitize: marshal text: %w", err)
+	}
+	emptyJSON := json.RawMessage(`""`)
+	for i, candidateRaw := range candidates {
+		var candidate map[string]json.RawMessage
+		if err := json.Unmarshal(candidateRaw, &candidate); err != nil {
+			return fmt.Errorf("streaming: gemini sanitize: unmarshal candidate %d: %w", i, err)
+		}
+		contentRaw, ok := candidate["content"]
+		if !ok || len(contentRaw) == 0 {
+			continue
+		}
+		var content map[string]json.RawMessage
+		if err := json.Unmarshal(contentRaw, &content); err != nil {
+			return fmt.Errorf("streaming: gemini sanitize: unmarshal content %d: %w", i, err)
+		}
+		partsRaw, ok := content["parts"]
+		if !ok || len(partsRaw) == 0 {
+			continue
+		}
+		var parts []json.RawMessage
+		if err := json.Unmarshal(partsRaw, &parts); err != nil {
+			return fmt.Errorf("streaming: gemini sanitize: unmarshal parts %d: %w", i, err)
+		}
+		for j, partRaw := range parts {
+			var part map[string]json.RawMessage
+			if err := json.Unmarshal(partRaw, &part); err != nil {
+				return fmt.Errorf("streaming: gemini sanitize: unmarshal part %d.%d: %w", i, j, err)
+			}
+			if _, hasText := part["text"]; !hasText {
+				continue
+			}
+			if !replaced {
+				part["text"] = sanitizedJSON
+				replaced = true
+			} else {
+				part["text"] = emptyJSON
+			}
+			newPart, err := json.Marshal(part)
+			if err != nil {
+				return fmt.Errorf("streaming: gemini sanitize: marshal part %d.%d: %w", i, j, err)
+			}
+			parts[j] = newPart
+		}
+		newParts, err := json.Marshal(parts)
+		if err != nil {
+			return fmt.Errorf("streaming: gemini sanitize: marshal parts %d: %w", i, err)
+		}
+		content["parts"] = newParts
+		newContent, err := json.Marshal(content)
+		if err != nil {
+			return fmt.Errorf("streaming: gemini sanitize: marshal content %d: %w", i, err)
+		}
+		candidate["content"] = newContent
+		newCandidate, err := json.Marshal(candidate)
+		if err != nil {
+			return fmt.Errorf("streaming: gemini sanitize: marshal candidate %d: %w", i, err)
+		}
+		candidates[i] = newCandidate
+	}
+	if !replaced {
+		return fmt.Errorf("streaming: gemini sanitize: missing text part")
+	}
+	newCandidates, err := json.Marshal(candidates)
+	if err != nil {
+		return fmt.Errorf("streaming: gemini sanitize: marshal candidates: %w", err)
+	}
+	outer["candidates"] = newCandidates
+	newPayload, err := json.Marshal(outer)
+	if err != nil {
+		return fmt.Errorf("streaming: gemini sanitize: marshal outer: %w", err)
+	}
+	return writeSSEJSON(ctx, w, "", newPayload)
 }
 
 func (GeminiEmitter) Emit(ctx context.Context, w io.Writer, ev Event) error {

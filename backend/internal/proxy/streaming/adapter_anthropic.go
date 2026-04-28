@@ -11,15 +11,15 @@ import (
 // AnthropicDecoder парсит Anthropic streaming SSE: frame'ы с явным
 // `event:` name'ом. Map events → normalized types:
 //
-//   event: message_start           → EventDeltaText (text=="", Meta.model)
-//   event: content_block_start     → EventDeltaText (text=="") для round-trip identity
-//   event: content_block_delta     → EventDeltaText (text = delta.text)
-//   event: content_block_stop      → EventDeltaText (text=="")
-//   event: message_delta           → EventUsageUpdate (usage output_tokens)
-//   event: message_stop            → EventMessageStop
-//   event: ping                    → EventUnknownChunk (keepalive, identity)
-//   event: error                   → EventProviderError
-//   остальное                       → EventUnknownChunk
+//	event: message_start           → EventDeltaText (text=="", Meta.model)
+//	event: content_block_start     → EventDeltaText (text=="") для round-trip identity
+//	event: content_block_delta     → EventDeltaText (text = delta.text)
+//	event: content_block_stop      → EventDeltaText (text=="")
+//	event: message_delta           → EventUsageUpdate (usage output_tokens)
+//	event: message_stop            → EventMessageStop
+//	event: ping                    → EventUnknownChunk (keepalive, identity)
+//	event: error                   → EventProviderError
+//	остальное                       → EventUnknownChunk
 //
 // Rationale для "пустых" DeltaText на non-text frames: inspection
 // pipeline F7.2 будет работать по sliding window over Text, и ей
@@ -193,16 +193,53 @@ func (AnthropicDecoder) Decode(ctx context.Context, r io.Reader, emit func(Event
 // AnthropicEmitter — identity emitter, как и openai_compat.
 type AnthropicEmitter struct{}
 
-// EmitSanitized — PR-F7.5 stub. Anthropic wire-format sanitize re-encoding
-// is not yet implemented; full support is planned for F7.6+.
-// Non-delta_text events: identity. Delta_text events: identity (no re-encode).
-// Callers in incremental engine treat non-nil error as transport failure.
-func (e AnthropicEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, _ string) error {
-	// Identity passthrough — sanitized text is NOT applied for Anthropic in F7.5.
-	// This is safe (no silent mutation); the sanitize verdict is still recorded
-	// in audit (policy_action=sanitized), but the emitted bytes are unchanged.
-	// Production operators using Anthropic should set buffered mode until F7.6.
-	return e.Emit(ctx, w, ev)
+// EmitSanitized replaces content_block_delta.delta.text while preserving the
+// Anthropic named SSE frame shape. Non-text / empty delta events remain identity.
+func (e AnthropicEmitter) EmitSanitized(ctx context.Context, w io.Writer, ev Event, sanitizedText string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ev.Type != EventDeltaText || len(ev.RawBytes) == 0 || ev.Text == "" {
+		return e.Emit(ctx, w, ev)
+	}
+	frame, err := parseSingleSSEFrame(ev.RawBytes, "anthropic sanitize")
+	if err != nil {
+		return err
+	}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(frame.Data, &outer); err != nil {
+		return fmt.Errorf("streaming: anthropic sanitize: unmarshal outer: %w", err)
+	}
+	deltaRaw, ok := outer["delta"]
+	if !ok || len(deltaRaw) == 0 {
+		return fmt.Errorf("streaming: anthropic sanitize: missing delta")
+	}
+	var delta map[string]json.RawMessage
+	if err := json.Unmarshal(deltaRaw, &delta); err != nil {
+		return fmt.Errorf("streaming: anthropic sanitize: unmarshal delta: %w", err)
+	}
+	if _, ok := delta["text"]; !ok {
+		return fmt.Errorf("streaming: anthropic sanitize: missing delta.text")
+	}
+	sanitizedJSON, err := json.Marshal(sanitizedText)
+	if err != nil {
+		return fmt.Errorf("streaming: anthropic sanitize: marshal text: %w", err)
+	}
+	delta["text"] = sanitizedJSON
+	newDelta, err := json.Marshal(delta)
+	if err != nil {
+		return fmt.Errorf("streaming: anthropic sanitize: marshal delta: %w", err)
+	}
+	outer["delta"] = newDelta
+	newPayload, err := json.Marshal(outer)
+	if err != nil {
+		return fmt.Errorf("streaming: anthropic sanitize: marshal outer: %w", err)
+	}
+	eventName := frame.EventName
+	if eventName == "" {
+		eventName = ev.EventName
+	}
+	return writeSSEJSON(ctx, w, eventName, newPayload)
 }
 
 func (AnthropicEmitter) Emit(ctx context.Context, w io.Writer, ev Event) error {
