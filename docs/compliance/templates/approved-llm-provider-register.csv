@@ -1,0 +1,2 @@
+provider,model,status,approved_use_case,org_id,department,max_sensitivity,data_retention_summary,training_use,region,dpa_status,security_review_date,next_review_date,risk_owner,governance_policy_ref,evidence_ref,notes
+openai,gpt-4.1-mini,example_only,standard support triage,00000000-0000-0000-0000-000000000001,support,standard,example retention summary,example training exclusion,example region,example dpa status,2026-04-28,2026-07-28,example owner,GET /api/governance/policy,example evidence ref,replace this row before production use

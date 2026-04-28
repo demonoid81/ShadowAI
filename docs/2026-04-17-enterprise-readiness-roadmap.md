@@ -37,6 +37,7 @@
 | Prod config hardening | ✅ | startup fail-fast for unsafe production config across auth/SIEM/legalhold/WORM/SA_v2/OIDC/SCIM |
 | LLM security validation SEC1 | ✅ | external assessor package: scope, rules of engagement, attack matrix, safe test corpus, evidence workflow and remediation template |
 | Enterprise identity IAM1 | ✅ | SAML gap assessment: OIDC + SCIM are supported; SAML is customer-dependent future adapter, not a current capability |
+| LLM provider vendor-risk VRM1 | ✅ | operator-owned provider assessment process, approved-provider register template, governance integration guidance |
 
 ### Что это означает
 

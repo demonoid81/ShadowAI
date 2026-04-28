@@ -116,6 +116,20 @@ curl -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 Department setup: users must have `department` set. Use `PUT /api/users/{id}` with `{"department":"finance"}`.
 
+### LLM provider vendor-risk
+
+Governance policy is the runtime enforcement of provider approval, not the
+approval process itself. Before adding a provider/model to governance:
+
+1. Complete `docs/compliance/templates/llm-provider-assessment-template.md`.
+2. Add or update the row in `docs/compliance/templates/approved-llm-provider-register.csv`.
+3. Confirm status is `approved` or `conditional` for the requested
+   department/sensitivity.
+4. Update `/api/governance/policy`.
+5. Capture the admin event and sample allow/deny evidence.
+
+Use `docs/compliance/llm-provider-vendor-risk.md` for the full process.
+
 ---
 
 ## 4. Evidence & Audit Chain (WORM)

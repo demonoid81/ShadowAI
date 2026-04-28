@@ -162,11 +162,11 @@ it describes:
 | Field | Detail |
 |-------|--------|
 | **Control objective** | LLM provider and model usage is governed by explicit policy. Unapproved provider/model combinations are denied before the request reaches the LLM API. |
-| **Implementation** | Per-org governance policy with modes: `disabled`, `allowlist_strict`, `role_based`, `context_scoped`. Proxy enforces policy on every request (in-process cache post G2.2 — DB-free hot path). `allowlist_strict`: only explicitly approved (provider, model) pairs allowed. `role_based`: per-role allowlists. `context_scoped`: (department, sensitivity, role) → allowlist. Deny-by-default for all modes except `disabled`. All governance decisions logged in `audit_logs` with `policy_action` field. LLM firewall (F7/F8) provides streaming content inspection and shadow semantic evaluation. |
-| **Evidence artifacts** | `provider_governance_policies` table. `audit_logs.policy_action` field. Governance decision code in audit events: `allowed`, `unknown_provider`, `unknown_model`, `unknown_role`, `sensitivity_denied`. Policy admin API: `PUT /governance/policy`. Prometheus metric: `shadowai_governance_cache_hits_total`. |
+| **Implementation** | Per-org governance policy with modes: `disabled`, `allowlist_strict`, `role_based`, `context_scoped`. Proxy enforces policy on every request (in-process cache post G2.2 — DB-free hot path). `allowlist_strict`: only explicitly approved (provider, model) pairs allowed. `role_based`: per-role allowlists. `context_scoped`: (department, sensitivity, role) → allowlist. Deny-by-default for all modes except `disabled`. All governance decisions logged in `audit_logs` with `policy_action` field. VRM1 adds an operator-owned LLM provider vendor-risk process with assessment template and approved-provider register; governance policy is the runtime enforcement of that approval decision. LLM firewall (F7/F8) provides streaming content inspection and shadow semantic evaluation. |
+| **Evidence artifacts** | `provider_governance_policies` table. `audit_logs.policy_action` field. Governance decision code in audit events: `allowed`, `unknown_provider`, `unknown_model`, `unknown_role`, `sensitivity_denied`. Policy admin API: `PUT /governance/policy`. Prometheus metric: `shadowai_governance_cache_hits_total`. VRM1 docs: `docs/compliance/llm-provider-vendor-risk.md`, `docs/compliance/templates/llm-provider-assessment-template.md`, `docs/compliance/templates/approved-llm-provider-register.csv`. |
 | **Owner** | Platform / security / compliance team |
 | **Cadence** | Continuous (per-request enforcement). Policy changes: admin action with audit trail. |
-| **Residual gap** | No third-party SSPM (SaaS Security Posture Management) integration. Policy export/report (full policy history across orgs) not available as a report — only queryable via DB. `semantic_v2` semantic evaluation is shadow-only by default (not enforced in production without operator gate). |
+| **Residual gap** | No third-party SSPM / TPRM feed integration and no automated diff between approved-provider register and live governance policy. Legal/commercial vendor due diligence remains operator-owned. Policy export/report (full policy history across orgs) not available as a report — only queryable via DB. `semantic_v2` semantic evaluation is shadow-only by default (not enforced in production without operator gate). |
 
 ---
 
@@ -240,7 +240,7 @@ audit engagement.
 | SAML IdP support | Access control | Not implemented; IAM1 assessment documents customer-dependent implementation path |
 | Formal Security Policy documentation | A.5.1 | Technical controls exist; policy document not yet written |
 | Business Continuity / Disaster Recovery plan | A.5.30 | DB backup/restore drill documented; formal BCP not written |
-| Vendor assessment for LLM providers | CC9.2 | Governance policy controls usage; no formal TPRM process |
+| Vendor assessment for LLM providers | CC9.2 | VRM1 process package exists; legal/commercial due diligence remains operator-owned |
 | BYOK / customer-managed encryption | C1.2 | Roadmap; not yet implemented |
 
 ---
@@ -289,8 +289,8 @@ incident management integration is built-in.
 ### Third-Party / Vendor Controls questions
 
 Point to §7 (per-org governance policy, deny-by-default allowlist, policy
-audit trail). Note that third-party risk management (TPRM) for LLM providers
-is not formally implemented.
+audit trail) and `docs/compliance/llm-provider-vendor-risk.md`. Be explicit
+that legal/commercial due diligence remains operator-owned.
 
 ### What NOT to say
 
@@ -313,6 +313,7 @@ is not formally implemented.
 | Admin event trail | `SELECT * FROM admin_event_logs WHERE ...` | Privileged action audit |
 | SIEM delivery metrics | Prometheus `shadowai_siem_*` | SIEM reliability evidence |
 | LLM external validation package | `docs/security/llm-red-team-validation-package.md` | Scope, attack matrix and evidence workflow for assessor-led testing |
+| LLM provider vendor-risk process | `docs/compliance/llm-provider-vendor-risk.md` | Assessment process, approved provider register and governance integration |
 | Governance policy | `GET /governance/policy` (admin) | Approved provider/model list |
 | Legal hold status | `GET /legal-holds` (admin) | Active holds and hold log |
 | CI pipeline | `.github/workflows/ci.yml` | Change control evidence |
