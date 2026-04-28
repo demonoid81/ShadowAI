@@ -150,7 +150,7 @@ it describes:
 | **Evidence artifacts** | Database schema migrations (`migrations/`). Org-scoped query patterns in `internal/*/repository.go`. Tenant bundle proof output: `audit-verify --bundle <tenant-bundle-dir> --verbose`. Smoke test: `backend/smoke/t2_tenant_isolation_smoke_test.go`. |
 | **Owner** | Platform team |
 | **Cadence** | Continuous (runtime enforcement). Smoke tests on every CI run. |
-| **Residual gap** | No formal penetration test or third-party tenant isolation assessment. Row-level security not enforced at the database layer (enforcement is in application code only). Single-database deployment: no physical DB-level tenant separation. |
+| **Residual gap** | SEC1 provides a scoped LLM security validation package for external assessors, but no formal penetration test or third-party tenant isolation assessment has been executed yet. Row-level security is not enforced at the database layer (enforcement is in application code only). Single-database deployment: no physical DB-level tenant separation. |
 
 ---
 
@@ -226,7 +226,7 @@ audit engagement.
 
 | Gap | Category | Notes |
 |-----|----------|-------|
-| Formal penetration test / third-party tenant isolation assessment | Tenant isolation, CC6.3 | Product-complete in code; not independently verified |
+| Formal penetration test / third-party tenant isolation assessment | Tenant isolation, CC6.3 | SEC1 readiness package exists; not independently executed or attested |
 | SOC 2 Type I / II audit engagement | All | No third-party auditor engaged |
 | ISO 27001 certification | All | No certification body engaged |
 | Automated SIEM delivery failure alert | Security monitoring | Prometheus rule must be operator-configured |
@@ -271,8 +271,9 @@ policy, not a fixed minimum.
 ### Multi-tenancy / Data Isolation questions
 
 Point to §6 (org-scoped rows on all tables, application-layer enforcement). Be
-explicit that **no formal penetration test has been conducted** and that
-row-level security is application-level only.
+explicit that **a scoped SEC1 external validation package exists but no formal
+penetration test has been conducted** and that row-level security is
+application-level only.
 
 ### Security Monitoring questions
 
@@ -311,6 +312,7 @@ is not formally implemented.
 | S3 retention posture | `audit-evidence-report --bucket ... --require-lock` | WORM retention coverage |
 | Admin event trail | `SELECT * FROM admin_event_logs WHERE ...` | Privileged action audit |
 | SIEM delivery metrics | Prometheus `shadowai_siem_*` | SIEM reliability evidence |
+| LLM external validation package | `docs/security/llm-red-team-validation-package.md` | Scope, attack matrix and evidence workflow for assessor-led testing |
 | Governance policy | `GET /governance/policy` (admin) | Approved provider/model list |
 | Legal hold status | `GET /legal-holds` (admin) | Active holds and hold log |
 | CI pipeline | `.github/workflows/ci.yml` | Change control evidence |

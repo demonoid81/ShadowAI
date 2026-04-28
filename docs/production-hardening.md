@@ -306,7 +306,7 @@ evidenceAuditReport:
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
 | Legal hold selector privacy | Portable evidence bundles include `selector_manifest.jsonl` for query-scope auditor explainability. The v1 bundle exports selector JSON plus hash; it does not yet offer a hash-only or BYOK-encrypted selector export mode | Use tenant-scoped exports for least disclosure; use WORM `legal_hold_events` selector hash for integrity; defer hash-only/BYOK selector bundles to L8.2/BYOK |
 | BYOK: not implemented | Payload fields are plaintext (BYOK1 is design only) | See BYOK1 RFC; implement BYOK2 after customer requirement |
-| No formal pen test | Tenant isolation validated in code/smoke tests; no third-party assessment | Schedule before regulated-industry go-live |
+| No formal pen test | SEC1 provides a scoped LLM security validation package, but no external assessor has executed it yet | Schedule external validation before regulated-industry go-live; use `docs/security/llm-red-team-validation-package.md` |
 | Single immudb anchor sink | Second independent anchor sink improves WORM durability | W7 documents this as known gap |
 | Restore drill: manual | `audit-verify --restore-drill` automates the commands but drill execution is still manual | Document drill date in incident log; quarterly cadence recommended |
 | No SAML support | OIDC only | SAML not planned unless required by target customers |

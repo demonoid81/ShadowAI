@@ -35,6 +35,7 @@
 | Production ops O1/O3 | ✅ | Docker/Helm, migrations init, health/readiness, Prometheus alerts, smoke harness, deploy runbooks |
 | CI / release gates | ✅ | core/enterprise/integration/smoke tests, Docker build, Helm validate, migration smoke, security jobs |
 | Prod config hardening | ✅ | startup fail-fast for unsafe production config across auth/SIEM/legalhold/WORM/SA_v2/OIDC/SCIM |
+| LLM security validation SEC1 | ✅ | external assessor package: scope, rules of engagement, attack matrix, safe test corpus, evidence workflow and remediation template |
 
 ### Что это означает
 
