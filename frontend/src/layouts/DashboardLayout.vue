@@ -150,7 +150,8 @@ const navGroups = computed(() => {
       items: [
         { to: '/policies', code: 'GP', labelKey: 'nav.policies', captionKey: 'layout.navCaptions.policies', adminOnly: true },
         { to: '/budget', code: 'BC', labelKey: 'nav.budget', captionKey: 'layout.navCaptions.budget' },
-        { to: '/providers', code: 'VR', labelKey: 'nav.providers', captionKey: 'layout.navCaptions.providers' }
+        { to: '/providers', code: 'VR', labelKey: 'nav.providers', captionKey: 'layout.navCaptions.providers' },
+        { to: '/tenants', code: 'TN', labelKey: 'nav.tenants', captionKey: 'layout.navCaptions.tenants', adminOnly: true }
       ]
     },
     {
@@ -165,14 +166,16 @@ const navGroups = computed(() => {
       key: 'evidence',
       labelKey: 'layout.groups.evidence',
       items: [
-        { to: '/evidence', code: 'EV', labelKey: 'nav.evidence', captionKey: 'layout.navCaptions.evidence', adminOnly: true }
+        { to: '/evidence', code: 'EV', labelKey: 'nav.evidence', captionKey: 'layout.navCaptions.evidence', adminOnly: true },
+        { to: '/compliance', code: 'CO', labelKey: 'nav.compliance', captionKey: 'layout.navCaptions.compliance', adminOnly: true }
       ]
     },
     {
       key: 'operate',
       labelKey: 'layout.groups.operate',
       items: [
-        { to: '/users', code: 'ID', labelKey: 'nav.users', captionKey: 'layout.navCaptions.users', adminOnly: true }
+        { to: '/users', code: 'ID', labelKey: 'nav.users', captionKey: 'layout.navCaptions.users', adminOnly: true },
+        { to: '/operations', code: 'OP', labelKey: 'nav.operations', captionKey: 'layout.navCaptions.operations', adminOnly: true }
       ]
     }
   ]

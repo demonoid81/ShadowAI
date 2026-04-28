@@ -12,6 +12,9 @@
     "providers": "Providers",
     "firewall": "Firewall",
     "evidence": "Evidence",
+    "tenants": "Tenants",
+    "compliance": "Compliance",
+    "operations": "Operations",
     "internalDb": "Internal DB",
     "logout": "Logout"
   },
@@ -33,8 +36,11 @@
       "policies": "Provider/model control",
       "budget": "Spend guardrails",
       "providers": "Vendor connectivity",
+      "tenants": "Org isolation",
       "firewall": "LLM security runtime",
       "evidence": "Chain-of-custody",
+      "compliance": "Auditor workflow",
+      "operations": "Go/no-go controls",
       "internalDb": "Data boundary tools",
       "users": "Identity lifecycle"
     },
@@ -303,6 +309,191 @@
         "title": "Restore drill remains operator-owned",
         "body": "The command is automated, but scheduling, execution and evidence retention remain an operational control."
       }
+    }
+  },
+  "tenants": {
+    "title": "Tenant control plane for organization isolation, SCIM onboarding and org-level guardrails.",
+    "subtitle": "This view documents the implemented multi-tenant governance model: org_id runtime boundary, per-org SCIM tokens, scoped evidence bundles, tenant purge and aggregate budget caps.",
+    "tags": {
+      "org": "org_id boundary",
+      "scim": "SCIM per org",
+      "globalAdmin": "global_admin",
+      "budget": "org budgets"
+    },
+    "controls": {
+      "boundary": {
+        "title": "Runtime org boundary",
+        "body": "User-facing, audit, governance and internal DB queries are scoped by org_id from authenticated claims. JWT is not treated as source of truth without DB resolution.",
+        "artifact": "Artifact: scoped repositories, org_id columns, tenant smoke tests"
+      },
+      "scim": {
+        "title": "Per-org SCIM provisioning",
+        "body": "A SCIM bearer token resolves to org_id; externalId and email-link lookup happen inside that organization.",
+        "artifact": "Artifact: scim_tokens, UserSyncer.WithOrgID"
+      },
+      "budget": {
+        "title": "Aggregate org budget caps",
+        "body": "Org budget checks aggregate user spend for the organization and uses atomic reservation in enforce mode.",
+        "artifact": "Artifact: orgbudget service, AtomicCheckAndAdd, Adjust"
+      },
+      "evidence": {
+        "title": "Tenant evidence without cross-tenant hashes",
+        "body": "Tenant bundle exports only org rows and Merkle subset proofs, not the full global chain inventory.",
+        "artifact": "Artifact: tenant_chain_hashes.jsonl, tenant_merkle_proofs.jsonl"
+      },
+      "global": {
+        "title": "Global admin workflows",
+        "body": "global_admin manages organizations and SCIM tokens, while source_org_id/target_org_id are written to the admin evidence trail.",
+        "artifact": "Artifact: /api/orgs/*, admin_event_logs source/target org"
+      },
+      "purge": {
+        "title": "Scoped purge controls",
+        "body": "Tenant purge requires explicit --org-id; global purge requires --all-orgs. Unsafe implicit scope is rejected.",
+        "artifact": "Artifact: audit-purge --org-id / --all-orgs"
+      }
+    },
+    "flowKicker": "Tenant lifecycle",
+    "flowTitle": "How an organization moves from creation to auditor export",
+    "lifecycle": {
+      "create": {
+        "title": "Create organization",
+        "body": "global_admin creates the org and receives a machine-readable admin event with target_org_id."
+      },
+      "provision": {
+        "title": "SCIM provisioning",
+        "body": "The IdP uses an org-bound token; deprovision bumps token_version and invalidates sessions."
+      },
+      "govern": {
+        "title": "Governance and budget",
+        "body": "Per-org provider policy, context scoped routing and budget caps are enforced on the proxy hot path."
+      },
+      "export": {
+        "title": "Tenant evidence export",
+        "body": "The auditor receives a tenant bundle with Merkle proofs and an explicit scope disclaimer."
+      }
+    },
+    "commandsKicker": "Operator commands",
+    "commandsTitle": "Commands that produce real tenant artifacts",
+    "commands": {
+      "exportTenant": "Tenant-scoped evidence bundle",
+      "purgeTenant": "Tenant-scoped purge",
+      "verifyTenant": "Offline tenant bundle verification"
+    }
+  },
+  "compliance": {
+    "title": "Compliance workspace for SOC2/ISO evidence, access review and retention reports.",
+    "subtitle": "This is not a certification or legal opinion. The view shows which packages, reports and runbooks already exist for auditor workflow and security questionnaires.",
+    "disclaimerKicker": "Compliance boundary",
+    "disclaimer": "ShadowAI can collect evidence artifacts and control mappings, but final attestation remains with the auditor/customer. The UI must not claim SOC2/ISO certification.",
+    "tags": {
+      "soc2": "SOC2 mapping",
+      "iso": "ISO control language",
+      "access": "Access review",
+      "evidence": "Evidence package"
+    },
+    "controls": {
+      "mapping": {
+        "title": "SOC2 / ISO control mapping",
+        "body": "The document maps implemented controls to auditor-facing evidence and honestly lists remaining gaps.",
+        "artifact": "Artifact: docs/compliance/soc2-iso-control-mapping.md"
+      },
+      "collect": {
+        "title": "Quarterly evidence package",
+        "body": "The collector gathers a control snapshot, retention report, chain verify summary, access review and not_collected reasons.",
+        "artifact": "Artifact: audit-collect-evidence"
+      },
+      "access": {
+        "title": "Privileged access review",
+        "body": "The report surfaces global_admin, org_admin, admins without MFA, break-glass and unlinked privileged users.",
+        "artifact": "Artifact: audit-access-review"
+      },
+      "validation": {
+        "title": "Production validation pack",
+        "body": "Go/no-go reporting combines Helm render, readiness, evidence verification, CronJob posture and Object Lock configuration.",
+        "artifact": "Artifact: shadowai-prod-validate"
+      },
+      "vendor": {
+        "title": "Vendor governance response",
+        "body": "Security questionnaire language separates implemented controls from roadmap gaps and prevents overclaiming.",
+        "artifact": "Artifact: compliance runbooks and mapping"
+      },
+      "gaps": {
+        "title": "Current gaps are explicit",
+        "body": "Pen test, customer-specific SAML deltas, broader BYOK epochs and external auditor execution remain separate work items.",
+        "artifact": "Artifact: Current Gaps / Not Covered"
+      }
+    },
+    "packageKicker": "Audit package",
+    "packageTitle": "What goes into the evidence collection bundle",
+    "package": {
+      "mapping": "Control mapping snapshot",
+      "retention": "S3 Object Lock retention report",
+      "chain": "WORM chain / anchor verification summary",
+      "access": "Privileged access review",
+      "notCollected": "Explicit not_collected.json"
+    },
+    "commandsKicker": "Auditor workflow",
+    "commandsTitle": "Commands for the quarterly evidence cycle",
+    "commands": {
+      "collect": "Collect quarterly evidence package",
+      "access": "Run privileged access review",
+      "retention": "Verify S3 retention posture"
+    }
+  },
+  "operations": {
+    "title": "Operations cockpit for production readiness, restore drills, SIEM delivery and BYOK rollout.",
+    "subtitle": "This view does not show live health. It collects operating procedures that turn backend controls into a repeatable production process.",
+    "tags": {
+      "prod": "PROD1",
+      "alerts": "alerts",
+      "restore": "restore drill",
+      "byok": "BYOK"
+    },
+    "cards": {
+      "validation": {
+        "title": "Go / no-go validation",
+        "body": "The production validation pack checks config, Helm, readiness, evidence and critical CronJob/alert assumptions before rollout."
+      },
+      "siem": {
+        "title": "SIEM delivery posture",
+        "body": "Async batching, retry, backpressure and delivery metrics reduce operational risk around admin/security event delivery."
+      },
+      "restore": {
+        "title": "Restore drill with keyrings",
+        "body": "The W7 key epoch model verifies chain, anchors and signatures after restore without depending on one legacy key."
+      },
+      "byok": {
+        "title": "BYOK audit payload rollout",
+        "body": "Vault Transit encrypts new audit request/response payloads; legacy rows are handled by the sweep command."
+      }
+    },
+    "runbookKicker": "Production runbook",
+    "runbookTitle": "Operational sequence without manual improvisation",
+    "runbook": {
+      "preflight": {
+        "title": "Preflight validation",
+        "body": "Before deploy, operators run the render/validation pack and check secrets, prod gates and evidence storage prerequisites."
+      },
+      "deploy": {
+        "title": "Deploy and observe",
+        "body": "Helm rollout uses probes, PDB/HPA and Prometheus alerts; streaming incremental remains gated until the proof-window is complete."
+      },
+      "evidence": {
+        "title": "Evidence automation",
+        "body": "CronJobs export bundles, verify them offline and publish them to PVC/S3 with retention controls."
+      },
+      "archive": {
+        "title": "Quarterly archive",
+        "body": "Compliance package, access review and retention report are archived as auditor-ready artifacts."
+      }
+    },
+    "commandsKicker": "Operator commands",
+    "commandsTitle": "Runbook commands without fake status",
+    "commands": {
+      "validate": "Production validation report",
+      "restore": "Restore drill verification",
+      "byok": "BYOK legacy payload sweep",
+      "smoke": "Enterprise smoke suite"
     }
   },
   "users": {
