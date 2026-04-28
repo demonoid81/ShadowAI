@@ -289,7 +289,7 @@ func main() {
 	// wiring в enterprise_wire.go.
 	entBundle := buildEnterpriseBundle(enterpriseDeps{
 		DB: db, Cfg: cfg, AuditRepo: auditRepo, BudgetRepo: budgetRepo, AuditSvc: auditSvc,
-		AuthRepo: authRepo, AuthSvc: authSvc,
+		RedisClient: redisClient, AuthRepo: authRepo, AuthSvc: authSvc,
 	})
 
 	// Handlers. Все принимают enterprise-интерфейсы опционально (nil-

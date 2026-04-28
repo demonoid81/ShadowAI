@@ -20,6 +20,7 @@ import (
 	"database/sql"
 
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/shadowai/backend/internal/adminaudit"
 	"github.com/shadowai/backend/internal/audit"
@@ -80,12 +81,13 @@ type enterpriseBundle struct {
 // *Repository (satisfy enterprise-specific AuditScrubber /
 // BudgetDeleter interfaces из auth/erasure.go).
 type enterpriseDeps struct {
-	DB         *sql.DB
-	Cfg        *config.Config
-	AuditRepo  *audit.Repository
-	BudgetRepo *budget.Repository
-	AuditSvc   *audit.Service
+	DB          *sql.DB
+	Cfg         *config.Config
+	AuditRepo   *audit.Repository
+	BudgetRepo  *budget.Repository
+	AuditSvc    *audit.Service
+	RedisClient *redis.Client
 	// PR-E1: OIDC user sync needs the auth repository and service.
-	AuthRepo   *auth.Repository
-	AuthSvc    *auth.Service
+	AuthRepo *auth.Repository
+	AuthSvc  *auth.Service
 }

@@ -116,6 +116,26 @@ curl -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 Department setup: users must have `department` set. Use `PUT /api/users/{id}` with `{"department":"finance"}`.
 
+### Emergency provider/model block
+
+Policy updates are write-through on the serving replica and distributed to other
+replicas through Redis pub/sub. The cache invalidation is scoped to the changed
+`org_id`; unrelated org policies remain cached.
+
+Emergency procedure:
+
+1. Remove the provider/model from `/api/governance/policy` or add an explicit
+   empty `rules` entry for the affected `context_scoped` rule.
+2. Send a test request from a different pod or through the load balancer.
+3. Confirm the request is denied before upstream call.
+4. Check `shadowai_governance_cache_invalidations_total` increases on other
+   replicas.
+5. Check `shadowai_governance_cache_invalidation_publish_errors_total == 0`.
+
+If publish errors are non-zero, assume some replicas may converge only through
+TTL fallback. Restart pods or temporarily route traffic to a verified replica
+for urgent incidents.
+
 ### LLM provider vendor-risk
 
 Governance policy is the runtime enforcement of provider approval, not the

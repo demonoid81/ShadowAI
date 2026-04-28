@@ -105,9 +105,14 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 	// Provider/Model Governance (PR-G1). Singleton via migration 012.
 	// PR-G2.2: CachingRepository wraps PGRepository to keep the proxy hot path
 	// DB-free. First Evaluate per org loads from DB; subsequent calls hit the
-	// in-process snapshot. Upsert writes through immediately. TTL fallback (60s)
-	// handles multi-replica deployments where another replica updated the policy.
-	governanceRepo := governance.NewCachingRepository(governance.NewPGRepository(deps.DB))
+	// in-process snapshot. Upsert writes through immediately.
+	// PR-G2.3: Redis pub/sub invalidates other replicas after policy update;
+	// TTL remains only a fallback if Redis delivery is unavailable.
+	governanceInvalidationBus := governance.NewRedisInvalidationBus(deps.RedisClient)
+	governanceRepo := governance.NewCachingRepository(
+		governance.NewPGRepository(deps.DB),
+		governance.WithInvalidationPublisher(governanceInvalidationBus),
+	)
 	governanceSvc := governance.NewService(governanceRepo)
 	governanceHandler := governance.NewHandler(governanceSvc, adminAuditRecorder)
 
@@ -265,6 +270,9 @@ func buildEnterpriseBundle(deps enterpriseDeps) *enterpriseBundle {
 			// Worker runs until ctx is cancelled; drains queue on shutdown.
 			if siemAsync != nil {
 				go siemAsync.Run(ctx)
+			}
+			if governanceInvalidationBus != nil {
+				go governanceInvalidationBus.Run(ctx, governanceRepo)
 			}
 
 			// PR-A: audit-purge scheduler для audit_logs.

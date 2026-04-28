@@ -38,6 +38,7 @@
 | LLM security validation SEC1 | ✅ | external assessor package: scope, rules of engagement, attack matrix, safe test corpus, evidence workflow and remediation template |
 | Enterprise identity IAM1 | ✅ | SAML gap assessment: OIDC + SCIM are supported; SAML is customer-dependent future adapter, not a current capability |
 | LLM provider vendor-risk VRM1 | ✅ | operator-owned provider assessment process, approved-provider register template, governance integration guidance |
+| Governance invalidation G2.3 | ✅ | Redis pub/sub org-scoped invalidation removes multi-replica TTL lag for policy updates; TTL remains fallback |
 
 ### Что это означает
 

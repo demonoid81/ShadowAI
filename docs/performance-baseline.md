@@ -186,9 +186,10 @@ go run ./backend/cmd/shadowai-bench \
   the proxy hot path when the cache is warm (G2.2 design goal met).
 - `GovernanceCacheMiss` (~884 RPS) reflects the 1ms simulated DB latency.
   With real PostgreSQL on LAN, expect 1–5ms → 200–1000 RPS for cold-org requests.
-- Multi-replica TTL gap: per the known limit in `docs/production-hardening.md`,
-  policy updates propagate within 60s (TTL). This is reflected by ~884 first-request
-  overhead, which is acceptable for policy-change scenarios.
+- Multi-replica propagation: policy updates publish Redis invalidation for the
+  affected org. TTL remains only the fallback path if Redis pub/sub delivery is
+  unavailable. The ~884 first-request overhead reflects DB reload after cache
+  miss, explicit invalidation, or TTL fallback.
 
 ### SIEM Async Queue (enterprise build)
 

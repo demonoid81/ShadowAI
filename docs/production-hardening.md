@@ -23,20 +23,23 @@ Related: [`docs/runbooks/production.md`](runbooks/production.md) · [`docs/evide
 | SIEM async queue saturation | 1 000 events (default); burst beyond this triggers drop_oldest | Tune SIEM_QUEUE_SIZE for high-throughput deployments |
 | Evidence export bundle size | Up to ~5 GB per global export (PVC) | Larger deployments should use S3 storage mode |
 | Legal hold count | No hard limit; hot path is single index lookup on target_user_id | |
-| Tenant count (org_id) | Tested with per-org isolation; no hard limit | Governance cache TTL=60s per org |
-| Replicas | 3 – 10 (HPA) | Multi-replica: governance cache is in-process per replica (TTL-based sync) |
+| Tenant count (org_id) | Tested with per-org isolation; no hard limit | Governance cache is per org; Redis invalidation propagates policy updates |
+| Replicas | 3 – 10 (HPA) | Multi-replica: governance cache is in-process per replica with Redis pub/sub invalidation and TTL fallback |
 | Kubernetes version | ≥ 1.27 | CronJob, PDB, PrometheusRule CRD required |
 | PostgreSQL version | ≥ 14 | pg_advisory_xact_lock, partial unique indexes |
 
-### Multi-replica known limitation
+### Multi-replica governance invalidation
 
-The governance policy cache (`CachingRepository`) invalidates on same-replica `UpsertPolicy`
-only. Replicas serving other pods see stale policy for up to 60 s (default TTL).
-This is documented as a **known limit** and is acceptable for governance policy changes
-that are not latency-critical (policy applies to new requests, not in-flight).
+The governance policy cache (`CachingRepository`) writes through on same-replica
+`UpsertPolicy` and publishes a Redis invalidation event for other replicas.
+Other replicas drop only the affected `org_id` cache entry; the next request
+reloads from PostgreSQL without waiting for the 60 s TTL fallback.
 
-For strict real-time policy propagation: set `GOVERNANCE_CACHE_TTL=0` to disable the
-in-process cache and always hit the DB. This increases DB load.
+If Redis pub/sub delivery is unavailable, the policy still converges through the
+TTL fallback. Operators should alert on
+`shadowai_governance_cache_invalidation_publish_errors_total` because emergency
+provider/model blocks may otherwise take up to the fallback window to reach all
+replicas.
 
 ---
 
@@ -247,8 +250,10 @@ Token is returned once. Store in IdP SCIM connector immediately.
 
 ### Governance cache and multi-tenant
 
-Per-org governance policy is cached independently. `UpsertPolicy` on org A does not
-invalidate org B's cache. TTL (60s) is the only cross-replica synchronization mechanism.
+Per-org governance policy is cached independently. `UpsertPolicy` on org A
+publishes an invalidation for org A only and does not invalidate org B's cache.
+Redis pub/sub is the primary cross-replica synchronization mechanism; TTL is the
+fallback convergence path.
 
 ---
 
@@ -301,7 +306,6 @@ evidenceAuditReport:
 
 | Limit | Description | Mitigation / Future work |
 |-------|-------------|--------------------------|
-| Governance cache multi-replica lag | Policy updates visible in ≤ 60s on all replicas | Reduce TTL or restart pod for immediate propagation; distributed invalidation is future work |
 | Streaming incremental: cross-chunk PII sanitize | F7.8 fail-closes unsafe sanitize verdicts when a sensitive match spans already emitted chunks. It does not retroactively rewrite bytes that were already sent | Keep proof-window audit review mandatory; monitor `stream_blocked_midflight` / `shadowai_streaming_midstream_block_total` for cross-chunk spikes before removing the prod gate |
 | Evidence export: O(n) bundle size with org count | Global export grows with audit log volume; no streaming export | Use per-tenant export mode for large deployments |
 | Legal hold selector privacy | Portable evidence bundles include `selector_manifest.jsonl` for query-scope auditor explainability. The v1 bundle exports selector JSON plus hash; it does not yet offer a hash-only or BYOK-encrypted selector export mode | Use tenant-scoped exports for least disclosure; use WORM `legal_hold_events` selector hash for integrity; defer hash-only/BYOK selector bundles to L8.2/BYOK |

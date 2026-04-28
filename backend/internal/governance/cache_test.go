@@ -5,6 +5,7 @@ package governance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -157,6 +158,86 @@ func TestCache_DoD_Upsert_UpdatesCache(t *testing.T) {
 	if repo.Metrics().Hits() < 1 {
 		t.Errorf("expected at least 1 hit after Upsert write-through, got %d", repo.Metrics().Hits())
 	}
+}
+
+// TestCache_DistributedInvalidation_RefreshesRemoteReplica verifies G2.3:
+// when replica A updates policy, replica B invalidates its cached snapshot and
+// reloads on the next request without waiting for the TTL.
+func TestCache_DistributedInvalidation_RefreshesRemoteReplica(t *testing.T) {
+	inner := &orgSwitchRepo{policies: map[string]*Policy{"org-emergency": strictPolicy("old")}}
+	remoteReplica := NewCachingRepository(inner, WithTTL(time.Hour))
+	ctx := context.Background()
+
+	// Replica B caches the old policy with a long TTL.
+	oldPolicy, err := remoteReplica.GetActive(ctx, "org-emergency")
+	if err != nil {
+		t.Fatalf("remote initial GetActive: %v", err)
+	}
+	if oldPolicy == nil || oldPolicy.ID != "old" {
+		t.Fatalf("remote initial policy=%v, want old", oldPolicy)
+	}
+
+	publisher := &forwardingInvalidationPublisher{target: remoteReplica}
+	updatingReplica := NewCachingRepository(inner, WithTTL(time.Hour), WithInvalidationPublisher(publisher))
+
+	// Replica A writes the emergency block.
+	if _, err := updatingReplica.Upsert(ctx, strictPolicy("emergency-block"), "admin-1", "org-emergency"); err != nil {
+		t.Fatalf("updating Upsert: %v", err)
+	}
+
+	// Replica B must not serve its old cached copy.
+	got, err := remoteReplica.GetActive(ctx, "org-emergency")
+	if err != nil {
+		t.Fatalf("remote GetActive after invalidation: %v", err)
+	}
+	if got == nil || got.ID != "emergency-block" {
+		t.Fatalf("remote policy after invalidation=%v, want emergency-block", got)
+	}
+	if remoteReplica.Metrics().Invalidations() != 1 {
+		t.Errorf("remote invalidations=%d, want 1", remoteReplica.Metrics().Invalidations())
+	}
+	if publisher.calls.Load() != 1 {
+		t.Errorf("publisher calls=%d, want 1", publisher.calls.Load())
+	}
+}
+
+// TestCache_DistributedInvalidation_PublishErrorVisible verifies that a Redis
+// publish failure is not silent: the write-through cache remains correct in the
+// local replica, and the publish error metric increments for operators.
+func TestCache_DistributedInvalidation_PublishErrorVisible(t *testing.T) {
+	inner := &countingRepo{policy: strictPolicy("old")}
+	repo := NewCachingRepository(inner, WithInvalidationPublisher(errorInvalidationPublisher{}))
+
+	if _, err := repo.Upsert(context.Background(), strictPolicy("new"), "admin-1", "org-puberr"); err != nil {
+		t.Fatalf("Upsert should persist even when invalidation publish fails: %v", err)
+	}
+	if repo.Metrics().InvalidationPublishErrors() != 1 {
+		t.Errorf("InvalidationPublishErrors=%d, want 1", repo.Metrics().InvalidationPublishErrors())
+	}
+	got, err := repo.GetActive(context.Background(), "org-puberr")
+	if err != nil {
+		t.Fatalf("GetActive after publish error: %v", err)
+	}
+	if got == nil || got.ID != "new" {
+		t.Fatalf("local policy after publish error=%v, want new", got)
+	}
+}
+
+type forwardingInvalidationPublisher struct {
+	target *CachingRepository
+	calls  atomic.Int64
+}
+
+func (p *forwardingInvalidationPublisher) PublishGovernanceInvalidation(_ context.Context, orgID, _ string) error {
+	p.calls.Add(1)
+	p.target.Invalidate(orgID)
+	return nil
+}
+
+type errorInvalidationPublisher struct{}
+
+func (errorInvalidationPublisher) PublishGovernanceInvalidation(context.Context, string, string) error {
+	return fmt.Errorf("redis publish failed")
 }
 
 // TestCache_DoD_ReloadError_FailClosed verifies: DB error on cache miss returns
