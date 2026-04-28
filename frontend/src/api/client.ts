@@ -2,6 +2,10 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api' })
 
+function isPublicAuthPath(url?: string) {
+  return url === '/auth/login' || url === '/auth/mfa/verify' || url === '/auth/break-glass'
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -13,7 +17,7 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    if (err.response?.status === 401 && !isPublicAuthPath(err.config?.url)) {
       localStorage.removeItem('token')
       window.location.href = '/login'
     }

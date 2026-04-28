@@ -14,6 +14,11 @@ const router = createRouter({
       meta: { public: true }
     },
     {
+      path: '/mfa/verify',
+      component: () => import('../pages/MFAVerifyPage.vue'),
+      meta: { public: true }
+    },
+    {
       path: '/',
       component: () => import('../layouts/DashboardLayout.vue'),
       children: [
@@ -30,6 +35,7 @@ const router = createRouter({
         { path: 'compliance', component: () => import('../pages/CompliancePage.vue') },
         { path: 'operations', component: () => import('../pages/OperationsPage.vue') },
         { path: 'settings', component: () => import('../pages/SettingsPage.vue') },
+        { path: 'security', component: () => import('../pages/SecurityPage.vue') },
         { path: 'internal-db', component: () => import('../pages/InternalDbPage.vue') }
       ]
     }

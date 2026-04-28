@@ -16,6 +16,7 @@
     "compliance": "Compliance",
     "operations": "Operations",
     "settings": "Настройки",
+    "security": "Security",
     "internalDb": "Внутренние БД",
     "logout": "Выйти"
   },
@@ -43,6 +44,7 @@
       "compliance": "Auditor workflow",
       "operations": "Go/no-go controls",
       "settings": "Control posture",
+      "security": "MFA, OIDC, API keys",
       "internalDb": "Data boundary tools",
       "users": "Identity lifecycle"
     },
@@ -74,7 +76,22 @@
     "rotateSuccess": "API-ключ обновлён",
     "revokeSuccess": "Все токены отозваны",
     "copyKey": "Копировать",
-    "copied": "Скопировано!"
+    "copied": "Скопировано!",
+    "mfaVerifyTitle": "MFA verification",
+    "mfaVerifyBody": "Введите одноразовый код из authenticator app, чтобы завершить вход.",
+    "mfaCode": "MFA code",
+    "mfaTokenMissing": "MFA challenge token отсутствует или истёк. Вернитесь на login.",
+    "verifyMfa": "Проверить MFA",
+    "verifying": "Проверка...",
+    "mfaInvalid": "Некорректный MFA code",
+    "backToLogin": "Вернуться к login",
+    "oidcLogin": "Войти через OIDC",
+    "breakGlassLink": "Emergency break-glass access",
+    "normalLoginLink": "Вернуться к обычному login",
+    "breakGlassWarning": "Break-glass используется только при аварии IdP или admin lockout. Успешный вход будет зааудирован; секрет нужно ротировать после использования.",
+    "breakGlassSecret": "Break-glass secret",
+    "breakGlassSubmit": "Войти в emergency mode",
+    "breakGlassError": "Break-glass login failed"
   },
   "dashboard": {
     "title": "Дашборд",
@@ -202,6 +219,43 @@
     "monthlySpend": "Расходы за месяц",
     "tokenUsage": "Использование токенов",
     "noBudget": "Бюджет не настроен."
+  },
+  "security": {
+    "title": "Security profile для MFA, OIDC и API credentials.",
+    "subtitle": "Экран показывает authenticated identity context и даёт безопасные действия: MFA enrollment, API key rotation, token revoke и OIDC entrypoint.",
+    "identityKicker": "Identity",
+    "identityTitle": "Session claims",
+    "orgId": "Org ID",
+    "department": "Department",
+    "mfaVerified": "MFA verified",
+    "mfaKicker": "Authenticator",
+    "mfaTitle": "TOTP MFA enrollment",
+    "mfaBody": "Setup token хранит pending secret до confirm. Секрет не сохраняется в DB, пока код не подтверждён.",
+    "breakGlassMfaBlocked": "Break-glass sessions не могут управлять MFA, потому что не имеют DB user.",
+    "mfaAdminOnly": "MFA enrollment endpoint доступен только tenant admin role. Для global_admin или обычного пользователя backend вернёт forbidden, поэтому UI не показывает действие.",
+    "startMfaSetup": "Начать MFA setup",
+    "setupUriTitle": "Provisioning URI",
+    "setupUriBody": "Добавьте URI в authenticator app вручную или через QR-инструмент вне ShadowAI, затем подтвердите первый code.",
+    "confirmMfa": "Подтвердить MFA",
+    "disableMfa": "Отключить MFA",
+    "disableConfirm": "Отключить MFA для текущего пользователя?",
+    "setupStarted": "MFA setup token создан. Подтвердите код, чтобы включить MFA.",
+    "setupFailed": "Не удалось начать MFA setup.",
+    "mfaEnabled": "MFA включена. Текущие сессии могут быть инвалидированы backend-ом.",
+    "confirmFailed": "Не удалось подтвердить MFA code.",
+    "mfaDisabled": "MFA отключена.",
+    "disableFailed": "Не удалось отключить MFA.",
+    "apiKeyKicker": "API access",
+    "apiKeyTitle": "API key and session tokens",
+    "apiKeyBody": "Rotated API key показывается один раз. Revoke tokens инвалидирует существующие JWT через token_version.",
+    "apiKeyOneTime": "One-time API key",
+    "clearApiKey": "Скрыть API key",
+    "apiKeyFailed": "Не удалось обновить API key.",
+    "revokeConfirm": "Отозвать все текущие tokens для пользователя?",
+    "revokeFailed": "Не удалось отозвать tokens.",
+    "oidcKicker": "Federated login",
+    "oidcTitle": "OIDC entrypoint",
+    "oidcBody": "Если OIDC включён на backend, ссылка начнёт authorization flow. Если OIDC не настроен, backend вернёт безопасную ошибку/404."
   },
   "evidence": {
     "title": "Chain-of-custody evidence для аудиторов и операторов.",
@@ -799,6 +853,8 @@
     "confirm": "Подтвердить",
     "close": "Закрыть",
     "language": "Язык",
-    "details": "Подробнее"
+    "details": "Подробнее",
+    "yes": "Да",
+    "no": "Нет"
   }
 }

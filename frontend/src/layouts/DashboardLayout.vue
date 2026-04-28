@@ -175,6 +175,7 @@ const navGroups = computed(() => {
       labelKey: 'layout.groups.operate',
       items: [
         { to: '/users', code: 'ID', labelKey: 'nav.users', captionKey: 'layout.navCaptions.users', adminOnly: true },
+        { to: '/security', code: 'SC', labelKey: 'nav.security', captionKey: 'layout.navCaptions.security' },
         { to: '/operations', code: 'OP', labelKey: 'nav.operations', captionKey: 'layout.navCaptions.operations', adminOnly: true },
         { to: '/settings', code: 'ST', labelKey: 'nav.settings', captionKey: 'layout.navCaptions.settings', adminOnly: true }
       ]

@@ -16,6 +16,7 @@
     "compliance": "Compliance",
     "operations": "Operations",
     "settings": "Settings",
+    "security": "Security",
     "internalDb": "Internal DB",
     "logout": "Logout"
   },
@@ -43,6 +44,7 @@
       "compliance": "Auditor workflow",
       "operations": "Go/no-go controls",
       "settings": "Control posture",
+      "security": "MFA, OIDC, API keys",
       "internalDb": "Data boundary tools",
       "users": "Identity lifecycle"
     },
@@ -74,7 +76,22 @@
     "rotateSuccess": "API key rotated",
     "revokeSuccess": "All tokens revoked",
     "copyKey": "Copy",
-    "copied": "Copied!"
+    "copied": "Copied!",
+    "mfaVerifyTitle": "MFA verification",
+    "mfaVerifyBody": "Enter the one-time code from your authenticator app to finish sign-in.",
+    "mfaCode": "MFA code",
+    "mfaTokenMissing": "MFA challenge token is missing or expired. Return to login.",
+    "verifyMfa": "Verify MFA",
+    "verifying": "Verifying...",
+    "mfaInvalid": "Invalid MFA code",
+    "backToLogin": "Back to login",
+    "oidcLogin": "Sign in with OIDC",
+    "breakGlassLink": "Emergency break-glass access",
+    "normalLoginLink": "Return to normal login",
+    "breakGlassWarning": "Break-glass is for IdP outage or admin lockout only. Successful access is audited; rotate the secret after use.",
+    "breakGlassSecret": "Break-glass secret",
+    "breakGlassSubmit": "Enter emergency mode",
+    "breakGlassError": "Break-glass login failed"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -202,6 +219,43 @@
     "monthlySpend": "Monthly Spend",
     "tokenUsage": "Token Usage",
     "noBudget": "No budget configured."
+  },
+  "security": {
+    "title": "Security profile for MFA, OIDC and API credentials.",
+    "subtitle": "This screen shows authenticated identity context and exposes safe actions: MFA enrollment, API key rotation, token revoke and the OIDC entrypoint.",
+    "identityKicker": "Identity",
+    "identityTitle": "Session claims",
+    "orgId": "Org ID",
+    "department": "Department",
+    "mfaVerified": "MFA verified",
+    "mfaKicker": "Authenticator",
+    "mfaTitle": "TOTP MFA enrollment",
+    "mfaBody": "The setup token carries the pending secret until confirm. The secret is not saved to DB until the code is verified.",
+    "breakGlassMfaBlocked": "Break-glass sessions cannot manage MFA because they have no DB user.",
+    "mfaAdminOnly": "The MFA enrollment endpoint is available only to the tenant admin role. For global_admin or regular users the backend returns forbidden, so the UI does not show the action.",
+    "startMfaSetup": "Start MFA setup",
+    "setupUriTitle": "Provisioning URI",
+    "setupUriBody": "Add the URI to an authenticator app manually or with a QR tool outside ShadowAI, then confirm the first code.",
+    "confirmMfa": "Confirm MFA",
+    "disableMfa": "Disable MFA",
+    "disableConfirm": "Disable MFA for the current user?",
+    "setupStarted": "MFA setup token created. Confirm the code to enable MFA.",
+    "setupFailed": "Failed to start MFA setup.",
+    "mfaEnabled": "MFA enabled. Current sessions may be invalidated by the backend.",
+    "confirmFailed": "Failed to confirm MFA code.",
+    "mfaDisabled": "MFA disabled.",
+    "disableFailed": "Failed to disable MFA.",
+    "apiKeyKicker": "API access",
+    "apiKeyTitle": "API key and session tokens",
+    "apiKeyBody": "The rotated API key is shown once. Revoke tokens invalidates existing JWTs through token_version.",
+    "apiKeyOneTime": "One-time API key",
+    "clearApiKey": "Hide API key",
+    "apiKeyFailed": "Failed to rotate API key.",
+    "revokeConfirm": "Revoke all current tokens for this user?",
+    "revokeFailed": "Failed to revoke tokens.",
+    "oidcKicker": "Federated login",
+    "oidcTitle": "OIDC entrypoint",
+    "oidcBody": "If OIDC is enabled on the backend, this link starts the authorization flow. If OIDC is not configured, the backend returns a safe error/404."
   },
   "evidence": {
     "title": "Chain-of-custody evidence for auditors and operators.",
@@ -799,6 +853,8 @@
     "confirm": "Confirm",
     "close": "Close",
     "language": "Language",
-    "details": "Details"
+    "details": "Details",
+    "yes": "Yes",
+    "no": "No"
   }
 }
