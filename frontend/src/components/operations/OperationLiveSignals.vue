@@ -72,9 +72,12 @@
               </span>
             </div>
             <p class="mt-3 text-sm leading-6 text-slate-400">{{ signal.message }}</p>
-            <p v-if="formatDetails(signal.details)" class="mt-3 break-words font-mono text-xs leading-5 text-slate-500">
-              {{ formatDetails(signal.details) }}
-            </p>
+            <dl v-if="formattedDetails(signal.details).length" class="mt-3 space-y-2 text-xs leading-5">
+              <div v-for="detail in formattedDetails(signal.details)" :key="detail.key" class="rounded-xl border border-white/10 bg-slate-950/50 px-3 py-2">
+                <dt class="text-slate-500">{{ $t(detail.labelKey) }}</dt>
+                <dd class="mt-1 break-words font-mono text-slate-300">{{ detail.value }}</dd>
+              </div>
+            </dl>
           </article>
         </div>
       </template>
@@ -96,6 +99,7 @@ import {
   type OperationSignalStatus,
   type OperationSignalSummary
 } from '../../utils/operationsHealth'
+import { formatProductionDetails } from '../../utils/operationsStatus'
 
 interface ProductionSignal {
   key: string
@@ -257,17 +261,8 @@ function productionSignalTitle(key: string): string {
   return value === translated ? key : value
 }
 
-function formatDetails(details?: Record<string, unknown>): string {
-  if (!details) return ''
-  return Object.entries(details)
-    .map(([key, value]) => `${key}=${formatDetailValue(value)}`)
-    .join(' · ')
-}
-
-function formatDetailValue(value: unknown): string {
-  if (Array.isArray(value)) return value.join(',')
-  if (value && typeof value === 'object') return JSON.stringify(value)
-  return String(value)
+function formattedDetails(details?: Record<string, unknown>) {
+  return formatProductionDetails(details)
 }
 
 onMounted(refreshSignals)

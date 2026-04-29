@@ -743,6 +743,15 @@
       "evidence_audit_report_cronjob": "Retention audit CronJob",
       "prometheus_alerts": "Prometheus alerts"
     },
+    "detailLabels": {
+      "query_configured": "Query настроен",
+      "value": "Количество нарушений",
+      "last_success_configured": "Last-success query",
+      "last_success_at": "Последний успешный запуск",
+      "age_seconds": "Возраст",
+      "stale_after_seconds": "Stale threshold",
+      "other": "Деталь"
+    },
     "live": {
       "health": {
         "kicker": "Liveness",

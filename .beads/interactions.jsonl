@@ -64,3 +64,4 @@
 {"id":"int-c462b2d2","kind":"field_change","created_at":"2026-04-29T05:34:50.348200413Z","actor":"Mikhail","issue_id":"ShadowAI-vef","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
 {"id":"int-b3d45044","kind":"field_change","created_at":"2026-04-29T05:40:25.588541935Z","actor":"Mikhail","issue_id":"ShadowAI-d5r","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-c6e2d6c7","kind":"field_change","created_at":"2026-04-29T05:45:19.691248973Z","actor":"Mikhail","issue_id":"ShadowAI-d5r","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
+{"id":"int-e23b63cf","kind":"field_change","created_at":"2026-04-29T06:17:01.236794493Z","actor":"Mikhail","issue_id":"ShadowAI-76a","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}

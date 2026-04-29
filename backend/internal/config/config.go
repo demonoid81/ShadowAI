@@ -48,11 +48,15 @@ type Config struct {
 	// Prometheus URL is internal-only and must not be returned to clients.
 	// Query expressions are deployment-specific because CronJob and alert
 	// labels differ across clusters.
-	OperationsPrometheusURL            string
-	OperationsPrometheusTimeout        time.Duration
-	OperationsEvidenceExportQuery      string
-	OperationsEvidenceAuditReportQuery string
-	OperationsPrometheusAlertsQuery    string
+	OperationsPrometheusURL                       string
+	OperationsPrometheusTimeout                   time.Duration
+	OperationsEvidenceExportQuery                 string
+	OperationsEvidenceAuditReportQuery            string
+	OperationsPrometheusAlertsQuery               string
+	OperationsEvidenceExportLastSuccessQuery      string
+	OperationsEvidenceAuditReportLastSuccessQuery string
+	OperationsEvidenceExportStaleAfter            time.Duration
+	OperationsEvidenceAuditReportStaleAfter       time.Duration
 
 	// PR-A: audit privacy.
 	// AuditPayloadMode: "none" | "metadata" | "redacted" | "full".
@@ -385,11 +389,15 @@ func Load() *Config {
 
 		// OPS3: Prometheus-backed production signals. Empty URL = disabled,
 		// preserving OPS2 unknown placeholders.
-		OperationsPrometheusURL:            getEnv("OPERATIONS_PROMETHEUS_URL", ""),
-		OperationsPrometheusTimeout:        getDuration("OPERATIONS_PROMETHEUS_TIMEOUT", 2*time.Second),
-		OperationsEvidenceExportQuery:      getEnv("OPERATIONS_EVIDENCE_EXPORT_QUERY", ""),
-		OperationsEvidenceAuditReportQuery: getEnv("OPERATIONS_EVIDENCE_AUDIT_REPORT_QUERY", ""),
-		OperationsPrometheusAlertsQuery:    getEnv("OPERATIONS_PROMETHEUS_ALERTS_QUERY", ""),
+		OperationsPrometheusURL:                       getEnv("OPERATIONS_PROMETHEUS_URL", ""),
+		OperationsPrometheusTimeout:                   getDuration("OPERATIONS_PROMETHEUS_TIMEOUT", 2*time.Second),
+		OperationsEvidenceExportQuery:                 getEnv("OPERATIONS_EVIDENCE_EXPORT_QUERY", ""),
+		OperationsEvidenceAuditReportQuery:            getEnv("OPERATIONS_EVIDENCE_AUDIT_REPORT_QUERY", ""),
+		OperationsPrometheusAlertsQuery:               getEnv("OPERATIONS_PROMETHEUS_ALERTS_QUERY", ""),
+		OperationsEvidenceExportLastSuccessQuery:      getEnv("OPERATIONS_EVIDENCE_EXPORT_LAST_SUCCESS_QUERY", ""),
+		OperationsEvidenceAuditReportLastSuccessQuery: getEnv("OPERATIONS_EVIDENCE_AUDIT_REPORT_LAST_SUCCESS_QUERY", ""),
+		OperationsEvidenceExportStaleAfter:            getDuration("OPERATIONS_EVIDENCE_EXPORT_STALE_AFTER", 26*time.Hour),
+		OperationsEvidenceAuditReportStaleAfter:       getDuration("OPERATIONS_EVIDENCE_AUDIT_REPORT_STALE_AFTER", 26*time.Hour),
 
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),

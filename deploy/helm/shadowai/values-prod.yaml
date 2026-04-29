@@ -68,6 +68,11 @@ config:
   # OPERATIONS_EVIDENCE_EXPORT_QUERY: 'sum(kube_job_status_failed{job_name=~".*evidence-export.*"})'
   # OPERATIONS_EVIDENCE_AUDIT_REPORT_QUERY: 'sum(kube_job_status_failed{job_name=~".*evidence-audit-report.*"})'
   # OPERATIONS_PROMETHEUS_ALERTS_QUERY: 'sum(ALERTS{alertstate="firing"})'
+  # Last-success queries must return Unix timestamp seconds. Stale defaults assume daily jobs.
+  # OPERATIONS_EVIDENCE_EXPORT_LAST_SUCCESS_QUERY: 'max(kube_job_status_completion_time{job_name=~".*evidence-export.*"})'
+  # OPERATIONS_EVIDENCE_AUDIT_REPORT_LAST_SUCCESS_QUERY: 'max(kube_job_status_completion_time{job_name=~".*evidence-audit-report.*"})'
+  OPERATIONS_EVIDENCE_EXPORT_STALE_AFTER: "26h"
+  OPERATIONS_EVIDENCE_AUDIT_REPORT_STALE_AFTER: "26h"
 
   # W8: Additional independent anchor sink (opt-in, default disabled).
   # Uncomment and configure to enable dual-sink WORM evidence posture.

@@ -3,8 +3,10 @@ package operations
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -125,7 +127,7 @@ func TestPrometheusSignals_MapsConfiguredQueries(t *testing.T) {
 		OperationsPrometheusAlertsQuery:    "alerts",
 	}
 
-	signals := PrometheusSignals(context.Background(), cfg, q)
+	signals := PrometheusSignals(context.Background(), cfg, q, time.Unix(100, 0).UTC())
 
 	if got := findSignalInSlice(t, signals, "evidence_export_cronjob"); got.Status != StatusOK {
 		t.Fatalf("export status = %s, want ok", got.Status)
@@ -135,6 +137,150 @@ func TestPrometheusSignals_MapsConfiguredQueries(t *testing.T) {
 	}
 	if got := findSignalInSlice(t, signals, "prometheus_alerts"); got.Status != StatusWarn {
 		t.Fatalf("alerts status = %s, want warn", got.Status)
+	}
+}
+
+func TestPrometheusSignals_FreshLastSuccessAddsDetails(t *testing.T) {
+	now := time.Unix(200_000, 0).UTC()
+	q := fakePrometheusQuerier{
+		values: map[string]float64{
+			"export":      0,
+			"export_last": float64(now.Add(-2 * time.Hour).Unix()),
+		},
+	}
+	cfg := RuntimeConfig{
+		OperationsEvidenceExportQuery:            "export",
+		OperationsEvidenceExportLastSuccessQuery: "export_last",
+		OperationsEvidenceExportStaleAfter:       26 * time.Hour,
+	}
+
+	signals := PrometheusSignals(context.Background(), cfg, q, now)
+	got := findSignalInSlice(t, signals, "evidence_export_cronjob")
+
+	if got.Status != StatusOK {
+		t.Fatalf("status = %s, want ok", got.Status)
+	}
+	if got.Details["last_success_at"] != now.Add(-2*time.Hour).UTC().Format(time.RFC3339) {
+		t.Fatalf("last_success_at = %#v", got.Details["last_success_at"])
+	}
+	if got.Details["age_seconds"] != float64(7200) {
+		t.Fatalf("age_seconds = %#v, want 7200", got.Details["age_seconds"])
+	}
+	if got.Details["stale_after_seconds"] != float64(93600) {
+		t.Fatalf("stale_after_seconds = %#v, want 93600", got.Details["stale_after_seconds"])
+	}
+}
+
+func TestPrometheusSignals_StaleLastSuccessWarns(t *testing.T) {
+	now := time.Unix(200_000, 0).UTC()
+	q := fakePrometheusQuerier{
+		values: map[string]float64{
+			"export":      0,
+			"export_last": float64(now.Add(-30 * time.Hour).Unix()),
+		},
+	}
+	cfg := RuntimeConfig{
+		OperationsEvidenceExportQuery:            "export",
+		OperationsEvidenceExportLastSuccessQuery: "export_last",
+		OperationsEvidenceExportStaleAfter:       26 * time.Hour,
+	}
+
+	signals := PrometheusSignals(context.Background(), cfg, q, now)
+	got := findSignalInSlice(t, signals, "evidence_export_cronjob")
+
+	if got.Status != StatusWarn {
+		t.Fatalf("status = %s, want warn", got.Status)
+	}
+}
+
+func TestPrometheusSignals_CountViolationWinsOverFreshLastSuccess(t *testing.T) {
+	now := time.Unix(200_000, 0).UTC()
+	q := fakePrometheusQuerier{
+		values: map[string]float64{
+			"export":      1,
+			"export_last": float64(now.Add(-time.Hour).Unix()),
+		},
+	}
+	cfg := RuntimeConfig{
+		OperationsEvidenceExportQuery:            "export",
+		OperationsEvidenceExportLastSuccessQuery: "export_last",
+		OperationsEvidenceExportStaleAfter:       26 * time.Hour,
+	}
+
+	signals := PrometheusSignals(context.Background(), cfg, q, now)
+	got := findSignalInSlice(t, signals, "evidence_export_cronjob")
+
+	if got.Status != StatusError {
+		t.Fatalf("status = %s, want error", got.Status)
+	}
+}
+
+func TestPrometheusSignals_EmptyLastSuccessUnknown(t *testing.T) {
+	now := time.Unix(200_000, 0).UTC()
+	q := fakePrometheusQuerier{
+		values: map[string]float64{"export": 0},
+		empty:  map[string]bool{"export_last": true},
+	}
+	cfg := RuntimeConfig{
+		OperationsEvidenceExportQuery:            "export",
+		OperationsEvidenceExportLastSuccessQuery: "export_last",
+		OperationsEvidenceExportStaleAfter:       26 * time.Hour,
+	}
+
+	signals := PrometheusSignals(context.Background(), cfg, q, now)
+	got := findSignalInSlice(t, signals, "evidence_export_cronjob")
+
+	if got.Status != StatusUnknown {
+		t.Fatalf("status = %s, want unknown", got.Status)
+	}
+	if got.Details["last_success_configured"] != true {
+		t.Fatalf("last_success_configured = %#v, want true", got.Details["last_success_configured"])
+	}
+}
+
+func TestPrometheusSignals_LastSuccessQueryErrorIsError(t *testing.T) {
+	now := time.Unix(200_000, 0).UTC()
+	q := fakePrometheusQuerier{
+		values: map[string]float64{"export": 0},
+		errs:   map[string]error{"export_last": errors.New("prometheus down")},
+	}
+	cfg := RuntimeConfig{
+		OperationsEvidenceExportQuery:            "export",
+		OperationsEvidenceExportLastSuccessQuery: "export_last",
+		OperationsEvidenceExportStaleAfter:       26 * time.Hour,
+	}
+
+	signals := PrometheusSignals(context.Background(), cfg, q, now)
+	got := findSignalInSlice(t, signals, "evidence_export_cronjob")
+
+	if got.Status != StatusError {
+		t.Fatalf("status = %s, want error", got.Status)
+	}
+}
+
+func TestPrometheusSignals_DoesNotExposeRawQueries(t *testing.T) {
+	now := time.Unix(200_000, 0).UTC()
+	q := fakePrometheusQuerier{
+		values: map[string]float64{
+			"secret_count_query": 0,
+			"secret_last_query":  float64(now.Add(-time.Hour).Unix()),
+		},
+	}
+	cfg := RuntimeConfig{
+		OperationsEvidenceExportQuery:            "secret_count_query",
+		OperationsEvidenceExportLastSuccessQuery: "secret_last_query",
+		OperationsEvidenceExportStaleAfter:       26 * time.Hour,
+	}
+
+	signals := PrometheusSignals(context.Background(), cfg, q, now)
+	body, err := json.Marshal(signals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"secret_count_query", "secret_last_query"} {
+		if strings.Contains(string(body), forbidden) {
+			t.Fatalf("response exposed raw query %q: %s", forbidden, string(body))
+		}
 	}
 }
 

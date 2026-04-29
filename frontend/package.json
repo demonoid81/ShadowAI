@@ -12,6 +12,7 @@
     "test:governance-ui": "rm -rf /tmp/shadowai-governance-ui-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-governance-ui-test --noEmit false --types node src/utils/governanceUi.ts tests/governanceUi.test.ts && node /tmp/shadowai-governance-ui-test/tests/governanceUi.test.js",
     "test:compliance-reports": "rm -rf /tmp/shadowai-compliance-reports-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-compliance-reports-test --noEmit false --types node src/utils/complianceReports.ts tests/complianceReports.test.ts && node /tmp/shadowai-compliance-reports-test/tests/complianceReports.test.js",
     "test:operations-health": "rm -rf /tmp/shadowai-operations-health-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-operations-health-test --noEmit false --types node src/utils/operationsHealth.ts tests/operationsHealth.test.ts && node /tmp/shadowai-operations-health-test/tests/operationsHealth.test.js",
+    "test:operations-status": "rm -rf /tmp/shadowai-operations-status-test && tsc --target ES2022 --module CommonJS --moduleResolution Node --outDir /tmp/shadowai-operations-status-test --noEmit false --types node src/utils/operationsStatus.ts tests/operationsStatus.test.ts && node /tmp/shadowai-operations-status-test/tests/operationsStatus.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

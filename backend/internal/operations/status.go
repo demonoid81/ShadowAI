@@ -50,22 +50,26 @@ type DependencyStatus struct {
 }
 
 type RuntimeConfig struct {
-	AuditPayloadMode                   string
-	AuditRetentionDays                 int
-	AuditPurgeInterval                 time.Duration
-	AuditAnchorInterval                time.Duration
-	AuditAnchorSink                    string
-	AuditAnchorAdditionalSinks         string
-	AuditAnchorSigningEnabled          bool
-	AuditAnchorPubKeyID                string
-	AuditChainEnabled                  bool
-	SIEMEnabled                        bool
-	BYOKEnabled                        bool
-	OperationsPrometheusURL            string
-	OperationsPrometheusTimeout        time.Duration
-	OperationsEvidenceExportQuery      string
-	OperationsEvidenceAuditReportQuery string
-	OperationsPrometheusAlertsQuery    string
+	AuditPayloadMode                              string
+	AuditRetentionDays                            int
+	AuditPurgeInterval                            time.Duration
+	AuditAnchorInterval                           time.Duration
+	AuditAnchorSink                               string
+	AuditAnchorAdditionalSinks                    string
+	AuditAnchorSigningEnabled                     bool
+	AuditAnchorPubKeyID                           string
+	AuditChainEnabled                             bool
+	SIEMEnabled                                   bool
+	BYOKEnabled                                   bool
+	OperationsPrometheusURL                       string
+	OperationsPrometheusTimeout                   time.Duration
+	OperationsEvidenceExportQuery                 string
+	OperationsEvidenceAuditReportQuery            string
+	OperationsPrometheusAlertsQuery               string
+	OperationsEvidenceExportLastSuccessQuery      string
+	OperationsEvidenceAuditReportLastSuccessQuery string
+	OperationsEvidenceExportStaleAfter            time.Duration
+	OperationsEvidenceAuditReportStaleAfter       time.Duration
 }
 
 type Handler struct {
@@ -81,22 +85,26 @@ func RuntimeConfigFromConfig(cfg *config.Config) RuntimeConfig {
 		return RuntimeConfig{}
 	}
 	return RuntimeConfig{
-		AuditPayloadMode:                   cfg.AuditPayloadMode,
-		AuditRetentionDays:                 cfg.AuditRetentionDays,
-		AuditPurgeInterval:                 cfg.AuditPurgeInterval,
-		AuditAnchorInterval:                cfg.AuditAnchorInterval,
-		AuditAnchorSink:                    cfg.AuditAnchorSink,
-		AuditAnchorAdditionalSinks:         cfg.AuditAnchorAdditionalSinks,
-		AuditAnchorSigningEnabled:          strings.TrimSpace(cfg.AuditAnchorSigningKey) != "",
-		AuditAnchorPubKeyID:                cfg.AuditAnchorPubKeyID,
-		AuditChainEnabled:                  strings.TrimSpace(cfg.AuditChainSecret) != "",
-		SIEMEnabled:                        cfg.SIEMEnabled,
-		BYOKEnabled:                        cfg.BYOKEnabled,
-		OperationsPrometheusURL:            cfg.OperationsPrometheusURL,
-		OperationsPrometheusTimeout:        cfg.OperationsPrometheusTimeout,
-		OperationsEvidenceExportQuery:      cfg.OperationsEvidenceExportQuery,
-		OperationsEvidenceAuditReportQuery: cfg.OperationsEvidenceAuditReportQuery,
-		OperationsPrometheusAlertsQuery:    cfg.OperationsPrometheusAlertsQuery,
+		AuditPayloadMode:                              cfg.AuditPayloadMode,
+		AuditRetentionDays:                            cfg.AuditRetentionDays,
+		AuditPurgeInterval:                            cfg.AuditPurgeInterval,
+		AuditAnchorInterval:                           cfg.AuditAnchorInterval,
+		AuditAnchorSink:                               cfg.AuditAnchorSink,
+		AuditAnchorAdditionalSinks:                    cfg.AuditAnchorAdditionalSinks,
+		AuditAnchorSigningEnabled:                     strings.TrimSpace(cfg.AuditAnchorSigningKey) != "",
+		AuditAnchorPubKeyID:                           cfg.AuditAnchorPubKeyID,
+		AuditChainEnabled:                             strings.TrimSpace(cfg.AuditChainSecret) != "",
+		SIEMEnabled:                                   cfg.SIEMEnabled,
+		BYOKEnabled:                                   cfg.BYOKEnabled,
+		OperationsPrometheusURL:                       cfg.OperationsPrometheusURL,
+		OperationsPrometheusTimeout:                   cfg.OperationsPrometheusTimeout,
+		OperationsEvidenceExportQuery:                 cfg.OperationsEvidenceExportQuery,
+		OperationsEvidenceAuditReportQuery:            cfg.OperationsEvidenceAuditReportQuery,
+		OperationsPrometheusAlertsQuery:               cfg.OperationsPrometheusAlertsQuery,
+		OperationsEvidenceExportLastSuccessQuery:      cfg.OperationsEvidenceExportLastSuccessQuery,
+		OperationsEvidenceAuditReportLastSuccessQuery: cfg.OperationsEvidenceAuditReportLastSuccessQuery,
+		OperationsEvidenceExportStaleAfter:            cfg.OperationsEvidenceExportStaleAfter,
+		OperationsEvidenceAuditReportStaleAfter:       cfg.OperationsEvidenceAuditReportStaleAfter,
 	}
 }
 
@@ -159,7 +167,8 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	resp := BuildSnapshot(h.cfg, h.checkDependencies(ctx), h.now(), PrometheusSignals(ctx, h.cfg, h.prometheus)...)
+	now := h.now()
+	resp := BuildSnapshot(h.cfg, h.checkDependencies(ctx), now, PrometheusSignals(ctx, h.cfg, h.prometheus, now)...)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

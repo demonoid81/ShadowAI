@@ -86,15 +86,39 @@ func (c *PrometheusClient) QueryValue(ctx context.Context, query string) (float6
 	return decoded.Value()
 }
 
-func PrometheusSignals(ctx context.Context, cfg RuntimeConfig, q PrometheusQuerier) []Signal {
+func PrometheusSignals(ctx context.Context, cfg RuntimeConfig, q PrometheusQuerier, now time.Time) []Signal {
 	if q == nil {
 		return nil
 	}
+	if now.IsZero() {
+		now = time.Now()
+	}
 	return []Signal{
-		prometheusViolationSignal(ctx, q, "evidence_export_cronjob", cfg.OperationsEvidenceExportQuery, StatusError),
-		prometheusViolationSignal(ctx, q, "evidence_audit_report_cronjob", cfg.OperationsEvidenceAuditReportQuery, StatusError),
+		prometheusCronJobSignal(
+			ctx,
+			q,
+			"evidence_export_cronjob",
+			cfg.OperationsEvidenceExportQuery,
+			cfg.OperationsEvidenceExportLastSuccessQuery,
+			cfg.OperationsEvidenceExportStaleAfter,
+			now,
+		),
+		prometheusCronJobSignal(
+			ctx,
+			q,
+			"evidence_audit_report_cronjob",
+			cfg.OperationsEvidenceAuditReportQuery,
+			cfg.OperationsEvidenceAuditReportLastSuccessQuery,
+			cfg.OperationsEvidenceAuditReportStaleAfter,
+			now,
+		),
 		prometheusViolationSignal(ctx, q, "prometheus_alerts", cfg.OperationsPrometheusAlertsQuery, StatusWarn),
 	}
+}
+
+func prometheusCronJobSignal(ctx context.Context, q PrometheusQuerier, key, violationQuery, lastSuccessQuery string, staleAfter time.Duration, now time.Time) Signal {
+	base := prometheusViolationSignal(ctx, q, key, violationQuery, StatusError)
+	return enrichLastSuccess(ctx, q, base, lastSuccessQuery, staleAfter, now)
 }
 
 func prometheusViolationSignal(ctx context.Context, q PrometheusQuerier, key, query string, violationStatus SignalStatus) Signal {
@@ -144,6 +168,84 @@ func prometheusViolationSignal(ctx context.Context, q PrometheusQuerier, key, qu
 		Source:  "prometheus",
 		Message: "Prometheus query reports active violations",
 		Details: details,
+	}
+}
+
+func enrichLastSuccess(ctx context.Context, q PrometheusQuerier, base Signal, query string, staleAfter time.Duration, now time.Time) Signal {
+	query = strings.TrimSpace(query)
+	base.Details = cloneDetails(base.Details)
+	base.Details["last_success_configured"] = query != ""
+	if staleAfter > 0 {
+		base.Details["stale_after_seconds"] = staleAfter.Seconds()
+	}
+	if query == "" {
+		return base
+	}
+
+	value, found, err := q.QueryValue(ctx, query)
+	if err != nil {
+		previousStatus := base.Status
+		base.Status = worseStatus(base.Status, StatusError)
+		if statusSeverity(previousStatus) < statusSeverity(StatusError) {
+			base.Message = "Prometheus last-success query failed"
+		}
+		return base
+	}
+	if !found || value <= 0 {
+		if base.Status == StatusOK {
+			base.Status = StatusUnknown
+			base.Message = "Prometheus last-success query returned no usable timestamp"
+		}
+		return base
+	}
+
+	lastSuccess := time.Unix(int64(value), 0).UTC()
+	if lastSuccess.After(now.Add(5 * time.Minute)) {
+		base.Status = worseStatus(base.Status, StatusError)
+		base.Message = "Prometheus last-success timestamp is in the future"
+		return base
+	}
+	age := now.UTC().Sub(lastSuccess)
+	if age < 0 {
+		age = 0
+	}
+	base.Details["last_success_at"] = lastSuccess.Format(time.RFC3339)
+	base.Details["age_seconds"] = age.Seconds()
+
+	if base.Status == StatusOK && staleAfter > 0 && age > staleAfter {
+		base.Status = StatusWarn
+		base.Message = "last successful run is stale"
+	}
+	return base
+}
+
+func cloneDetails(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+4)
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func worseStatus(current, candidate SignalStatus) SignalStatus {
+	if statusSeverity(candidate) > statusSeverity(current) {
+		return candidate
+	}
+	return current
+}
+
+func statusSeverity(status SignalStatus) int {
+	switch status {
+	case StatusError:
+		return 3
+	case StatusWarn:
+		return 2
+	case StatusUnknown:
+		return 1
+	case StatusOK:
+		return 0
+	default:
+		return 1
 	}
 }
 
