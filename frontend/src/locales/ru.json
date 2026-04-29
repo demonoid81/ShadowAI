@@ -628,6 +628,32 @@
       "collect": "Collect quarterly evidence package",
       "access": "Run privileged access review",
       "retention": "Verify S3 retention posture"
+    },
+    "workspace": {
+      "kicker": "Offline viewer отчётов",
+      "title": "Локальная проверка auditor-facing JSON reports",
+      "body": "Загрузите JSON-вывод audit-access-review, audit-evidence-report, audit-collect-evidence manifest или not_collected.json. Файл парсится только в браузере и не отправляется на backend.",
+      "upload": "Загрузить JSON",
+      "localOnly": "Privacy boundary: локальные evidence artifacts могут содержать служебные идентификаторы. Этот viewer не делает network upload и не заменяет cryptographic verification CLI.",
+      "invalidJson": "Файл не является корректным JSON-отчётом. Данные не были сохранены или отправлены.",
+      "reportMeta": "Метаданные отчёта",
+      "file": "Файл",
+      "reportTitle": "Отчёт",
+      "reportType": "Тип",
+      "generatedAt": "Создан",
+      "period": "Период",
+      "findings": "Нарушения и findings",
+      "noFindings": "Findings не обнаружены для распознанного отчёта.",
+      "showRows": "Показать preview строк",
+      "hideRows": "Скрыть preview строк",
+      "cards": {
+        "status": "Статус",
+        "total": "Всего",
+        "passed": "Пройдено",
+        "failed": "Провалено",
+        "notCollected": "Не собрано",
+        "findings": "Findings"
+      }
     }
   },
   "operations": {

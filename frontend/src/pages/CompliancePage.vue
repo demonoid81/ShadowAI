@@ -31,6 +31,8 @@
       </article>
     </section>
 
+    <ComplianceReportWorkspace />
+
     <section class="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
       <div class="console-card">
         <div class="section-kicker">{{ $t('compliance.packageKicker') }}</div>
@@ -58,6 +60,8 @@
 </template>
 
 <script setup lang="ts">
+import ComplianceReportWorkspace from '../components/compliance/ComplianceReportWorkspace.vue'
+
 const tags = ['compliance.tags.soc2', 'compliance.tags.iso', 'compliance.tags.access', 'compliance.tags.evidence']
 
 const controls = [

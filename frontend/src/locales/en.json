@@ -628,6 +628,32 @@
       "collect": "Collect quarterly evidence package",
       "access": "Run privileged access review",
       "retention": "Verify S3 retention posture"
+    },
+    "workspace": {
+      "kicker": "Offline report viewer",
+      "title": "Local review of auditor-facing JSON reports",
+      "body": "Load JSON output from audit-access-review, audit-evidence-report, an audit-collect-evidence manifest, or not_collected.json. The file is parsed in the browser only and is not uploaded to the backend.",
+      "upload": "Upload JSON",
+      "localOnly": "Privacy boundary: local evidence artifacts may contain operational identifiers. This viewer performs no network upload and does not replace cryptographic verification CLI.",
+      "invalidJson": "The file is not valid JSON. No data was saved or uploaded.",
+      "reportMeta": "Report metadata",
+      "file": "File",
+      "reportTitle": "Report",
+      "reportType": "Type",
+      "generatedAt": "Generated at",
+      "period": "Period",
+      "findings": "Findings / violations",
+      "noFindings": "No findings were detected for the recognized report.",
+      "showRows": "Show rows preview",
+      "hideRows": "Hide rows preview",
+      "cards": {
+        "status": "Status",
+        "total": "Total",
+        "passed": "Passed",
+        "failed": "Failed",
+        "notCollected": "Not collected",
+        "findings": "Findings"
+      }
     }
   },
   "operations": {
