@@ -136,6 +136,20 @@ func TestWriteManifest(t *testing.T) {
 		Version:    BundleVersion,
 		ExportTime: time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC),
 		Tables:     []string{"audit_logs", "admin_event_logs"},
+		EncryptedFields: []string{
+			"audit_logs.request_body",
+			"audit_logs.response_body",
+		},
+		KeyEpochs: []KeyEpochSummary{
+			{
+				OrgID:       "org-a",
+				KID:         "tenant:org-a:dek:2026-Q2",
+				Provider:    "vault_transit",
+				Status:      "active",
+				FieldCount:  2,
+				ProviderKID: "vault:transit/audit-key",
+			},
+		},
 		FileSHA256: map[string]string{"anchors.jsonl": "aabbcc"},
 	}
 	if err := WriteManifest(dir, m); err != nil {
@@ -157,6 +171,12 @@ func TestWriteManifest(t *testing.T) {
 	}
 	if got.FileSHA256["anchors.jsonl"] != "aabbcc" {
 		t.Errorf("file hash = %q, want aabbcc", got.FileSHA256["anchors.jsonl"])
+	}
+	if len(got.EncryptedFields) != 2 || got.EncryptedFields[0] != "audit_logs.request_body" {
+		t.Fatalf("encrypted fields missing: %+v", got.EncryptedFields)
+	}
+	if len(got.KeyEpochs) != 1 || got.KeyEpochs[0].KID != "tenant:org-a:dek:2026-Q2" {
+		t.Fatalf("key epochs missing: %+v", got.KeyEpochs)
 	}
 }
 
@@ -425,9 +445,9 @@ func TestZipBundleDir_ContainsExpectedFiles(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	files := map[string]string{
-		"anchors.jsonl":                     `{"id":"a1"}`,
-		"chain_inventory.jsonl":             `{"table":"audit_logs"}`,
-		"bundle_manifest.json":              `{"version":"1"}`,
+		"anchors.jsonl":                         `{"id":"a1"}`,
+		"chain_inventory.jsonl":                 `{"table":"audit_logs"}`,
+		"bundle_manifest.json":                  `{"version":"1"}`,
 		"reports/anchor_verify_audit_logs.json": `{}`,
 	}
 	for rel, content := range files {

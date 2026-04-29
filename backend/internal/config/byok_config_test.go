@@ -14,6 +14,7 @@ func TestLoad_BYOKEnv(t *testing.T) {
 	t.Setenv("BYOK_VAULT_MOUNT", "tenant-transit")
 	t.Setenv("BYOK_VAULT_KEY_NAME", "audit-payload")
 	t.Setenv("BYOK_TIMEOUT", "7s")
+	t.Setenv("BYOK_EPOCHS_REQUIRED", "true")
 
 	cfg := Load()
 	if !cfg.BYOKEnabled {
@@ -24,7 +25,8 @@ func TestLoad_BYOKEnv(t *testing.T) {
 		cfg.BYOKVaultToken != "token" ||
 		cfg.BYOKVaultMount != "tenant-transit" ||
 		cfg.BYOKVaultKeyName != "audit-payload" ||
-		cfg.BYOKTimeout != 7*time.Second {
+		cfg.BYOKTimeout != 7*time.Second ||
+		!cfg.BYOKEpochsRequired {
 		t.Fatalf("unexpected BYOK config: %+v", cfg)
 	}
 }

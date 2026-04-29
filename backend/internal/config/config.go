@@ -235,6 +235,10 @@ type Config struct {
 	BYOKVaultKeyName string
 	BYOKTimeout      time.Duration
 	BYOKStaticKeyB64 string // только dev/test; в prod отклоняется
+	// BYOK3: when true, audit payload writes fail closed unless the tenant has
+	// an active DEK epoch in byok_key_epochs. When false, active epochs are used
+	// if present and legacy BYOK2 envelopes remain allowed for gradual rollout.
+	BYOKEpochsRequired bool
 
 	// PR-F7.1 (streaming architecture, см. docs/rfcs/2026-04-pr-f7-*).
 	// StreamingMode: "buffered" | "incremental" | "shadow".
@@ -491,14 +495,15 @@ func Load() *Config {
 		AuditChainSecret:                getEnv("AUDIT_CHAIN_SECRET", ""),
 
 		// BYOK2: шифрование audit payload.
-		BYOKEnabled:      getEnv("BYOK_ENABLED", "false") == "true",
-		BYOKProvider:     getEnv("BYOK_PROVIDER", ""),
-		BYOKVaultAddr:    getEnv("BYOK_VAULT_ADDR", ""),
-		BYOKVaultToken:   getEnv("BYOK_VAULT_TOKEN", ""),
-		BYOKVaultMount:   getEnv("BYOK_VAULT_MOUNT", "transit"),
-		BYOKVaultKeyName: getEnv("BYOK_VAULT_KEY_NAME", ""),
-		BYOKTimeout:      getDuration("BYOK_TIMEOUT", 5*time.Second),
-		BYOKStaticKeyB64: getEnv("BYOK_STATIC_KEY_B64", ""),
+		BYOKEnabled:        getEnv("BYOK_ENABLED", "false") == "true",
+		BYOKProvider:       getEnv("BYOK_PROVIDER", ""),
+		BYOKVaultAddr:      getEnv("BYOK_VAULT_ADDR", ""),
+		BYOKVaultToken:     getEnv("BYOK_VAULT_TOKEN", ""),
+		BYOKVaultMount:     getEnv("BYOK_VAULT_MOUNT", "transit"),
+		BYOKVaultKeyName:   getEnv("BYOK_VAULT_KEY_NAME", ""),
+		BYOKTimeout:        getDuration("BYOK_TIMEOUT", 5*time.Second),
+		BYOKStaticKeyB64:   getEnv("BYOK_STATIC_KEY_B64", ""),
+		BYOKEpochsRequired: getEnv("BYOK_EPOCHS_REQUIRED", "false") == "true",
 
 		// Firewall
 		FirewallEnabled:              getEnv("FIREWALL_ENABLED", "true") == "true",

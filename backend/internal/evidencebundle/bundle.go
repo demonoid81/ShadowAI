@@ -12,20 +12,20 @@
 //
 // What offline auditors CAN verify from this bundle:
 //
-//	  - Ed25519 signature on each signed anchor (using public_key.b64)
-//	  - SHA256 hashes of all bundle files (bundle_manifest.json file_sha256)
-//	  - Merkle root consistency: if auditor independently holds row_hashes,
-//	    they can recompute Merkle roots and compare against anchors.jsonl
-//	  - chain_inventory.jsonl seq_no continuity (gap detection)
-//	  - Anchor range continuity (no gaps between anchor seq_hi/seq_lo)
-//	  - query_scope selector integrity: SHA256(normalized selector_json)
-//	    equals selector_hash
+//   - Ed25519 signature on each signed anchor (using public_key.b64)
+//   - SHA256 hashes of all bundle files (bundle_manifest.json file_sha256)
+//   - Merkle root consistency: if auditor independently holds row_hashes,
+//     they can recompute Merkle roots and compare against anchors.jsonl
+//   - chain_inventory.jsonl seq_no continuity (gap detection)
+//   - Anchor range continuity (no gaps between anchor seq_hi/seq_lo)
+//   - query_scope selector integrity: SHA256(normalized selector_json)
+//     equals selector_hash
 //
 // What requires live infrastructure:
 //
-//	  - W2 HMAC chain verification (requires AUDIT_CHAIN_SECRET + canonical row data)
-//	  - W4 immudb sink re-fetch (requires immudb connection + sink_refs)
-//	  - Merkle root recomputation from row content (requires DB + row payload)
+//   - W2 HMAC chain verification (requires AUDIT_CHAIN_SECRET + canonical row data)
+//   - W4 immudb sink re-fetch (requires immudb connection + sink_refs)
+//   - Merkle root recomputation from row content (requires DB + row payload)
 package evidencebundle
 
 import (
@@ -45,19 +45,35 @@ const BundleVersion = "1"
 
 // BundleManifest is the root metadata file written to bundle_manifest.json.
 type BundleManifest struct {
-	Version        string            `json:"version"`
-	ExportTime     time.Time         `json:"export_time"`
-	Tables         []string          `json:"tables"`
-	ExporterCommit string            `json:"exporter_commit,omitempty"`
+	Version        string    `json:"version"`
+	ExportTime     time.Time `json:"export_time"`
+	Tables         []string  `json:"tables"`
+	ExporterCommit string    `json:"exporter_commit,omitempty"`
 	// DBFingerprint is SHA256(host+"/"+dbname) from DATABASE_URL. Identifies
 	// which database the bundle came from without exposing connection credentials.
-	DBFingerprint string            `json:"db_fingerprint"`
+	DBFingerprint string `json:"db_fingerprint"`
 	// OrgID is non-empty for tenant-scoped exports (--org-id flag, PR-T2.4).
 	// Empty for global bundles (--global flag).
-	OrgID         string            `json:"org_id,omitempty"`
+	OrgID string `json:"org_id,omitempty"`
+	// EncryptedFields lists payload fields exported as BYOK envelopes.
+	// Values are field identifiers, not plaintext payload or secrets.
+	EncryptedFields []string `json:"encrypted_fields,omitempty"`
+	// KeyEpochs summarizes non-secret BYOK DEK epoch metadata represented in
+	// the bundle. This lets auditors see which tenant epochs appear without KMS
+	// access and without exposing key material.
+	KeyEpochs []KeyEpochSummary `json:"key_epochs,omitempty"`
 	// FileSHA256 maps relative path → SHA256 hex for every file in the bundle
 	// except bundle_manifest.json itself (which is written last).
-	FileSHA256    map[string]string `json:"file_sha256"`
+	FileSHA256 map[string]string `json:"file_sha256"`
+}
+
+type KeyEpochSummary struct {
+	OrgID       string `json:"org_id"`
+	KID         string `json:"kid"`
+	Provider    string `json:"provider"`
+	ProviderKID string `json:"provider_kid,omitempty"`
+	Status      string `json:"status"`
+	FieldCount  int    `json:"field_count"`
 }
 
 // AnchorLine is one entry in anchors.jsonl. Contains all verifiable

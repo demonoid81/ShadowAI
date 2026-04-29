@@ -1,7 +1,7 @@
 # ShadowAI Enterprise Readiness Roadmap
 
 Дата: 2026-04-29
-Статус: актуализировано после OPS2-OPS4 Operations status hardening, UX8-UX10 frontend console completion, E1/E2/E3, T2/T3, G4, W5.2/W6, O4.4 и SIEM v1.1.
+Статус: актуализировано после BYOK3 tenant DEK epochs, OPS2-OPS4 Operations status hardening, UX8-UX10 frontend console completion, E1/E2/E3, T2/T3, G4, W5.2/W6, O4.4 и SIEM v1.1.
 
 ## Цель
 
@@ -40,6 +40,7 @@
 | LLM provider vendor-risk VRM1 | ✅ | operator-owned provider assessment process, approved-provider register template, governance integration guidance |
 | Governance invalidation G2.3 | ✅ | Redis pub/sub org-scoped invalidation removes multi-replica TTL lag for policy updates; TTL remains fallback |
 | Production validation PROD1 | ✅ | `shadowai-prod-validate` go/no-go pack: Helm render, rollout, health/readiness, bundle verification and S3 retention posture |
+| BYOK lifecycle BYOK3 | ✅ | tenant-scoped DEK epoch metadata, active epoch selection for new audit payload writes, rotation semantics, operator CLI and bundle `encrypted_fields`/`key_epochs` summary |
 
 ### Что это означает
 
@@ -67,9 +68,10 @@
    - OPS2-OPS4 закрыли safe backend status API, Prometheus-backed signals и last-success timestamps.
    - Остались Alertmanager state aggregation и explicit retry/re-run controls, если operator хочет управлять remediation из UI.
 
-4. **BYOK v2+ lifecycle**
+4. **BYOK v2+ lifecycle** ✅ / v2+
    - BYOK2/BYOK2.1 закрыли Vault Transit encryption для audit request/response payload и legacy sweep.
-   - Остались DEK epochs, tenant/key lifecycle metadata, broader payload classes и customer-specific KMS policies.
+   - BYOK3 закрыл tenant-scoped DEK epochs, rotation semantics, fail-closed enforce mode и bundle key epoch summary.
+   - Остались broader payload classes и customer-specific KMS policies.
 
 5. **External validation execution**
    - SEC1 даёт assessor package.
@@ -87,8 +89,8 @@
    - Controls inventory and evidence artifact mapping exist in `docs/compliance/soc2-iso-control-mapping.md`.
 
 8. **BYOK / KMS / encryption controls** ✅ / v2+
-   - BYOK1 RFC, BYOK2 Vault Transit new-write encryption and BYOK2.1 legacy sweep are implemented.
-   - DEK epochs and additional payload classes remain v2+.
+   - BYOK1 RFC, BYOK2 Vault Transit new-write encryption, BYOK2.1 legacy sweep and BYOK3 DEK epochs are implemented.
+   - Additional payload classes and customer-specific KMS policies remain v2+.
 
 9. **Alert coverage refinement** ✅ / v2+
    - Evidence audit report alerts, semantic_v2 promotion signals and Prometheus-backed operations status are implemented.
@@ -227,7 +229,7 @@ Acceptance criteria:
 15. ~~**OPS2 — Backend-backed operations status API**~~ ✅ → `/api/operations/status`
 16. ~~**OPS3 — Prometheus-backed operations signals**~~ ✅
 17. ~~**OPS4 — Operations last-success timestamps**~~ ✅
-18. **BYOK3 — DEK epochs / broader key lifecycle** ← recommended product/security track
+18. ~~**BYOK3 — DEK epochs / broader key lifecycle**~~ ✅
 19. **SEC3 — formal external validation / pen-test execution** ← recommended business/procurement track
 20. **OPS5 — Alertmanager aggregation / retry controls** ← optional operations v2+
 
@@ -239,10 +241,10 @@ Acceptance criteria:
 
 - **До enterprise pilot:** фундаментальные blockers закрыты; PROD1 и OPS2-OPS4 дают deployment-specific go/no-go validation и runtime operations status.
 - **До signed production:** ✅ все закрыты.
-- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 + BYOK2.1 sweep закрыты для audit payload; остаются v2+ BYOK DEK epochs, optional OPS5 Alertmanager/retry controls и customer-specific identity/compliance deltas.
+- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 + BYOK2.1 sweep + BYOK3 DEK epochs закрыты для audit payload; остаются v2+ broader BYOK payload classes, optional OPS5 Alertmanager/retry controls и customer-specific identity/compliance deltas.
 
 Следующий recommended work item:
 
-1. **BYOK3 — DEK epochs / broader key lifecycle**, если приоритет — product/security глубина и customer-managed encryption story.
-2. **SEC3 — formal external validation / pen-test execution**, если приоритет — enterprise procurement, security review или independent assessment.
-3. **OPS5 — Alertmanager aggregation / retry controls**, если operator workflow требует remediation controls прямо из Operations UI.
+1. **SEC3 — formal external validation / pen-test execution**, если приоритет — enterprise procurement, security review или independent assessment.
+2. **OPS5 — Alertmanager aggregation / retry controls**, если operator workflow требует remediation controls прямо из Operations UI.
+3. **BYOK4 — broader payload classes / customer-specific KMS policies**, если следующий приоритет — расширение BYOK за пределы audit request/response payload.

@@ -81,6 +81,12 @@ RUN CGO_ENABLED=0 go build \
     -o /audit-byok-sweep \
     ./cmd/audit-byok-sweep
 
+# Build audit-byok-epochs CLI (BYOK3: tenant DEK epoch lifecycle).
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-w -s" \
+    -o /audit-byok-epochs \
+    ./cmd/audit-byok-epochs
+
 # Build firewall-corpus-verify CLI (F8.1: semantic_v2 promotion gate).
 RUN CGO_ENABLED=0 go build \
     -ldflags="-w -s" \
@@ -113,6 +119,7 @@ COPY --from=builder /audit-evidence-report   /usr/local/bin/audit-evidence-repor
 COPY --from=builder /audit-collect-evidence  /usr/local/bin/audit-collect-evidence
 COPY --from=builder /audit-access-review    /usr/local/bin/audit-access-review
 COPY --from=builder /audit-byok-sweep       /usr/local/bin/audit-byok-sweep
+COPY --from=builder /audit-byok-epochs      /usr/local/bin/audit-byok-epochs
 COPY --from=builder /firewall-corpus-verify /usr/local/bin/firewall-corpus-verify
 COPY --from=builder /shadowai-prod-validate /usr/local/bin/shadowai-prod-validate
 

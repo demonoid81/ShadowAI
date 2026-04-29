@@ -16,13 +16,15 @@ const (
 )
 
 type Envelope struct {
-	V     int    `json:"v"`
-	Alg   string `json:"alg"`
-	KID   string `json:"kid"`
-	Field string `json:"field,omitempty"`
-	IV    string `json:"iv,omitempty"`
-	CT    string `json:"ct"`
-	Tag   string `json:"tag,omitempty"`
+	V           int    `json:"v"`
+	Alg         string `json:"alg"`
+	KID         string `json:"kid"`
+	Field       string `json:"field,omitempty"`
+	OrgID       string `json:"org_id,omitempty"`
+	ProviderKID string `json:"provider_kid,omitempty"`
+	IV          string `json:"iv,omitempty"`
+	CT          string `json:"ct"`
+	Tag         string `json:"tag,omitempty"`
 }
 
 func EncodeEnvelope(env Envelope) (string, error) {

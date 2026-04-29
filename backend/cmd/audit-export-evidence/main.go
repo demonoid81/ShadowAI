@@ -40,6 +40,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -49,6 +50,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/shadowai/backend/internal/byok"
 	"github.com/shadowai/backend/internal/chain"
 	"github.com/shadowai/backend/internal/evidencebundle"
 )
@@ -314,13 +316,19 @@ func main() {
 	if err != nil {
 		exitErr("compute bundle hashes: %v", err)
 	}
+	encryptedFields, keyEpochs, err := fetchBYOKBundleMetadata(ctx, db, tenantOrgID)
+	if err != nil {
+		exitErr("fetch BYOK bundle metadata: %v", err)
+	}
 	manifest := &evidencebundle.BundleManifest{
-		Version:        evidencebundle.BundleVersion,
-		ExportTime:     time.Now().UTC(),
-		Tables:         tables,
-		ExporterCommit: exporterCommit,
-		DBFingerprint:  dbFingerprint,
-		FileSHA256:     hashes,
+		Version:         evidencebundle.BundleVersion,
+		ExportTime:      time.Now().UTC(),
+		Tables:          tables,
+		ExporterCommit:  exporterCommit,
+		DBFingerprint:   dbFingerprint,
+		EncryptedFields: encryptedFields,
+		KeyEpochs:       keyEpochs,
+		FileSHA256:      hashes,
 	}
 	if tenantOrgID != "" {
 		manifest.OrgID = tenantOrgID
@@ -413,4 +421,75 @@ func writeJSON(path string, v any) error {
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 	return enc.Encode(v)
+}
+
+func fetchBYOKBundleMetadata(ctx context.Context, db *sql.DB, orgID string) ([]string, []evidencebundle.KeyEpochSummary, error) {
+	where := "WHERE (COALESCE(request_body,'') LIKE 'byok:v1:%' OR COALESCE(response_body,'') LIKE 'byok:v1:%')"
+	args := []any{}
+	if strings.TrimSpace(orgID) != "" {
+		where += " AND org_id = $1"
+		args = append(args, strings.TrimSpace(orgID))
+	}
+	rows, err := db.QueryContext(ctx, `SELECT COALESCE(request_body,''), COALESCE(response_body,'')
+		FROM audit_logs `+where, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	fieldSeen := map[string]bool{}
+	kidCounts := map[string]int{}
+	for rows.Next() {
+		var req, resp string
+		if err := rows.Scan(&req, &resp); err != nil {
+			return nil, nil, err
+		}
+		for _, item := range []struct {
+			field string
+			value string
+		}{
+			{field: "audit_logs.request_body", value: req},
+			{field: "audit_logs.response_body", value: resp},
+		} {
+			if !byok.IsEnvelopeString(item.value) {
+				continue
+			}
+			env, err := byok.DecodeEnvelope(item.value)
+			if err != nil {
+				continue
+			}
+			fieldSeen[item.field] = true
+			kidCounts[env.KID]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	encryptedFields := make([]string, 0, len(fieldSeen))
+	for _, field := range []string{"audit_logs.request_body", "audit_logs.response_body"} {
+		if fieldSeen[field] {
+			encryptedFields = append(encryptedFields, field)
+		}
+	}
+	if len(kidCounts) == 0 {
+		return encryptedFields, nil, nil
+	}
+	summaries := make([]evidencebundle.KeyEpochSummary, 0, len(kidCounts))
+	for kid, count := range kidCounts {
+		var s evidencebundle.KeyEpochSummary
+		err := db.QueryRowContext(ctx, `SELECT org_id::text, kid, provider, provider_kid, status
+			FROM byok_key_epochs WHERE kid = $1`, kid).Scan(&s.OrgID, &s.KID, &s.Provider, &s.ProviderKID, &s.Status)
+		if errors.Is(err, sql.ErrNoRows) {
+			s = evidencebundle.KeyEpochSummary{KID: kid, Status: "unknown", FieldCount: count}
+			summaries = append(summaries, s)
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		s.FieldCount = count
+		summaries = append(summaries, s)
+	}
+	return encryptedFields, summaries, nil
 }

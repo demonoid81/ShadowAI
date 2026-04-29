@@ -59,7 +59,7 @@ func main() {
 	// Repositories
 	authRepo := auth.NewRepository(db)
 	auditRepo := audit.NewRepository(db).WithChainSecret(cfg.AuditChainSecret)
-	auditRepo, err = configureAuditBYOK(auditRepo, cfg)
+	auditRepo, err = configureAuditBYOK(auditRepo, cfg, db)
 	if err != nil {
 		log.Fatalf("audit BYOK config: %v", err)
 	}
