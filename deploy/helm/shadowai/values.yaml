@@ -54,6 +54,16 @@ config:
   BYOK_VAULT_KEY_NAME: ""  # пример: "shadowai-audit-payload"
   BYOK_TIMEOUT: "5s"
 
+  # OPS3: backend-backed production signals for /api/operations/status.
+  # Empty OPERATIONS_PROMETHEUS_URL keeps external scheduler/alert signals as unknown.
+  # Queries must return numeric violation counts: 0 = ok, >0 = violation.
+  # CronJob violations are rendered as error; alert violations are rendered as warn.
+  OPERATIONS_PROMETHEUS_URL: ""          # example: "http://prometheus-server.monitoring.svc:9090"
+  OPERATIONS_PROMETHEUS_TIMEOUT: "2s"
+  OPERATIONS_EVIDENCE_EXPORT_QUERY: ""   # example: sum(kube_job_status_failed{job_name=~".*evidence-export.*"})
+  OPERATIONS_EVIDENCE_AUDIT_REPORT_QUERY: ""
+  OPERATIONS_PROMETHEUS_ALERTS_QUERY: "" # example: sum(ALERTS{alertstate="firing"})
+
   # W8: Additional independent anchor sink (opt-in, default disabled).
   # Enable to publish signed Merkle anchor manifests to a second independent backend.
   # One signed manifest is written to ALL configured sinks (no re-signing).

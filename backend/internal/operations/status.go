@@ -50,24 +50,30 @@ type DependencyStatus struct {
 }
 
 type RuntimeConfig struct {
-	AuditPayloadMode           string
-	AuditRetentionDays         int
-	AuditPurgeInterval         time.Duration
-	AuditAnchorInterval        time.Duration
-	AuditAnchorSink            string
-	AuditAnchorAdditionalSinks string
-	AuditAnchorSigningEnabled  bool
-	AuditAnchorPubKeyID        string
-	AuditChainEnabled          bool
-	SIEMEnabled                bool
-	BYOKEnabled                bool
+	AuditPayloadMode                   string
+	AuditRetentionDays                 int
+	AuditPurgeInterval                 time.Duration
+	AuditAnchorInterval                time.Duration
+	AuditAnchorSink                    string
+	AuditAnchorAdditionalSinks         string
+	AuditAnchorSigningEnabled          bool
+	AuditAnchorPubKeyID                string
+	AuditChainEnabled                  bool
+	SIEMEnabled                        bool
+	BYOKEnabled                        bool
+	OperationsPrometheusURL            string
+	OperationsPrometheusTimeout        time.Duration
+	OperationsEvidenceExportQuery      string
+	OperationsEvidenceAuditReportQuery string
+	OperationsPrometheusAlertsQuery    string
 }
 
 type Handler struct {
-	cfg   RuntimeConfig
-	db    *sql.DB
-	redis redis.UniversalClient
-	now   func() time.Time
+	cfg        RuntimeConfig
+	db         *sql.DB
+	redis      redis.UniversalClient
+	prometheus PrometheusQuerier
+	now        func() time.Time
 }
 
 func RuntimeConfigFromConfig(cfg *config.Config) RuntimeConfig {
@@ -75,30 +81,41 @@ func RuntimeConfigFromConfig(cfg *config.Config) RuntimeConfig {
 		return RuntimeConfig{}
 	}
 	return RuntimeConfig{
-		AuditPayloadMode:           cfg.AuditPayloadMode,
-		AuditRetentionDays:         cfg.AuditRetentionDays,
-		AuditPurgeInterval:         cfg.AuditPurgeInterval,
-		AuditAnchorInterval:        cfg.AuditAnchorInterval,
-		AuditAnchorSink:            cfg.AuditAnchorSink,
-		AuditAnchorAdditionalSinks: cfg.AuditAnchorAdditionalSinks,
-		AuditAnchorSigningEnabled:  strings.TrimSpace(cfg.AuditAnchorSigningKey) != "",
-		AuditAnchorPubKeyID:        cfg.AuditAnchorPubKeyID,
-		AuditChainEnabled:          strings.TrimSpace(cfg.AuditChainSecret) != "",
-		SIEMEnabled:                cfg.SIEMEnabled,
-		BYOKEnabled:                cfg.BYOKEnabled,
+		AuditPayloadMode:                   cfg.AuditPayloadMode,
+		AuditRetentionDays:                 cfg.AuditRetentionDays,
+		AuditPurgeInterval:                 cfg.AuditPurgeInterval,
+		AuditAnchorInterval:                cfg.AuditAnchorInterval,
+		AuditAnchorSink:                    cfg.AuditAnchorSink,
+		AuditAnchorAdditionalSinks:         cfg.AuditAnchorAdditionalSinks,
+		AuditAnchorSigningEnabled:          strings.TrimSpace(cfg.AuditAnchorSigningKey) != "",
+		AuditAnchorPubKeyID:                cfg.AuditAnchorPubKeyID,
+		AuditChainEnabled:                  strings.TrimSpace(cfg.AuditChainSecret) != "",
+		SIEMEnabled:                        cfg.SIEMEnabled,
+		BYOKEnabled:                        cfg.BYOKEnabled,
+		OperationsPrometheusURL:            cfg.OperationsPrometheusURL,
+		OperationsPrometheusTimeout:        cfg.OperationsPrometheusTimeout,
+		OperationsEvidenceExportQuery:      cfg.OperationsEvidenceExportQuery,
+		OperationsEvidenceAuditReportQuery: cfg.OperationsEvidenceAuditReportQuery,
+		OperationsPrometheusAlertsQuery:    cfg.OperationsPrometheusAlertsQuery,
 	}
 }
 
 func NewHandler(cfg *config.Config, db *sql.DB, redis redis.UniversalClient) *Handler {
+	runtimeCfg := RuntimeConfigFromConfig(cfg)
+	prometheus, err := NewPrometheusClient(runtimeCfg.OperationsPrometheusURL, runtimeCfg.OperationsPrometheusTimeout)
+	if err != nil {
+		prometheus = failedPrometheusQuerier{err: err}
+	}
 	return &Handler{
-		cfg:   RuntimeConfigFromConfig(cfg),
-		db:    db,
-		redis: redis,
-		now:   time.Now,
+		cfg:        runtimeCfg,
+		db:         db,
+		redis:      redis,
+		prometheus: prometheus,
+		now:        time.Now,
 	}
 }
 
-func BuildSnapshot(cfg RuntimeConfig, deps DependencyStatus, generatedAt time.Time) Snapshot {
+func BuildSnapshot(cfg RuntimeConfig, deps DependencyStatus, generatedAt time.Time, externalSignals ...Signal) Snapshot {
 	signals := []Signal{
 		{
 			Key:     "liveness",
@@ -129,6 +146,7 @@ func BuildSnapshot(cfg RuntimeConfig, deps DependencyStatus, generatedAt time.Ti
 			Message: "Prometheus alert state is not integrated with this API yet",
 		},
 	}
+	signals = overrideSignals(signals, externalSignals)
 
 	return Snapshot{
 		GeneratedAt: generatedAt.UTC(),
@@ -141,7 +159,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	resp := BuildSnapshot(h.cfg, h.checkDependencies(ctx), h.now())
+	resp := BuildSnapshot(h.cfg, h.checkDependencies(ctx), h.now(), PrometheusSignals(ctx, h.cfg, h.prometheus)...)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -291,4 +309,25 @@ func nonEmptyCSVCount(value string) int {
 		}
 	}
 	return count
+}
+
+func overrideSignals(base []Signal, overrides []Signal) []Signal {
+	if len(overrides) == 0 {
+		return base
+	}
+	byKey := make(map[string]Signal, len(overrides))
+	for _, signal := range overrides {
+		if strings.TrimSpace(signal.Key) != "" {
+			byKey[signal.Key] = signal
+		}
+	}
+	out := make([]Signal, 0, len(base))
+	for _, signal := range base {
+		if replacement, ok := byKey[signal.Key]; ok {
+			out = append(out, replacement)
+			continue
+		}
+		out = append(out, signal)
+	}
+	return out
 }

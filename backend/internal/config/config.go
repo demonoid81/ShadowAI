@@ -44,6 +44,16 @@ type Config struct {
 	ServerReadHeaderTimeout      time.Duration
 	ServerMaxHeaderBytes         int
 
+	// OPS3: backend-backed production signals for /api/operations/status.
+	// Prometheus URL is internal-only and must not be returned to clients.
+	// Query expressions are deployment-specific because CronJob and alert
+	// labels differ across clusters.
+	OperationsPrometheusURL            string
+	OperationsPrometheusTimeout        time.Duration
+	OperationsEvidenceExportQuery      string
+	OperationsEvidenceAuditReportQuery string
+	OperationsPrometheusAlertsQuery    string
+
 	// PR-A: audit privacy.
 	// AuditPayloadMode: "none" | "metadata" | "redacted" | "full".
 	// Default "redacted" — secure-by-default. "full" требует явного opt-in
@@ -372,6 +382,14 @@ func Load() *Config {
 		ServerIdleTimeout:            idleTimeout,
 		ServerReadHeaderTimeout:      readHeaderTimeout,
 		ServerMaxHeaderBytes:         getEnvInt("SERVER_MAX_HEADER_BYTES", 1<<20),
+
+		// OPS3: Prometheus-backed production signals. Empty URL = disabled,
+		// preserving OPS2 unknown placeholders.
+		OperationsPrometheusURL:            getEnv("OPERATIONS_PROMETHEUS_URL", ""),
+		OperationsPrometheusTimeout:        getDuration("OPERATIONS_PROMETHEUS_TIMEOUT", 2*time.Second),
+		OperationsEvidenceExportQuery:      getEnv("OPERATIONS_EVIDENCE_EXPORT_QUERY", ""),
+		OperationsEvidenceAuditReportQuery: getEnv("OPERATIONS_EVIDENCE_AUDIT_REPORT_QUERY", ""),
+		OperationsPrometheusAlertsQuery:    getEnv("OPERATIONS_PROMETHEUS_ALERTS_QUERY", ""),
 
 		// PR-F7.1: streaming transport mode.
 		StreamingMode:                   getEnv("STREAMING_MODE", "buffered"),
