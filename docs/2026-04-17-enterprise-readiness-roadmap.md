@@ -1,7 +1,7 @@
 # ShadowAI Enterprise Readiness Roadmap
 
-Дата: 2026-04-26
-Статус: актуализировано после E1/E2/E3, T2/T3, G4, W5.2/W6, O4.4 и SIEM v1.1.
+Дата: 2026-04-29
+Статус: актуализировано после OPS2-OPS4 Operations status hardening, UX8-UX10 frontend console completion, E1/E2/E3, T2/T3, G4, W5.2/W6, O4.4 и SIEM v1.1.
 
 ## Цель
 
@@ -32,7 +32,7 @@
 | Tenant evidence T3/W6 | ✅ | tenant Merkle subset proofs; tenant bundles do not expose cross-tenant row hashes |
 | WORM / evidence W1-W5.2 | ✅ | HMAC chain, Merkle anchors, Ed25519 manifests, file/immudb sinks, live immudb v2 integration, portable offline bundle |
 | Evidence ops O4.1-O4.4.1 | ✅ | scheduled export, S3 backend, Object Lock, retention audit report; EvidenceAuditReportJobFailed/Missing alerts; all violation codes documented |
-| Production ops O1/O3 | ✅ | Docker/Helm, migrations init, health/readiness, Prometheus alerts, smoke harness, deploy runbooks |
+| Production ops O1/O3 + OPS2-OPS4 | ✅ | Docker/Helm, migrations init, health/readiness, Prometheus alerts, smoke harness, deploy runbooks; `/api/operations/status` gives safe backend-backed operations summary, Prometheus-backed production signals and last-success timestamps for evidence export/audit report |
 | CI / release gates | ✅ | core/enterprise/integration/smoke tests, Docker build, Helm validate, migration smoke, security jobs |
 | Prod config hardening | ✅ | startup fail-fast for unsafe production config across auth/SIEM/legalhold/WORM/SA_v2/OIDC/SCIM |
 | LLM security validation SEC1 | ✅ | external assessor package: scope, rules of engagement, attack matrix, safe test corpus, evidence workflow and remediation template |
@@ -43,8 +43,8 @@
 
 ### Что это означает
 
-- **Enterprise pilot ready:** да, для controlled self-hosted или dedicated-tenant deployment, если operator выполняет production checklist, PROD1 validation и secrets/bootstrap корректны.
-- **Signed production ready:** близко к да. Остались в основном documentation/control-mapping и performance hardening, а не фундаментальные security gaps.
+- **Enterprise pilot ready:** да, для controlled self-hosted или dedicated-tenant deployment, если operator выполняет production checklist, PROD1 validation, OPS status checks и secrets/bootstrap корректны.
+- **Signed production ready:** да, при корректной customer-specific конфигурации и выполненном production validation pack. Оставшиеся пункты — v2+ hardening/customer deltas, а не фундаментальные blockers.
 - **Compliance evidence story:** сильная. Есть tamper-evident DB chain, external anchors, signed manifests, S3 Object Lock и portable auditor bundles.
 - **Multi-tenant posture:** базовый product-complete. Есть org boundary в runtime, SCIM, audit, governance, purge/export и tenant proofs.
 - **LLM firewall runtime:** защищаемый. Остаётся Stage 2 sanitize/promotion work, но streaming больше не является blocker для enterprise pilot.
@@ -63,19 +63,17 @@
 
 ### Production Hardening
 
-3. **G2.2: governance policy cache**
-   - Сейчас policy evaluation корректна, но high-traffic proxy не должен зависеть от DB read на hot path.
-   - Нужен immutable in-memory snapshot, refresh на policy update, TTL fallback, cache-staleness metrics, fail-closed on corrupt policy.
+3. **Operations status v2+**
+   - OPS2-OPS4 закрыли safe backend status API, Prometheus-backed signals и last-success timestamps.
+   - Остались Alertmanager state aggregation и explicit retry/re-run controls, если operator хочет управлять remediation из UI.
 
-4. **F7.5: streaming Stage 2**
-   - Incremental sanitize semantics.
-   - Promotion criteria для снятия prod opt-in gate: fallback/error budget, shadow mismatch rate, provider-specific confidence.
-   - Решение по legacy buffered path только после production proof window.
+4. **BYOK v2+ lifecycle**
+   - BYOK2/BYOK2.1 закрыли Vault Transit encryption для audit request/response payload и legacy sweep.
+   - Остались DEK epochs, tenant/key lifecycle metadata, broader payload classes и customer-specific KMS policies.
 
-5. **Legal hold v3**
-   - Hold scope шире whole-user: date-range / query-scope holds.
-   - Release 4-eyes.
-   - SLA escalation, bulk approvals, pending queue operations.
+5. **External validation execution**
+   - SEC1 даёт assessor package.
+   - Следующий шаг при procurement/customer demand: formal execution workflow, artifacts, remediation tracking and sign-off.
 
 6. **W7/W8: evidence operations hardening** ✅
    - Keyring verification для `AUDIT_CHAIN_SECRET` и Ed25519 anchor signing.
@@ -85,21 +83,16 @@
 
 ### Compliance / Enterprise Review
 
-7. **SOC 2 / ISO readiness mapping**
-   - Controls inventory.
-   - Control owner, evidence artifact, cadence, retention, alert.
-   - Mapping реализованных technical controls к SOC 2 / ISO 27001 evidence.
+7. **SOC 2 / ISO readiness mapping** ✅
+   - Controls inventory and evidence artifact mapping exist in `docs/compliance/soc2-iso-control-mapping.md`.
 
-8. **BYOK / KMS / encryption controls**
-   - Customer-managed key story.
-   - KMS integration points.
-   - Field-level encryption hooks for audit-sensitive fields.
+8. **BYOK / KMS / encryption controls** ✅ / v2+
+   - BYOK1 RFC, BYOK2 Vault Transit new-write encryption and BYOK2.1 legacy sweep are implemented.
+   - DEK epochs and additional payload classes remain v2+.
 
-9. **Alert coverage refinement**
-   - Legal hold pending/SLA alerts.
-   - SIEM queue/drop/retry dashboards.
-   - semantic_v2 `fail_open` / `would_block` promotion dashboards. **[implemented: F8.1]**
-   - Evidence audit report alerts are implemented, but operator docs still need final cleanup.
+9. **Alert coverage refinement** ✅ / v2+
+   - Evidence audit report alerts, semantic_v2 promotion signals and Prometheus-backed operations status are implemented.
+   - Alertmanager aggregation remains OPS5/v2+.
 
 ---
 
@@ -111,7 +104,7 @@
 write-through Upsert, TTL fallback (60s), fail-closed на reload error,
 Prometheus metrics `shadowai_governance_cache_*`, go test -race зелёный.
 
-### PR-SOC1: Controls Mapping v1 ← **current**
+### ~~PR-SOC1: Controls Mapping v1~~ ✅
 
 **Цель:** превратить технический readiness в audit-ready material для sales/security review.
 
@@ -129,7 +122,7 @@ Prometheus metrics `shadowai_governance_cache_*`, go test -race зелёный.
 
 ## Next 30-60 Days
 
-### PR-F7.5: Streaming Stage 2
+### ~~PR-F7.5: Streaming Stage 2~~ ✅
 
 Scope:
 
@@ -143,7 +136,7 @@ Acceptance criteria:
 - Streaming sanitize не требует full-buffer fallback для базовых text deltas.
 - Operators видят rollout safety через metrics/audit outcomes.
 
-### PR-W7/W8: Key Rotation, Restore Automation and Multi-Sink Witness
+### ~~PR-W7/W8: Key Rotation, Restore Automation and Multi-Sink Witness~~ ✅
 
 Scope:
 
@@ -158,7 +151,7 @@ Acceptance criteria:
 - Restore drill можно запускать воспроизводимо без ручного runbook-heavy процесса. ✅
 - Additional sinks configurable without breaking single-sink deployments. ✅
 
-### PR-L5: Legal Hold Advanced Workflow
+### ~~PR-L5: Legal Hold Advanced Workflow~~ ✅
 
 Scope:
 
@@ -176,7 +169,7 @@ Acceptance criteria:
 
 ## Next 60-90 Days
 
-### PR-BYOK1: KMS / BYOK Design
+### ~~PR-BYOK1: KMS / BYOK Design~~ ✅
 
 Scope:
 
@@ -189,7 +182,7 @@ Acceptance criteria:
 - Есть defendable answer на вопрос "как клиент контролирует ключи".
 - Implementation path не ломает WORM canonical/hash chain assumptions.
 
-### PR-GA1: Hardened Default / Scale Pass
+### ~~PR-GA1: Hardened Default / Scale Pass~~ ✅
 
 Scope:
 
@@ -231,6 +224,12 @@ Acceptance criteria:
 12. ~~**BYOK2.1 — Legacy audit payload re-encryption sweep**~~ ✅
 13. ~~**SOC2.4 — stale W7/W8/BYOK control gap cleanup**~~ ✅
 14. ~~**PROD1 — deployment-specific production validation pack**~~ ✅ → `docs/runbooks/production-validation.md`
+15. ~~**OPS2 — Backend-backed operations status API**~~ ✅ → `/api/operations/status`
+16. ~~**OPS3 — Prometheus-backed operations signals**~~ ✅
+17. ~~**OPS4 — Operations last-success timestamps**~~ ✅
+18. **BYOK3 — DEK epochs / broader key lifecycle** ← recommended product/security track
+19. **SEC3 — formal external validation / pen-test execution** ← recommended business/procurement track
+20. **OPS5 — Alertmanager aggregation / retry controls** ← optional operations v2+
 
 ---
 
@@ -238,8 +237,12 @@ Acceptance criteria:
 
 Главный принцип теперь:
 
-- **До enterprise pilot:** фундаментальные blockers закрыты; PROD1 добавляет deployment-specific go/no-go validation pack.
+- **До enterprise pilot:** фундаментальные blockers закрыты; PROD1 и OPS2-OPS4 дают deployment-specific go/no-go validation и runtime operations status.
 - **До signed production:** ✅ все закрыты.
-- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 + BYOK2.1 sweep закрыты для audit payload; остаются v2+ BYOK DEK epochs и customer-specific identity/compliance deltas.
+- **До broader GA:** ✅ GA1 (hardened defaults/scale pass) закрыт; BYOK2 v1 + BYOK2.1 sweep закрыты для audit payload; остаются v2+ BYOK DEK epochs, optional OPS5 Alertmanager/retry controls и customer-specific identity/compliance deltas.
 
-Следующий recommended work item: v2+ BYOK DEK epochs или формальный external validation / pen-test execution, если customer требует audit-grade independent assessment.
+Следующий recommended work item:
+
+1. **BYOK3 — DEK epochs / broader key lifecycle**, если приоритет — product/security глубина и customer-managed encryption story.
+2. **SEC3 — formal external validation / pen-test execution**, если приоритет — enterprise procurement, security review или independent assessment.
+3. **OPS5 — Alertmanager aggregation / retry controls**, если operator workflow требует remediation controls прямо из Operations UI.
