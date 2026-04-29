@@ -65,6 +65,9 @@ helm lint ./deploy/helm/shadowai \
 - [ ] `BREAK_GLASS_ENABLED=true` → `BREAK_GLASS_SECRET_HASH` is set
 - [ ] `AUDIT_ANCHOR_SINK=immudb://` → immudb connection + signing key configured
 - [ ] `FIREWALL_SA_V2_ENABLED=true` → embedding endpoint is non-localhost
+- [ ] `evidenceExport.storage=s3` → S3 bucket, credentials, endpoint, and path-style setting are validated in staging
+- [ ] `evidenceExport.s3.objectLock.enabled=true` → bucket was created with Object Lock enabled; do not enable this on an existing non-lock bucket
+- [ ] `evidenceExport.s3.objectLock.enabled=true` → upload path has checksum support (`Content-MD5` or SDK checksum algorithm), otherwise AWS S3 rejects locked `PutObject`
 
 ---
 

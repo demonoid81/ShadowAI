@@ -25,6 +25,24 @@ kubectl create secret generic shadowai-secrets \
 |------------|---------|-----------|-------------|
 | `auditChainSecret` | `AUDIT_CHAIN_SECRET` | **REQUIRED** in enterprise | ≥32 chars HMAC key for tamper-evident chain |
 | `anchorSigningKey` | `AUDIT_ANCHOR_SIGNING_KEY` | If using immudb:// sink | Base64 Ed25519 private key |
+| `anchorPubKey` | mounted file for `audit-export-evidence --pubkey-file` | If evidence export verifies signatures | Base64 Ed25519 public key used by evidence bundles |
+
+## Evidence Export S3 Secrets (if `evidenceExport.storage=s3`)
+
+| Secret key | Env var | Required? | Description |
+|------------|---------|-----------|-------------|
+| `s3AccessKeyID` | `AWS_ACCESS_KEY_ID` | If S3 evidence export enabled | Access key for S3-compatible bundle upload |
+| `s3SecretAccessKey` | `AWS_SECRET_ACCESS_KEY` | If S3 evidence export enabled | Secret key for S3-compatible bundle upload |
+
+The exact key names are configurable via:
+
+```yaml
+evidenceExport:
+  s3:
+    secretName: ""              # defaults to existingSecret
+    accessKeyIDKey: s3AccessKeyID
+    secretAccessKeyKey: s3SecretAccessKey
+```
 
 ## SIEM Secrets
 
@@ -68,6 +86,9 @@ kubectl create secret generic shadowai-secrets \
   --from-literal=redisUrl='...' \
   --from-literal=auditChainSecret='...' \
   --from-literal=anchorSigningKey='...' \
+  --from-literal=anchorPubKey='...' \
+  --from-literal=s3AccessKeyID='...' \
+  --from-literal=s3SecretAccessKey='...' \
   --from-literal=siemBearerToken='...' \
   --from-literal=oidcClientSecret='...' \
   --from-literal=breakGlassSecretHash='...' \
@@ -82,4 +103,6 @@ kubectl create secret generic shadowai-secrets \
 | `breakGlassSecretHash` | Next break-glass use requires new password | Always rotate after use (see runbook) |
 | `auditChainSecret` | Chain verification with old chain needs old key | Keep old key in cold storage for audit-verify |
 | `anchorSigningKey` | New anchors use new key; old anchors use old key | Keep old public key for verify of historical anchors |
+| `anchorPubKey` | New bundles include/verify against new public key | Keep old public keys for historical bundles |
+| `s3AccessKeyID` / `s3SecretAccessKey` | Evidence export upload fails until Secret and bucket policy are updated | Rotate with S3 IAM user/access policy; run manual evidence export after rotation |
 | `scimBearerToken` | IdP can't provision until updated | Coordinate with IdP team; update both simultaneously |
