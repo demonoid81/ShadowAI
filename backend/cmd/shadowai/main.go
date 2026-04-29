@@ -26,6 +26,7 @@ import (
 	"github.com/shadowai/backend/internal/internaldb"
 	"github.com/shadowai/backend/internal/metrics"
 	mw "github.com/shadowai/backend/internal/middleware"
+	"github.com/shadowai/backend/internal/operations"
 	"github.com/shadowai/backend/internal/platform/postgres"
 	rdb "github.com/shadowai/backend/internal/platform/redis"
 	"github.com/shadowai/backend/internal/policy"
@@ -310,6 +311,7 @@ func main() {
 	policyHandler := policy.NewHandler(policySvc)
 	budgetHandler := budget.NewHandler(budgetSvc).WithUserLookup(authRepo)
 	dashHandler := dashboard.NewHandler(db, entBundle.AdminAudit)
+	operationsHandler := operations.NewHandler(cfg, db, redisClient)
 	internalDBHandler := internaldb.NewHandler(internalDBManager, internalDBRepo, auditSvc, auditPayloadMode, dlpSvc, entBundle.AdminAudit)
 
 	proxyHandler := proxy.NewHandler(registry, policySvc, auditSvc, budgetSvc, dlpSvc, cfg.AllowedProviderHosts, router, cache, healthTracker, cfg.MaxCompletionTokens, firewallPipeline, auditPayloadMode, entBundle.Governance, entBundle.AdminAudit)
@@ -494,6 +496,7 @@ func main() {
 	admin.HandleFunc("/dashboard/stats", dashHandler.GetStats).Methods("GET")
 	admin.HandleFunc("/dashboard/usage", dashHandler.GetUsage).Methods("GET")
 	admin.HandleFunc("/dashboard/top-users", dashHandler.GetTopUsers).Methods("GET")
+	admin.HandleFunc("/operations/status", operationsHandler.Status).Methods("GET")
 	internalDBList := auth.RequireRole(auth.RoleAdmin, auth.RoleAnalyst, auth.RoleAuditor)
 	api.Handle("/internal-dbs", internalDBList(http.HandlerFunc(internalDBHandler.ListSources))).Methods("GET")
 	api.Handle("/internal-dbs/", internalDBList(http.HandlerFunc(internalDBHandler.ListSources))).Methods("GET")

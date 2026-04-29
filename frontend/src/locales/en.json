@@ -720,6 +720,29 @@
     "liveKicker": "Live health",
     "liveTitle": "Only real backend endpoints",
     "liveBoundary": "This block calls existing HTTP endpoints from the browser. CronJob, Prometheus and Kubernetes status are not shown as live success until a backend API exists.",
+    "productionKicker": "Production signals API",
+    "productionTitle": "Backend-backed operations summary",
+    "productionBoundary": "Source: GET /api/operations/status. The backend returns only safe read-only status; if a source is not integrated, the signal remains unknown.",
+    "productionLoading": "Loading production status summary.",
+    "productionUnknown": "Production status API is unavailable. This is an unknown state, not a successful check.",
+    "generatedAt": "Generated",
+    "summary": {
+      "total": "Total",
+      "ok": "OK",
+      "warn": "Warn",
+      "error": "Error",
+      "unknown": "Unknown"
+    },
+    "backendSignals": {
+      "liveness": "Process liveness",
+      "readiness": "DB / Redis readiness",
+      "audit_retention": "Audit retention",
+      "evidence_anchors": "Evidence anchors",
+      "siem_delivery": "SIEM delivery",
+      "evidence_export_cronjob": "Evidence export CronJob",
+      "evidence_audit_report_cronjob": "Retention audit CronJob",
+      "prometheus_alerts": "Prometheus alerts"
+    },
     "live": {
       "health": {
         "kicker": "Liveness",
