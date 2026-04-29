@@ -103,6 +103,10 @@
     "consoleSubtitle": "ShadowAI now presents itself as what the backend already is: an enterprise security console for controlled LLM adoption.",
     "readiness": "Production readiness",
     "operatorValidated": "Go / no-go pack",
+    "capabilityReadiness": "Capability posture",
+    "staticPosture": "static",
+    "staticCapability": "Static capability marker — not a live health signal",
+    "readinessBoundary": "This block shows implemented control families. Live production health is shown separately through real API signals.",
     "tags": {
       "firewall": "LLM Firewall",
       "evidence": "Tamper-evident evidence",
@@ -147,7 +151,7 @@
     },
     "trafficKicker": "Observe",
     "trafficTitle": "LLM traffic and cost telemetry",
-    "trafficSubtitle": "Existing dashboard data, now framed as control-plane signal",
+    "trafficSubtitle": "Live data from /api/dashboard/* endpoints",
     "securityKicker": "Security posture",
     "securityTitle": "Signals that matter before go-live",
     "identityKicker": "Identity privacy",
@@ -159,6 +163,25 @@
       "siemDetail": "Async batching, retry and backpressure controls are implemented.",
       "streaming": "Streaming safety track",
       "streamingDetail": "Incremental mode remains gated by proof-window criteria."
+    },
+    "signalKinds": {
+      "live": "live",
+      "capability": "capability"
+    },
+    "liveStates": {
+      "loadingShort": "loading",
+      "unknownShort": "unknown",
+      "statsLoading": "Loading live usage summary.",
+      "statsEmpty": "Live usage summary is not available yet.",
+      "usageLoading": "Loading usage chart.",
+      "usageEmpty": "No usage points in the current window.",
+      "topUsersLoading": "Loading top users.",
+      "topUsersEmpty": "Top users are not available yet."
+    },
+    "errors": {
+      "stats": "Failed to load live usage summary.",
+      "usage": "Failed to load usage chart.",
+      "topUsers": "Failed to load top users."
     },
     "totalRequests": "Total Requests",
     "blockedRequests": "Blocked Requests",
@@ -658,7 +681,18 @@
   },
   "operations": {
     "title": "Operations cockpit for production readiness, restore drills, SIEM delivery and BYOK rollout.",
-    "subtitle": "This view does not show live health. It collects operating procedures that turn backend controls into a repeatable production process.",
+    "subtitle": "This view separates live health endpoints from static operational runbooks. An unavailable signal is rendered as unknown, not green.",
+    "staticCapability": "static",
+    "refresh": "Refresh live signals",
+    "refreshing": "Refreshing...",
+    "status": {
+      "loading": "loading",
+      "ok": "live ok",
+      "warn": "review",
+      "error": "failed",
+      "unknown": "unknown",
+      "checklist": "checklist"
+    },
     "tags": {
       "prod": "PROD1",
       "alerts": "alerts",
@@ -681,6 +715,46 @@
       "byok": {
         "title": "BYOK audit payload rollout",
         "body": "Vault Transit encrypts new audit request/response payloads; legacy rows are handled by the sweep command."
+      }
+    },
+    "liveKicker": "Live health",
+    "liveTitle": "Only real backend endpoints",
+    "liveBoundary": "This block calls existing HTTP endpoints from the browser. CronJob, Prometheus and Kubernetes status are not shown as live success until a backend API exists.",
+    "live": {
+      "health": {
+        "kicker": "Liveness",
+        "title": "Process liveness",
+        "source": "Source: GET /api/health",
+        "loading": "Checking liveness endpoint.",
+        "ok": "The process responds to the liveness probe.",
+        "unknown": "Liveness signal is unavailable from the frontend."
+      },
+      "readiness": {
+        "kicker": "Readiness",
+        "title": "DB / Redis readiness",
+        "source": "Source: GET /api/ready",
+        "loading": "Checking readiness endpoint.",
+        "ok": "DB and Redis are reachable; service can accept traffic.",
+        "failed": "Readiness returned degraded status.",
+        "failedWithChecks": "Readiness degraded: failed checks — {checks}.",
+        "unknown": "Readiness signal is unavailable from the frontend."
+      },
+      "firewall": {
+        "kicker": "LLM Firewall",
+        "title": "Inspector runtime status",
+        "source": "Source: GET /proxy/firewall/status",
+        "loading": "Loading firewall pipeline.",
+        "ok": "Firewall is enabled; enabled inspectors: {enabled}/{total}.",
+        "disabled": "Firewall endpoint is reachable, but pipeline reports disabled.",
+        "unknown": "Firewall status is unavailable or the user lacks admin access."
+      },
+      "audit": {
+        "kicker": "Audit retention",
+        "title": "Audit privacy / purge posture",
+        "source": "Source: GET /api/audit/status",
+        "loading": "Loading audit retention status.",
+        "ok": "Payload mode: {mode}; retention: {days} days; purged rows total: {purged}.",
+        "unknown": "Audit status is unavailable or the user lacks admin access."
       }
     },
     "runbookKicker": "Production runbook",

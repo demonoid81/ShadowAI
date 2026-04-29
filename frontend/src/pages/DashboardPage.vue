@@ -16,11 +16,12 @@
 
         <div class="rounded-3xl border border-white/10 bg-slate-950/60 p-5 shadow-2xl shadow-cyan-950/20">
           <div class="flex items-center justify-between">
-            <span class="text-xs uppercase tracking-[0.26em] text-slate-500">{{ $t('dashboard.readiness') }}</span>
-            <span class="rounded-full bg-emerald-400/15 px-3 py-1 text-xs font-semibold text-emerald-200">
-              {{ $t('dashboard.operatorValidated') }}
+            <span class="text-xs uppercase tracking-[0.26em] text-slate-500">{{ $t('dashboard.capabilityReadiness') }}</span>
+            <span class="rounded-full bg-cyan-400/15 px-3 py-1 text-xs font-semibold text-cyan-100">
+              {{ $t('dashboard.staticPosture') }}
             </span>
           </div>
+          <p class="mt-3 text-xs leading-5 text-slate-500">{{ $t('dashboard.readinessBoundary') }}</p>
           <div class="mt-5 space-y-4">
             <div v-for="item in readinessItems" :key="item.labelKey">
               <div class="mb-1 flex items-center justify-between text-sm">
@@ -52,14 +53,28 @@
           <span class="status-dot" :class="card.dotClass" />
           <span>{{ $t(card.signalKey) }}</span>
         </div>
+        <div class="mt-4 rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-xs text-slate-500">
+          {{ $t('dashboard.staticCapability') }}
+        </div>
       </article>
     </section>
 
-    <section class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4" v-if="store.stats">
+    <section v-if="store.statsLoading" class="console-card text-sm text-slate-400">
+      {{ $t('dashboard.liveStates.statsLoading') }}
+    </section>
+    <section v-else-if="store.statsError" class="console-card">
+      <div class="rounded-2xl border border-red-300/20 bg-red-400/10 p-4 text-sm text-red-100">
+        {{ $t(store.statsError) }}
+      </div>
+    </section>
+    <section v-else-if="store.stats" class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
       <StatsCard :label="t('dashboard.totalRequests')" :value="store.stats.total_requests" format="number" />
       <StatsCard :label="t('dashboard.blockedRequests')" :value="store.stats.blocked_requests" format="number" color="text-red-300" />
       <StatsCard :label="t('dashboard.totalCost')" :value="store.stats.total_cost" format="currency" color="text-emerald-300" />
       <StatsCard :label="t('dashboard.activeUsers')" :value="store.stats.active_users" format="number" color="text-cyan-300" />
+    </section>
+    <section v-else class="console-card text-sm text-slate-400">
+      {{ $t('dashboard.liveStates.statsEmpty') }}
     </section>
 
     <section class="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
@@ -71,7 +86,16 @@
           </div>
           <div class="text-sm text-slate-500">{{ $t('dashboard.trafficSubtitle') }}</div>
         </div>
-        <UsageChart :data="store.usage" />
+        <div v-if="store.usageLoading" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+          {{ $t('dashboard.liveStates.usageLoading') }}
+        </div>
+        <div v-else-if="store.usageError" class="rounded-2xl border border-red-300/20 bg-red-400/10 p-4 text-sm text-red-100">
+          {{ $t(store.usageError) }}
+        </div>
+        <div v-else-if="store.usage.length === 0" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+          {{ $t('dashboard.liveStates.usageEmpty') }}
+        </div>
+        <UsageChart v-else :data="store.usage" />
       </div>
 
       <div class="console-card">
@@ -81,7 +105,10 @@
           <div v-for="signal in securitySignals" :key="signal.labelKey" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <div class="flex items-center justify-between">
               <span class="text-sm font-medium text-slate-200">{{ $t(signal.labelKey) }}</span>
-              <span class="text-sm font-semibold" :class="signal.color">{{ signal.value }}</span>
+              <div class="flex items-center gap-2">
+                <span class="rounded-full bg-white/5 px-2 py-1 text-xs text-slate-400">{{ $t(signal.kindKey) }}</span>
+                <span class="text-sm font-semibold" :class="signal.color">{{ signal.value }}</span>
+              </div>
             </div>
             <p class="mt-2 text-xs leading-5 text-slate-500">{{ $t(signal.detailKey) }}</p>
           </div>
@@ -97,7 +124,16 @@
         </div>
         <div class="text-sm text-slate-500">{{ $t('dashboard.maskedIdentityNote') }}</div>
       </div>
-      <div class="overflow-hidden rounded-2xl border border-white/10">
+      <div v-if="store.topUsersLoading" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+        {{ $t('dashboard.liveStates.topUsersLoading') }}
+      </div>
+      <div v-else-if="store.topUsersError" class="rounded-2xl border border-red-300/20 bg-red-400/10 p-4 text-sm text-red-100">
+        {{ $t(store.topUsersError) }}
+      </div>
+      <div v-else-if="store.topUsers.length === 0" class="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+        {{ $t('dashboard.liveStates.topUsersEmpty') }}
+      </div>
+      <div v-else class="overflow-hidden rounded-2xl border border-white/10">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-white/10 bg-white/[0.03] text-left text-xs uppercase tracking-[0.18em] text-slate-500">
@@ -186,6 +222,8 @@ const readinessItems = [
 
 const blockRate = computed(() => {
   const stats = store.stats
+  if (store.statsLoading) return t('dashboard.liveStates.loadingShort')
+  if (store.statsError || !stats) return t('dashboard.liveStates.unknownShort')
   if (!stats?.total_requests) return '0.0%'
   return `${((Number(stats.blocked_requests || 0) / Number(stats.total_requests)) * 100).toFixed(1)}%`
 })
@@ -195,19 +233,22 @@ const securitySignals = computed(() => [
     labelKey: 'dashboard.signals.blockRate',
     detailKey: 'dashboard.signals.blockRateDetail',
     value: blockRate.value,
-    color: 'text-red-200'
+    color: store.statsError || !store.stats ? 'text-slate-300' : 'text-red-200',
+    kindKey: 'dashboard.signalKinds.live'
   },
   {
     labelKey: 'dashboard.signals.siem',
     detailKey: 'dashboard.signals.siemDetail',
     value: 'S1.1',
-    color: 'text-emerald-200'
+    color: 'text-emerald-200',
+    kindKey: 'dashboard.signalKinds.capability'
   },
   {
     labelKey: 'dashboard.signals.streaming',
     detailKey: 'dashboard.signals.streamingDetail',
     value: 'F7.6',
-    color: 'text-cyan-200'
+    color: 'text-cyan-200',
+    kindKey: 'dashboard.signalKinds.capability'
   }
 ])
 

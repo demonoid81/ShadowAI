@@ -103,6 +103,10 @@
     "consoleSubtitle": "ShadowAI теперь выглядит как то, чем является по backend-возможностям: enterprise security console для безопасного использования LLM в организациях.",
     "readiness": "Production readiness",
     "operatorValidated": "Go / no-go pack",
+    "capabilityReadiness": "Capability posture",
+    "staticPosture": "static",
+    "staticCapability": "Static capability marker — не live health signal",
+    "readinessBoundary": "Этот блок показывает реализованные control families. Live production health отображается отдельно через реальные API-сигналы.",
     "tags": {
       "firewall": "LLM Firewall",
       "evidence": "Tamper-evident evidence",
@@ -147,7 +151,7 @@
     },
     "trafficKicker": "Observe",
     "trafficTitle": "LLM traffic and cost telemetry",
-    "trafficSubtitle": "Existing dashboard data, now framed as control-plane signal",
+    "trafficSubtitle": "Live data from /api/dashboard/* endpoints",
     "securityKicker": "Security posture",
     "securityTitle": "Signals that matter before go-live",
     "identityKicker": "Identity privacy",
@@ -159,6 +163,25 @@
       "siemDetail": "Async batching, retry and backpressure controls are implemented.",
       "streaming": "Streaming safety track",
       "streamingDetail": "Incremental mode remains gated by proof-window criteria."
+    },
+    "signalKinds": {
+      "live": "live",
+      "capability": "capability"
+    },
+    "liveStates": {
+      "loadingShort": "loading",
+      "unknownShort": "unknown",
+      "statsLoading": "Загружается live usage summary.",
+      "statsEmpty": "Live usage summary пока недоступен.",
+      "usageLoading": "Загружается usage chart.",
+      "usageEmpty": "За выбранное окно нет usage points.",
+      "topUsersLoading": "Загружается top users.",
+      "topUsersEmpty": "Top users пока отсутствуют."
+    },
+    "errors": {
+      "stats": "Не удалось загрузить live usage summary.",
+      "usage": "Не удалось загрузить usage chart.",
+      "topUsers": "Не удалось загрузить top users."
     },
     "totalRequests": "Всего запросов",
     "blockedRequests": "Заблокировано",
@@ -658,7 +681,18 @@
   },
   "operations": {
     "title": "Operations cockpit для production readiness, restore drills, SIEM delivery и BYOK rollout.",
-    "subtitle": "Этот экран не показывает live health. Он собирает операционные процедуры, которые переводят backend controls в повторяемый production процесс.",
+    "subtitle": "Экран разделяет live health endpoints и статические operational runbooks. Недоступный сигнал отображается как unknown, а не как зелёный статус.",
+    "staticCapability": "static",
+    "refresh": "Обновить live signals",
+    "refreshing": "Обновление...",
+    "status": {
+      "loading": "loading",
+      "ok": "live ok",
+      "warn": "review",
+      "error": "failed",
+      "unknown": "unknown",
+      "checklist": "checklist"
+    },
     "tags": {
       "prod": "PROD1",
       "alerts": "alerts",
@@ -681,6 +715,46 @@
       "byok": {
         "title": "BYOK audit payload rollout",
         "body": "Vault Transit encrypts new audit request/response payloads; legacy rows закрываются sweep-командой."
+      }
+    },
+    "liveKicker": "Live health",
+    "liveTitle": "Только реальные backend endpoints",
+    "liveBoundary": "Этот блок вызывает существующие HTTP endpoints из браузера. CronJob, Prometheus и Kubernetes status не показываются как live success, пока нет backend API.",
+    "live": {
+      "health": {
+        "kicker": "Liveness",
+        "title": "Process liveness",
+        "source": "Source: GET /api/health",
+        "loading": "Проверяется liveness endpoint.",
+        "ok": "Процесс отвечает на liveness probe.",
+        "unknown": "Liveness signal недоступен из frontend."
+      },
+      "readiness": {
+        "kicker": "Readiness",
+        "title": "DB / Redis readiness",
+        "source": "Source: GET /api/ready",
+        "loading": "Проверяется readiness endpoint.",
+        "ok": "DB и Redis доступны; service может принимать traffic.",
+        "failed": "Readiness вернул degraded status.",
+        "failedWithChecks": "Readiness degraded: failed checks — {checks}.",
+        "unknown": "Readiness signal недоступен из frontend."
+      },
+      "firewall": {
+        "kicker": "LLM Firewall",
+        "title": "Inspector runtime status",
+        "source": "Source: GET /proxy/firewall/status",
+        "loading": "Загружается firewall pipeline.",
+        "ok": "Firewall включён; enabled inspectors: {enabled}/{total}.",
+        "disabled": "Firewall endpoint доступен, но pipeline сообщает disabled.",
+        "unknown": "Firewall status недоступен или пользователь не имеет admin access."
+      },
+      "audit": {
+        "kicker": "Audit retention",
+        "title": "Audit privacy / purge posture",
+        "source": "Source: GET /api/audit/status",
+        "loading": "Загружается audit retention status.",
+        "ok": "Payload mode: {mode}; retention: {days} days; purged rows total: {purged}.",
+        "unknown": "Audit status недоступен или пользователь не имеет admin access."
       }
     },
     "runbookKicker": "Production runbook",

@@ -18,12 +18,16 @@
       <article v-for="card in cards" :key="card.titleKey" class="posture-card">
         <div class="flex items-center justify-between">
           <span class="text-xs uppercase tracking-[0.22em] text-slate-500">{{ card.track }}</span>
-          <span class="status-dot" :class="card.dotClass" />
+          <span class="rounded-full bg-cyan-400/10 px-3 py-1 text-xs font-semibold text-cyan-100">
+            {{ $t('operations.staticCapability') }}
+          </span>
         </div>
         <h3 class="mt-4 text-lg font-semibold text-white">{{ $t(card.titleKey) }}</h3>
         <p class="mt-3 text-sm leading-6 text-slate-400">{{ $t(card.bodyKey) }}</p>
       </article>
     </section>
+
+    <OperationLiveSignals />
 
     <section class="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
       <div class="console-card">
@@ -52,13 +56,15 @@
 </template>
 
 <script setup lang="ts">
+import OperationLiveSignals from '../components/operations/OperationLiveSignals.vue'
+
 const tags = ['operations.tags.prod', 'operations.tags.alerts', 'operations.tags.restore', 'operations.tags.byok']
 
 const cards = [
-  { track: 'PROD1', titleKey: 'operations.cards.validation.title', bodyKey: 'operations.cards.validation.body', dotClass: 'bg-cyan-300' },
-  { track: 'SIEM', titleKey: 'operations.cards.siem.title', bodyKey: 'operations.cards.siem.body', dotClass: 'bg-emerald-300' },
-  { track: 'W7', titleKey: 'operations.cards.restore.title', bodyKey: 'operations.cards.restore.body', dotClass: 'bg-amber-300' },
-  { track: 'BYOK', titleKey: 'operations.cards.byok.title', bodyKey: 'operations.cards.byok.body', dotClass: 'bg-red-300' }
+  { track: 'PROD1', titleKey: 'operations.cards.validation.title', bodyKey: 'operations.cards.validation.body' },
+  { track: 'SIEM', titleKey: 'operations.cards.siem.title', bodyKey: 'operations.cards.siem.body' },
+  { track: 'W7', titleKey: 'operations.cards.restore.title', bodyKey: 'operations.cards.restore.body' },
+  { track: 'BYOK', titleKey: 'operations.cards.byok.title', bodyKey: 'operations.cards.byok.body' }
 ]
 
 const runbook = [
